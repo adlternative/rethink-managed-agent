@@ -51,6 +51,7 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | GET | `/v1/sessions`, `/v1/sessions/:id` | | `status` is `idle` / `running` / `terminated` |
 | DELETE | `/v1/sessions/:id` | | Cascades to events |
 | POST | `/v1/sessions/:id/archive` | | Appends `session.status_terminated` |
+| GET | `/v1/models` | | models the runner can resolve |
 | GET | `/v1/sandboxes` | | lease registry view; `DELETE /v1/sandboxes/:id` retires a ready sandbox via the reaper |
 | POST | `/v1/sessions/:id/events` | `{events:[{type:"user.message", content:[{type:"text", text}]} \| {type:"user.interrupt"}]}` | Idle session: enqueues a run. Running session: message is steered into the live loop. Interrupt: aborts the loop |
 | GET | `/v1/sessions/:id/events` | `?since=<seq>&limit=<n>` | `{data, has_more}`; `seq` is per-session and monotonic |
@@ -159,6 +160,17 @@ src/runner/    main.ts
 src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
+
+## CLI
+
+`pma-cli/` is a terminal client modelled on qca-cli: subcommands for every resource plus an Ink TUI with
+streaming, tool folding and slash commands. See [pma-cli/README.md](pma-cli/README.md).
+
+```bash
+cd pma-cli && npm install && npm run build && node bundle/pma.js --help
+```
+
+The older single-file `npm run cli` client is kept for scripts/e2e.sh.
 
 ## Sandbox providers
 

@@ -1,0 +1,26 @@
+{
+  "name": "pma-cli",
+  "version": "0.1.0",
+  "description": "Terminal client for pi-like-managed-agent (Ink TUI + subcommands), modelled on qca-cli.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "bin": { "pma": "bundle/pma.js" },
+  "files": ["bundle/", "README.md"],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "node esbuild.config.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node bundle/pma.js"
+  },
+  "dependencies": {
+    "ink": "7.1.1",
+    "react": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.32",
+    "@types/react": "19.2.8",
+    "esbuild": "0.25.5",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3"
+  }
+}
