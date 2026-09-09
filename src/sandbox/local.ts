@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../shared/env.ts";
 import { newId } from "../shared/ids.ts";
@@ -8,6 +8,7 @@ import { materialize, captureGit } from "./workspace.ts";
 import { streamProcess, mergeEnv, resolveInside } from "./exec.ts";
 
 const root = () => path.resolve(env.SANDBOX_LOCAL_ROOT);
+const dirExists = (p: string) => stat(p).then((st) => st.isDirectory(), () => false);
 
 function makeSandbox(id: SandboxId, workdir: string): Sandbox {
   return {
@@ -40,10 +41,12 @@ export class LocalProvider implements SandboxProvider {
     let id: SandboxId;
     let workdir: string;
     const reused = req.affinity ? await store.findReadyByAffinity("local", req.affinity) : null;
-    if (reused?.external_ref) {
+    if (reused?.external_ref && (await dirExists(reused.external_ref))) {
       id = reused.id;
       workdir = reused.external_ref;
     } else {
+      // A ready row whose directory is gone (different runner host, wiped volume) is stale: retire it.
+      if (reused) await store.setStatus(reused.id, "destroyed");
       id = newId("sbx");
       workdir = await materialize(req.workspaceRef, path.join(root(), id));
       await store.insert({ id, provider: "local", status: "busy", workspace_id: req.workspaceId, affinity: req.affinity ?? null, external_ref: workdir });

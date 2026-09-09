@@ -20,7 +20,7 @@ Read `DESIGN.md` for the rationale and `ARCHITECTURE.md` for the module contract
    cp .env.example .env
    docker compose up --build
    ```
-   The runner container reaches the proxy at `host.docker.internal:4141`.
+   The runner container reaches the proxy at `host.docker.internal:4141`. If something on the host already listens on 5432/6379/8080, set `PG_HOST_PORT`, `REDIS_HOST_PORT` or `API_PORT` in `.env` (they only change the published host ports).
 3. Run the end-to-end smoke test from the host. It creates an agent (`qoder/ultimate`), a local environment, and a session, asks the agent to create a file, and asserts a `bash`/`write` tool call and a `session.status_idle` event appear:
    ```sh
    scripts/e2e.sh
@@ -96,7 +96,16 @@ The session row never references a sandbox. When a tool first runs, the harness 
 2. Add the name to `SandboxProviderName` in `src/shared/types.ts` (and note it in `ARCHITECTURE.md`), then register an instance in `src/sandbox/provider.ts`.
 3. Nothing in `src/harness` changes: tools only see `ToolContext.sandbox()`, and the runner picks the provider from `environment.provider`.
 
-`src/sandbox/docker.ts` (about 90 lines) is the reference: `docker run -d ... sleep infinity`, `docker exec` for commands, files through the bind-mounted host directory.
+`src/sandbox/docker.ts` (about 100 lines) is the reference: `docker run -d ... sleep infinity`, `docker exec` for commands, files through the bind-mounted host directory.
+
+### Docker provider from inside a container (`SANDBOX_HOST_ROOT`)
+
+The docker provider talks to the host daemon through `/var/run/docker.sock`, so sandbox containers are *siblings* of the runner, not children. Bind mounts in `docker run -v host:/workspace` are resolved by the daemon on the host, which means the workspace directory must be given as a **host** path. When the runner is itself a container, the directory it materializes under `SANDBOX_LOCAL_ROOT` (`/data/sandboxes`) is not visible under that name on the host, so:
+
+- `docker-compose.yml` bind-mounts a host directory (`./data/sandboxes` by default, overridable with `SANDBOX_HOST_ROOT`) at `/data/sandboxes` instead of using a named volume, and
+- passes `SANDBOX_HOST_ROOT=$PWD/data/sandboxes` to the runner; `toHostPath()` in `docker.ts` rewrites `/data/sandboxes/<sbx>` to `<SANDBOX_HOST_ROOT>/<sbx>` for the `-v` flag only. Reads/writes from the runner keep using the container path.
+
+Running the runner directly on the host, leave `SANDBOX_HOST_ROOT` unset: paths are used verbatim. A `ready` lease whose container or directory has disappeared (docker restart, wiped volume, a different runner host) is detected on `acquire` and retired; the workspace is rebuilt from its ref into a fresh sandbox.
 
 ## Local development without docker
 
@@ -122,11 +131,14 @@ Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sand
 | `DATABASE_URL` | `postgres://pi:pi@localhost:5432/pi` | Postgres (PolarDB-PG is wire compatible) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue, pub/sub, steering lists |
 | `QODER_BASE_URL` | `http://127.0.0.1:4141/v1` | OpenAI-compatible proxy for the `qoder` provider |
+| `QODER_API_KEY` | `qoder` | Bearer token sent to the proxy; the proxy ignores it but pi-ai refuses to send requests without one |
 | `ANTHROPIC_API_KEY` | | Enables the `anthropic` provider |
 | `SANDBOX_DEFAULT_PROVIDER` | `local` | Fallback when an environment has no provider |
-| `SANDBOX_LOCAL_ROOT` | `./data/sandboxes` | Host directory for sandbox workspaces |
+| `SANDBOX_LOCAL_ROOT` | `./data/sandboxes` | Directory (as seen by the runner) for sandbox workspaces |
+| `SANDBOX_HOST_ROOT` | | Same directory as seen by the docker host; required for the `docker` provider when the runner is a container (compose sets it) |
 | `SANDBOX_IDLE_TTL_MS` | `600000` | Reaper threshold for idle sandboxes |
-| `API_PORT` | `8080` | |
+| `API_PORT` | `8080` | Also the host port published by compose |
+| `PG_HOST_PORT` / `REDIS_HOST_PORT` | `5432` / `6379` | Host ports published by compose only |
 | `MAX_TURNS` | `50` | Tool-using turns per run |
 
 ## Layout

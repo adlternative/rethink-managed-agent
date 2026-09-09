@@ -84,6 +84,14 @@ function printEvent(type: string, data: any): void {
 async function main(): Promise<void> {
   const { positional, flags } = parse(process.argv.slice(2));
   const [cmd, sub, ...rest] = positional;
+  if (cmd === "events") {
+    if (!sub) throw new Error("usage: events <session>");
+    return print(await api("GET", `/v1/sessions/${sub}/events?limit=1000`));
+  }
+  if (cmd === "stream") {
+    if (!sub) throw new Error("usage: stream <session>");
+    return stream(sub, 0, printEvent);
+  }
   switch (`${cmd} ${sub ?? ""}`.trim()) {
     case "agent create":
       return print(await api("POST", "/v1/agents", {
@@ -104,12 +112,6 @@ async function main(): Promise<void> {
         environment_id: need(flags, "env"),
         workspace_id: typeof flags["workspace-id"] === "string" ? flags["workspace-id"] : undefined,
       }));
-    case "events":
-      if (!sub) throw new Error("usage: events <session>");
-      return print(await api("GET", `/v1/sessions/${sub}/events?limit=1000`));
-    case "stream":
-      if (!sub) throw new Error("usage: stream <session>");
-      return stream(sub, 0, printEvent);
   }
   if (cmd === "send") {
     const text = rest.join(" ");

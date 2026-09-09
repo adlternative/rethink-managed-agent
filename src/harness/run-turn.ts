@@ -130,8 +130,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<v
           const m = ev.message;
           if (m.role === "assistant") {
             await emit({ type: "agent.message", content: toContentBlocks(m), pi: m });
-            if (m.stopReason === "aborted") stopReason = "interrupted";
-            if (m.stopReason === "error") {
+            // pi-ai reports "error" (not "aborted") when the signal was already aborted before the
+            // request started — e.g. an interrupt that landed during the previous tool call.
+            if (m.stopReason === "aborted" || (m.stopReason === "error" && abort.signal.aborted)) stopReason = "interrupted";
+            else if (m.stopReason === "error") {
               stopReason = "error";
               await emit({ type: "session.error", error: { type: "model_error", message: m.errorMessage ?? "unknown model error" } });
             }
@@ -145,9 +147,13 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<v
 
     await runAgentLoopContinue(context, config, sink, abort.signal, deps.models.streamSimple.bind(deps.models));
   } catch (err) {
-    stopReason = "error";
-    const e = err instanceof Error ? err : new Error(String(err));
-    await emit({ type: "session.error", error: { type: e.name, message: e.message } });
+    if (abort.signal.aborted) {
+      stopReason = "interrupted";
+    } else {
+      stopReason = "error";
+      const e = err instanceof Error ? err : new Error(String(err));
+      await emit({ type: "session.error", error: { type: e.name, message: e.message } });
+    }
   } finally {
     await unsubscribe();
     const lease = held.lease;

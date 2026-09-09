@@ -30,7 +30,9 @@ export function createModelRegistry(): Models {
       id: "qoder",
       name: "Qoder",
       baseUrl: env.QODER_BASE_URL,
-      auth: { apiKey: { name: "Qoder", resolve: async () => ({ auth: {} }) } },
+      // Keyless proxy: pi-ai's openai-completions client still requires a non-empty apiKey
+      // (it throws "No API key for provider" otherwise), so hand it a placeholder.
+      auth: { apiKey: { name: "Qoder", resolve: async () => ({ auth: { apiKey: env.QODER_API_KEY }, source: "QODER_API_KEY" }) } },
       models: qoderModels(),
       api: openAICompletionsApi(),
     }),
