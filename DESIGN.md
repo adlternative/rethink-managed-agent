@@ -1,0 +1,250 @@
+# pi-like Managed Agent：薄 Harness + 可插拔 Sandbox 设计
+
+## 0. 一句话
+
+**Harness 只做一件事：跑 agent loop 并把一切写进 append-only 事件日志。**
+Sandbox 是可插拔的"计算租约"，不是 session 的一部分；session 只持有"工作区引用"，需要执行时才去租一个 sandbox。
+
+## 1. 现有产品为什么"重"
+
+以 Claude Managed Agent / Qoder Cloud Agent 这类产品为参照，重的根源不在功能多，而在几个耦合：
+
+| 耦合 | 后果 |
+|---|---|
+| session ≡ 容器生命周期 | session 挂起就得快照/冻结整个容器；恢复要等容器起来；一个 session 只能在一个容器里跑 |
+| 工具栈内置在平台 | 加一个工具要改平台；用户无法用自己的 shell/自己的 MCP |
+| 状态散落在平台 DB + 容器磁盘 | "恢复"要同时恢复两处，语义模糊；无法把 session 搬到别的 sandbox |
+| 控制面承担 orchestration | 计划模式、子 agent、审批流全在平台层，每加一个能力平台就厚一层 |
+
+pi（Mario Zechner 的 pi coding agent）的反面做法：loop 极小、工具是普通函数、session 是可重放的 JSONL 树、所有"高级能力"都是 extension 而不是 core。本设计把这套思想搬到"托管/云端"形态，并补上它没有的一层：sandbox 的解耦。
+
+## 2. 设计原则
+
+1. **Harness 极薄**：core 只有 loop、事件日志、工具分发、provider 抽象。目标 < 1500 行。
+2. **一切皆事件**：session 状态 = 事件日志的折叠结果。没有第二份真相。
+3. **Sandbox 是租约（lease），不是所有物**：session 不拥有 sandbox，只在需要时 acquire，用完 release。
+4. **工作区（workspace）才是持久的**：文件状态用 git commit + diff 或 volume snapshot 表达，sandbox 只是加载它的临时算力。
+5. **工具对 provider 无感**：工具只拿到 `ctx.sandbox` 这个接口，不知道背后是本机、docker 还是 firecracker。
+6. **扩展即模块**：工具、系统提示片段、事件 hook、sandbox provider 全是可以 import 的普通模块，没有插件注册中心。
+
+## 3. 三层结构
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Control Plane（可选，很薄）                                │
+│ HTTP/WS: createSession / send / stream / list             │
+└───────────────┬──────────────────────────────────────────┘
+                │
+┌───────────────▼──────────────────────────────────────────┐
+│ Harness Core                                              │
+│  AgentLoop  ─ Model provider ─ ToolRegistry ─ EventLog     │
+│      │                                                    │
+│      │ ctx.sandbox (接口)                                  │
+└──────┼───────────────────────────────────────────────────┘
+       │ SandboxLease (acquire / release)
+┌──────▼───────────────────────────────────────────────────┐
+│ Sandbox Layer（可插拔）                                    │
+│  Provider: local | docker | firecracker | e2b | k8s | ssh  │
+│  WorkspaceMaterializer: git | volume-snapshot | rsync      │
+└──────────────────────────────────────────────────────────┘
+```
+
+三个独立生命周期：
+
+| 对象 | 生命周期 | 持久化 |
+|---|---|---|
+| Session | 用户对话的生命周期，可挂起数天 | 事件日志（JSONL） |
+| Workspace | 代码/文件状态，可跨 session 共享 | git ref + diff，或 snapshot id |
+| Sandbox | 分钟级到小时级，随时可销毁 | 无（可丢） |
+
+## 4. 核心接口
+
+### 4.1 Sandbox（provider 必须实现的最小面）
+
+```ts
+interface Sandbox {
+  id: string;
+  exec(cmd: string, opts?: { cwd?: string; env?: Record<string,string>; timeoutMs?: number; signal?: AbortSignal })
+    : AsyncIterable<ExecChunk>;              // 流式 stdout/stderr + exit
+  readFile(path: string): Promise<Uint8Array>;
+  writeFile(path: string, data: Uint8Array): Promise<void>;
+  // 可选能力，用 capability 声明，工具按需降级
+  capabilities: { ports?: boolean; snapshot?: boolean; gpu?: boolean };
+  exposePort?(port: number): Promise<URL>;
+  snapshot?(): Promise<SnapshotRef>;
+}
+
+interface SandboxProvider {
+  name: string;
+  acquire(req: SandboxRequest): Promise<SandboxLease>;
+}
+
+interface SandboxRequest {
+  workspace: WorkspaceRef;      // 要在里面加载什么
+  image?: string;
+  resources?: { cpu?: number; memMb?: number };
+  secrets?: Record<string,string>;   // 租约时注入，不落日志
+  affinity?: string;            // 提示 provider 复用某个已有 sandbox（同 workspace 的多个 session）
+}
+
+interface SandboxLease {
+  sandbox: Sandbox;
+  release(): Promise<void>;     // 归还；provider 决定销毁还是回池
+  ttlMs: number;                // 空闲多久自动回收
+}
+```
+
+`exec/readFile/writeFile` 三个方法就够跑 90% 的工具。别的都放 capabilities。
+
+### 4.2 Workspace（持久层，session 与 sandbox 之间的桥）
+
+```ts
+type WorkspaceRef =
+  | { kind: "git"; remote: string; base: string; patch?: BlobRef }   // commit + 未提交 diff
+  | { kind: "snapshot"; provider: string; id: string }               // volume / overlay 快照
+  | { kind: "local"; path: string };                                 // 本机开发
+
+interface WorkspaceMaterializer {
+  materialize(ref: WorkspaceRef, sb: Sandbox): Promise<void>;  // 把 workspace 放进 sandbox
+  capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef>; // 从 sandbox 提取新状态
+}
+```
+
+session 挂起时：`capture` → 新 `WorkspaceRef` 写进事件日志 → `lease.release()`。
+恢复时：读日志得到最新 `WorkspaceRef` → `acquire` → `materialize`。整个 sandbox 可以是全新的，甚至换 provider。
+
+### 4.3 Session 与事件日志
+
+```ts
+type Event =
+  | { t: "user"; text: string }
+  | { t: "assistant"; content: ContentBlock[] }
+  | { t: "tool_call"; id: string; name: string; input: unknown }
+  | { t: "tool_result"; id: string; output: unknown; truncated?: boolean }
+  | { t: "workspace"; ref: WorkspaceRef }          // 工作区状态变更点
+  | { t: "sandbox"; action: "acquired" | "released"; provider: string; sandboxId: string }
+  | { t: "meta"; ... };                             // 模型切换、system prompt 片段等
+
+interface Session {
+  id: string;
+  log: EventLog;                    // append(ev) / replay() / fork(atEventId)
+  workspace(): WorkspaceRef;        // 折叠日志得到最新 ref
+}
+```
+
+关键：**session 里没有 sandbox 字段**。sandbox 只作为事件出现，用来审计和调试。
+和 pi 一样，日志是树：`fork(atEventId)` 得到分支 session，共享前缀。两个分支可以各租各的 sandbox，也可以用 `affinity` 共享同一个。
+
+### 4.4 Agent loop（整个 harness 的核心，示意）
+
+```ts
+async function run(session: Session, model: Model, tools: ToolRegistry, provider: SandboxProvider) {
+  let lease: SandboxLease | null = null;
+  const sandbox = async () => (lease ??= await acquireAndLog(session, provider)).sandbox;
+
+  while (true) {
+    const msgs = session.log.replay();                 // 折叠成模型上下文
+    const resp = await model.stream(msgs, tools.schemas());
+    session.log.append({ t: "assistant", content: resp.content });
+    const calls = resp.toolCalls();
+    if (calls.length === 0) break;
+
+    for (const c of calls) {
+      session.log.append({ t: "tool_call", ...c });
+      const out = await tools.get(c.name).run(c.input, { sandbox, session, signal });
+      session.log.append({ t: "tool_result", id: c.id, output: out });
+    }
+  }
+  if (lease) { await captureAndLog(session, lease.sandbox); await lease.release(); }
+}
+```
+
+注意 `sandbox` 是懒获取的：纯对话的 turn 根本不租 sandbox。
+
+### 4.5 Tool
+
+```ts
+interface Tool<I> {
+  name: string;
+  schema: JSONSchema;
+  run(input: I, ctx: ToolContext): Promise<ToolOutput>;
+}
+interface ToolContext {
+  sandbox(): Promise<Sandbox>;   // 懒
+  session: Session;
+  signal: AbortSignal;
+}
+```
+
+内置工具只有 `bash`、`read`、`write`、`edit` 四个，全部通过 `ctx.sandbox()` 干活。
+"子 agent""计划模式""审批"都不进 core：子 agent = 一个工具，内部 `fork` session 再调 `run`。
+
+## 5. Sandbox 与 Session 的多对多
+
+| 场景 | 做法 |
+|---|---|
+| 一个 session 跨多个 sandbox | 挂起/恢复自然发生；也可显式 `release` 再用不同 image/provider `acquire` |
+| 多个 session 共用一个 sandbox | 同 workspace 的 review-session 与 fix-session 用相同 `affinity`；provider 返回同一实例，各 session 用自己的 cwd 或 git worktree 隔离 |
+| 热池 | provider 维护预热实例，`acquire` 只做 `materialize`，冷启动从分钟级降到秒级 |
+| 换 provider | 事件日志不变，只换 `provider` 参数；本机调试用 `local`，上云用 `firecracker` |
+| 无 sandbox | 纯问答 / 只读 workspace（通过 git remote 直接读）都不租 |
+
+并发写同一 sandbox 的保护不放在 core：由 materializer 用 worktree 隔离，或 provider 拒绝重复 `affinity`。
+
+## 6. Control plane 保持薄
+
+```
+POST /sessions                { workspace, model }         → { id }
+POST /sessions/:id/messages   { text }                     → 202
+GET  /sessions/:id/events     (SSE / WS, 支持 since=)
+POST /sessions/:id/fork       { atEventId }
+POST /sessions/:id/suspend    → capture + release
+```
+
+没有 sandbox 相关 API。想看 sandbox 就看事件流里的 `sandbox` 事件。
+控制面本身无状态，session 日志放对象存储或 SQLite，多实例横向扩就是复制 loop 进程。
+
+## 7. 扩展点（全是普通模块）
+
+```ts
+export default {
+  tools: [myTool],
+  systemPrompt: (ctx) => "...",           // 片段拼接，不替换
+  onEvent: (ev, session) => {},           // 审计 / 遥测 / 审批拦截
+  providers: { myCloud: myProvider },
+  materializers: { git: gitMaterializer },
+} satisfies Extension;
+```
+
+审批流的实现方式：`onEvent` 在 `tool_call` 时抛 `NeedsApproval`，loop 把事件写成 `pending` 并挂起 session；用户批准后 append `approved` 事件再继续。core 只需要知道"挂起/继续"，不知道什么是审批。
+
+## 8. 与厚 harness 的对比
+
+| | Managed Agent 式 | 本设计 |
+|---|---|---|
+| session 恢复 | 恢复容器 | 重放日志 + 重新 materialize |
+| 换运行环境 | 不可 | 换 provider 参数 |
+| 增加工具 | 改平台 | 写一个函数 |
+| 挂起成本 | 容器占资源或快照 | 一个 git diff |
+| 多 session 同工作区 | 通常不支持 | affinity + worktree |
+| core 规模 | 平台级 | ~1500 行 |
+
+## 9. 取舍与已知代价
+
+- **冷启动**：不绑定容器意味着每次恢复要 materialize。用热池和 snapshot provider 缓解，但比"容器一直活着"慢。
+- **非 git 状态**：安装的依赖、跑着的服务、数据库不在 git 里。靠 `snapshot` capability 或在 materializer 里跑 `setup` 脚本（写在 workspace 的配置文件里，例如 `.agent/setup.sh`）。
+- **secrets**：只在 `acquire` 时注入，绝不进事件日志；日志要脱敏 tool_result。
+- **共享 sandbox 的并发**：core 不做锁，交给 provider/materializer，需要明确文档化。
+- **大输出**：tool_result 需要截断并把全文存 blob，日志只留引用，否则重放成本失控。
+
+## 10. MVP 路线
+
+1. `core/`：EventLog(JSONL)、AgentLoop、ToolRegistry、4 个内置工具。
+2. `sandbox/local`：直接跑子进程；`materializer/git`。
+3. CLI：本机跑通，session 可挂起、fork、恢复。
+4. `sandbox/docker`：验证"同一日志换 provider"。
+5. 薄 control plane（HTTP + SSE）。
+6. 热池 + `sandbox/firecracker` 或 e2b provider。
+7. 扩展：子 agent 工具、审批 hook。
+
+每一步都应保持 core 不长。如果某个功能让 core 变厚，先问它能不能是 extension。

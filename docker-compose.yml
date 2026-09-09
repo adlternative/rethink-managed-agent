@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16-alpine   # PolarDB-PG is wire compatible; swap image/DATABASE_URL to use it
+    environment: { POSTGRES_USER: pi, POSTGRES_PASSWORD: pi, POSTGRES_DB: pi }
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U pi"], interval: 2s, retries: 30 }
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 2s, retries: 30 }
+  api:
+    build: .
+    command: ["npm", "run", "api"]
+    environment:
+      DATABASE_URL: postgres://pi:pi@postgres:5432/pi
+      REDIS_URL: redis://redis:6379
+      API_PORT: "8080"
+    ports: ["8080:8080"]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+  runner:
+    build: .
+    command: ["npm", "run", "runner"]
+    environment:
+      DATABASE_URL: postgres://pi:pi@postgres:5432/pi
+      REDIS_URL: redis://redis:6379
+      QODER_BASE_URL: http://host.docker.internal:4141/v1
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SANDBOX_DEFAULT_PROVIDER: ${SANDBOX_DEFAULT_PROVIDER:-local}
+      SANDBOX_LOCAL_ROOT: /data/sandboxes
+      SANDBOX_IDLE_TTL_MS: "600000"
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - sandboxes:/data/sandboxes
+      - /var/run/docker.sock:/var/run/docker.sock   # docker provider (sibling containers)
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+volumes: { pgdata: {}, sandboxes: {} }
