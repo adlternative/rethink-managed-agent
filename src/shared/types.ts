@@ -96,18 +96,36 @@ export interface SandboxLease {
   sandbox: Sandbox;
   release(): Promise<void>;
 }
+/** A live sandbox as seen by its provider. `externalRef` is what `connect`/`destroy` need later (dir, container, remote id). */
+export interface SandboxHandle {
+  sandbox: Sandbox;
+  externalRef: string;
+}
+/**
+ * Mechanism layer: how to start, re-attach to, destroy and move files for ONE kind of sandbox.
+ * Policy (lease table, affinity reuse, conflict rejection, reaping) lives in SandboxManager.
+ */
 export interface SandboxProvider {
   name: SandboxProviderName;
+  /** Start a fresh sandbox with this id and materialize `req.workspaceRef` into it. */
+  create(id: SandboxId, req: SandboxRequest): Promise<SandboxHandle>;
+  /** Re-attach to a sandbox created earlier (possibly by another runner); null when it is gone. */
+  connect(id: SandboxId, externalRef: string): Promise<SandboxHandle | null>;
+  /** Tear down; must tolerate an already-gone sandbox. */
+  destroy(id: SandboxId, externalRef: string | null): Promise<void>;
+  /** Capture the current workspace state from a live sandbox. */
+  capture(handle: SandboxHandle, prev: WorkspaceRef): Promise<WorkspaceRef>;
+}
+/** What the harness needs from the sandbox layer (implemented by SandboxManager.bind). */
+export interface SandboxService {
   acquire(req: SandboxRequest): Promise<SandboxLease>;
-  /** capture current workspace state from a live sandbox */
-  capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef>;
-  /** destroy sandboxes idle longer than ttl; returns ids destroyed */
-  reap(idleTtlMs: number): Promise<SandboxId[]>;
+  capture(sandbox: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef>;
 }
 export interface SandboxRow {
   id: SandboxId;
   provider: SandboxProviderName;
   status: "ready" | "busy" | "destroyed";
+  /** `busy` rows carry the runner-side handle only in memory; the row is the durable record. */
   workspace_id: WorkspaceId | null;
   affinity: string | null;
   external_ref: string | null; // container id / host dir

@@ -7,8 +7,9 @@ All types live in `src/shared/types.ts` — code against them, do not redefine t
 src/shared/     types.ts (contract), ids.ts (newId("sess")), env.ts (config from process.env)
 src/infra/      db.ts (pg pool + typed repos), events.ts (append/list/fold), pubsub.ts (redis pub/sub for
                 StreamDelta), queue.ts (Redis Streams job queue for RunJob), migrate.ts (applies sql/schema.sql)
-src/sandbox/    provider.ts (registry: getProvider(name)), local.ts, docker.ts, e2b.ts (remote materialize/capture), workspace.ts (materialize/capture
-                helpers shared by providers), lease-store.ts (sandboxes table)
+src/sandbox/    manager.ts (SandboxManager: policy — leases, affinity reuse, conflict rejection, reap, list/get/destroy),
+                provider.ts (registry + process-wide manager), local.ts / docker.ts / e2b.ts (mechanism: create/connect/
+                destroy/capture only), workspace.ts (materialize/capture helpers), lease-store.ts (sandboxes table)
 src/harness/    models.ts (pi-ai Models with qoder + anthropic providers), tools.ts (bash/read/write/edit
                 AgentTools over ctx.sandbox()), fold.ts (events -> pi AgentMessage[]), run-turn.ts (one
                 session run: fold, runAgentLoop, persist events, steering/interrupt, capture+release)
@@ -33,6 +34,7 @@ src/cli/        main.ts (thin client: create agent/env/session, send, stream)
 ## Invariants
 - events table is append-only; session state = fold(events). No "messages" column anywhere.
 - session row never references a sandbox. Sandboxes appear only as events + the sandboxes table (lease registry).
-- Tools never import a provider; they use `ToolContext.sandbox()`.
+- Tools never import a provider; they use `ToolContext.sandbox()`. The harness only sees `SandboxService` (acquire/capture) from `SandboxManager.bind(name)`.
+- Providers never touch the sandboxes table; only SandboxManager writes leases.
 - Secrets never enter events.
 - Keep core small: harness/ + sandbox/ interfaces should stay < 1500 LOC total.

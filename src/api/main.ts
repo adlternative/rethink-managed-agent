@@ -6,6 +6,7 @@ import { ApiError, errorResponse } from "./errors.ts";
 import { agents } from "./routes/agents.ts";
 import { environments } from "./routes/environments.ts";
 import { sessions } from "./routes/sessions.ts";
+import { sandboxes } from "./routes/sandboxes.ts";
 
 export const app = new Hono()
   .onError((err, c) => errorResponse(c, err))
@@ -13,7 +14,8 @@ export const app = new Hono()
   .get("/healthz", (c) => c.json({ ok: true }))
   .route("/v1/agents", agents)
   .route("/v1/environments", environments)
-  .route("/v1/sessions", sessions);
+  .route("/v1/sessions", sessions)
+  .route("/v1/sandboxes", sandboxes);
 
 await migrate();
 serve({ fetch: app.fetch, port: env.API_PORT }, (info) => console.log(`api listening on :${info.port}`));

@@ -51,6 +51,7 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | GET | `/v1/sessions`, `/v1/sessions/:id` | | `status` is `idle` / `running` / `terminated` |
 | DELETE | `/v1/sessions/:id` | | Cascades to events |
 | POST | `/v1/sessions/:id/archive` | | Appends `session.status_terminated` |
+| GET | `/v1/sandboxes` | | lease registry view; `DELETE /v1/sandboxes/:id` retires a ready sandbox via the reaper |
 | POST | `/v1/sessions/:id/events` | `{events:[{type:"user.message", content:[{type:"text", text}]} \| {type:"user.interrupt"}]}` | Idle session: enqueues a run. Running session: message is steered into the live loop. Interrupt: aborts the loop |
 | GET | `/v1/sessions/:id/events` | `?since=<seq>&limit=<n>` | `{data, has_more}`; `seq` is per-session and monotonic |
 | GET | `/v1/sessions/:id/events/stream` | `?since=<seq>` | SSE. Replays from the DB, then live. `event:` is the event type; extra `agent.message_delta` frames carry streamed text and are not persisted. Closes on `session.status_terminated` |
@@ -167,7 +168,9 @@ sql/schema.sql, scripts/e2e.sh, test/
 | `docker` | sibling container via docker socket | bind mount | default `--network none`, caps dropped, resource limits |
 | `e2b` | e2b cloud sandbox (https://e2b.dev) | materialized inside the sandbox over the SDK; captured back as git patch or tarball | needs `E2B_API_KEY`; `image` is the e2b template name |
 
-All three implement the same `SandboxProvider` interface (`acquire` / `capture` / `reap`) and share the lease table, affinity reuse and reaper. Adding a provider means one file under `src/sandbox/` plus a registry entry.
+All three implement the same mechanism-only `SandboxProvider` interface (`create` / `connect` / `destroy` / `capture`). Policy lives in one place, `SandboxManager` (`src/sandbox/manager.ts`): the lease table, affinity reuse, rejecting a second live lease on the same workspace, reaping, and list/get/destroy. Adding a provider means one file under `src/sandbox/` plus a registry entry; it never touches the lease table.
+
+Sandboxes are inspectable over the API: `GET /v1/sandboxes`, `GET /v1/sandboxes/:id`, `DELETE /v1/sandboxes/:id` (202: a ready sandbox is marked and a runner's reaper destroys it on its next pass; 409 if it is leased by a running session).
 
 ## Architecture diagram
 

@@ -5,7 +5,7 @@ import type {
   ContentBlock,
   EnvironmentResource,
   SandboxLease,
-  SandboxProvider,
+  SandboxService,
   SessionEvent,
   SessionEventPayload,
   SessionId,
@@ -31,7 +31,7 @@ export interface SteerMessage {
 /** Everything runSession needs from the outside world; no DB/Redis code lives here. */
 export interface RunDeps {
   models: Models;
-  provider: SandboxProvider;
+  sandboxes: SandboxService;
   /** Append events (seq assigned by the store). Must NOT publish; runSession publishes each appended event. */
   appendEvents(sessionId: SessionId, payloads: SessionEventPayload[]): Promise<SessionEvent[]>;
   /** The whole log, untruncated. */
@@ -117,7 +117,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   const ctx: ToolContext = {
     signal: abort.signal,
     sandbox: async () => {
-      held.acquiring ??= deps.provider
+      held.acquiring ??= deps.sandboxes
         .acquire({ workspaceId: workspace.id, workspaceRef: workspace.ref, image: environment.image, affinity: workspace.id })
         .then(
           async (l) => {
@@ -225,7 +225,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     const lease = held.lease ?? (await held.acquiring?.catch(() => null)) ?? null;
     if (lease) {
       try {
-        const ref = await deps.provider.capture(lease.sandbox, workspace.ref);
+        const ref = await deps.sandboxes.capture(lease.sandbox, workspace.ref);
         await emit({ type: "workspace.captured", ref: redactRef(ref) });
         if (!(await deps.updateWorkspaceRef(workspace.id, ref, workspace.ref))) {
           await emit({ type: "session.error", error: { type: "capture_conflict", message: "workspace ref changed during the run (another session captured first); this run's capture was not saved" } });

@@ -11,13 +11,15 @@ vi.mock("../src/sandbox/lease-store.ts", () => ({
   setStatus: async (id: string, status: SandboxRow["status"]) => { rows.get(id)!.status = status; },
   setExternalRef: async (id: string, ref: string) => { rows.get(id)!.external_ref = ref; },
   touch: async () => {},
-  findReadyByAffinity: async (_p: string, affinity: string) => {
-    const r = [...rows.values()].find((r) => r.affinity === affinity && r.status === "ready");
+  get: async (id: string) => rows.get(id) ?? null,
+  list: async () => [...rows.values()].filter((r) => r.status !== "destroyed"),
+  findReadyByAffinity: async (p: string, affinity: string) => {
+    const r = [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && r.status === "ready");
     if (r) r.status = "busy";
     return r ?? null;
   },
-  findBusyByAffinity: async (_p: string, affinity: string) => [...rows.values()].find((r) => r.affinity === affinity && r.status === "busy") ?? null,
-  listIdle: async () => [...rows.values()].filter((r) => r.status === "ready"),
+  findBusyByAffinity: async (p: string, affinity: string) => [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && r.status === "busy") ?? null,
+  listIdle: async (p: string) => [...rows.values()].filter((r) => r.provider === p && r.status === "ready"),
 }));
 
 // ---- fake e2b SDK: a tiny in-memory "remote" filesystem + shell that records commands ----
@@ -85,12 +87,14 @@ class FakeSandbox {
 }
 vi.mock("e2b", () => ({ Sandbox: FakeSandbox }));
 
-let E2bProvider: typeof import("../src/sandbox/e2b.ts").E2bProvider;
+let manager: import("../src/sandbox/manager.ts").SandboxManager;
 beforeAll(async () => {
   process.env.E2B_API_KEY = "test-key";
   process.env.WORKSPACE_ROOT = await mkdtemp(path.join(tmpdir(), "ws-"));
   process.env.DATABASE_URL = "postgres://unused";
-  ({ E2bProvider } = await import("../src/sandbox/e2b.ts"));
+  const { E2bProvider } = await import("../src/sandbox/e2b.ts");
+  const { SandboxManager } = await import("../src/sandbox/manager.ts");
+  manager = new SandboxManager({ e2b: new E2bProvider() } as never);
 });
 
 async function collect(it: AsyncIterable<{ type: string; data?: string; code?: number }>) {
@@ -101,8 +105,7 @@ async function collect(it: AsyncIterable<{ type: string; data?: string; code?: n
 
 describe("E2bProvider", () => {
   it("creates a remote sandbox, materializes an empty workspace, execs, reads/writes, captures and reaps", async () => {
-    const p = new E2bProvider();
-    const lease = await p.acquire({ workspaceId: "ws_1", workspaceRef: { kind: "empty" }, affinity: "ws_1" });
+    const lease = await manager.acquire("e2b", { workspaceId: "ws_1", workspaceRef: { kind: "empty" }, affinity: "ws_1" });
     const sb = lease.sandbox;
     expect(sb.provider).toBe("e2b");
     const fake = [...fakes.values()][0];
@@ -117,7 +120,7 @@ describe("E2bProvider", () => {
     expect(fake.files.has("/home/user/workspace/a/b.txt")).toBe(true);
     await expect(sb.readFile("../../etc/passwd")).rejects.toThrow(/escapes/);
 
-    const ref = await p.capture(sb, { kind: "empty" });
+    const ref = await manager.capture(sb, { kind: "empty" });
     expect(ref.kind).toBe("dir");
     expect(await readFile(path.join((ref as { path: string }).path, "hello.txt"), "utf8")).toBe("hi");
 
@@ -126,33 +129,31 @@ describe("E2bProvider", () => {
     expect(rows.get(sb.id)!.external_ref).toBe(fake.id);
 
     // affinity reuse reconnects to the same remote sandbox
-    const lease2 = await p.acquire({ workspaceId: "ws_1", workspaceRef: ref, affinity: "ws_1" });
+    const lease2 = await manager.acquire("e2b", { workspaceId: "ws_1", workspaceRef: ref, affinity: "ws_1" });
     expect(lease2.sandbox.id).toBe(sb.id);
     expect(fakes.size).toBe(1);
     await lease2.release();
 
     // reap kills remotely and retires the row
-    expect(await p.reap(0)).toEqual([sb.id]);
+    expect((await manager.reap(0)).e2b).toEqual([sb.id]);
     expect(killedIds).toEqual([fake.id]);
     expect(rows.get(sb.id)!.status).toBe("destroyed");
   });
 
   it("materializes git refs with quoted args and captures a patch", async () => {
-    const p = new E2bProvider();
-    const lease = await p.acquire({ workspaceId: "ws_2", workspaceRef: { kind: "git", remote: "https://x/y.git", base: "abc", patch: "P" }, affinity: "ws_2" });
+    const lease = await manager.acquire("e2b", { workspaceId: "ws_2", workspaceRef: { kind: "git", remote: "https://x/y.git", base: "abc", patch: "P" }, affinity: "ws_2" });
     const fake = fakes.get(rows.get(lease.sandbox.id)!.external_ref!)!;
     expect(fake.cmds.some((c) => c.includes("git clone --quiet -- 'https://x/y.git'"))).toBe(true);
     expect(fake.cmds.some((c) => c.includes("git checkout --quiet --detach 'abc'"))).toBe(true);
     expect(fake.cmds.some((c) => c.includes("git apply"))).toBe(true);
-    const ref = await p.capture(lease.sandbox, { kind: "git", remote: "https://x/y.git", base: "old" });
+    const ref = await manager.capture(lease.sandbox, { kind: "git", remote: "https://x/y.git", base: "old" });
     expect(ref).toEqual({ kind: "git", remote: "https://x/y.git", base: "deadbeef", patch: "diff --git a/x b/x\n" });
     await lease.release();
   });
 
   it("rejects hostile git args, local workspaces and bad templates", async () => {
-    const p = new E2bProvider();
-    await expect(p.acquire({ workspaceId: "w", workspaceRef: { kind: "git", remote: "--upload-pack=evil", base: "x" } })).rejects.toThrow(/invalid git remote/);
-    await expect(p.acquire({ workspaceId: "w", workspaceRef: { kind: "local", path: "/" } })).rejects.toThrow(/cloud sandbox/);
-    await expect(p.acquire({ workspaceId: "w", workspaceRef: { kind: "empty" }, image: "-bad" })).rejects.toThrow(/invalid template/);
+    await expect(manager.acquire("e2b", { workspaceId: "w", workspaceRef: { kind: "git", remote: "--upload-pack=evil", base: "x" } })).rejects.toThrow(/invalid git remote/);
+    await expect(manager.acquire("e2b", { workspaceId: "w", workspaceRef: { kind: "local", path: "/" } })).rejects.toThrow(/cloud sandbox/);
+    await expect(manager.acquire("e2b", { workspaceId: "w", workspaceRef: { kind: "empty" }, image: "-bad" })).rejects.toThrow(/invalid template/);
   });
 });

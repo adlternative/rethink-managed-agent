@@ -3,9 +3,7 @@ import { promisify } from "node:util";
 import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../shared/env.ts";
-import { newId } from "../shared/ids.ts";
-import type { ExecChunk, ExecOptions, Sandbox, SandboxId, SandboxLease, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
-import * as store from "./lease-store.ts";
+import type { ExecChunk, ExecOptions, Sandbox, SandboxHandle, SandboxId, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
 import { materialize, captureGit, captureDir } from "./workspace.ts";
 import { streamProcess, sandboxEnv } from "./exec.ts";
 
@@ -94,68 +92,42 @@ function makeSandbox(id: SandboxId, container: string, shell: "bash" | "sh"): Sa
   };
 }
 
+/** externalRef = the host-side workspace dir; the container is named after the sandbox id. */
 export class DockerProvider implements SandboxProvider {
   name = "docker" as const;
 
-  async acquire(req: SandboxRequest): Promise<SandboxLease> {
-    let id: SandboxId;
-    const reused = req.affinity ? await store.findReadyByAffinity("docker", req.affinity) : null;
-    if (reused?.external_ref && (await isAlive(reused.id, reused.external_ref))) {
-      id = reused.id;
-    } else {
-      // Stale row (container gone / dir gone, e.g. docker restart or another runner host): retire it.
-      if (reused) {
-        await docker("docker", ["rm", "-f", reused.id]).catch(() => {});
-        await store.setStatus(reused.id, "destroyed");
-      }
-      if (req.affinity && (await store.findBusyByAffinity("docker", req.affinity))) {
-        throw new Error(`workspace ${req.affinity} is in use by another running session; retry when it is idle`);
-      }
-      const image = req.image || DEFAULT_IMAGE;
-      if (!IMAGE_RE.test(image)) throw new Error(`docker provider: invalid image reference ${JSON.stringify(image)}`);
-      id = newId("sbx");
-      const hostDir = path.join(root(), id);
-      // Row first (status busy) so a crash between here and `docker run` leaves a record the reaper can retire.
-      await store.insert({ id, provider: "docker", status: "busy", workspace_id: req.workspaceId, affinity: req.affinity ?? null, external_ref: hostDir });
-      try {
-        await materialize(req.workspaceRef, hostDir);
-        const args = [
-          "run", "-d", "--name", id, "-w", WORKDIR, "-v", `${toHostPath(hostDir)}:${WORKDIR}`,
-          "--network", env.SANDBOX_DOCKER_NETWORK, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-          "--pids-limit", env.SANDBOX_DOCKER_PIDS, "--memory", env.SANDBOX_DOCKER_MEMORY, "--cpus", env.SANDBOX_DOCKER_CPUS,
-          "--label", "pi.sandbox=1", "--label", `pi.workspace=${req.workspaceId}`,
-        ];
-        // Secrets travel through the CLI's environment (`-e K`), never as `-e K=V` in argv.
-        for (const k of Object.keys(req.secrets ?? {})) args.push("-e", k);
-        args.push("--", image, "sleep", "infinity");
-        await docker("docker", args, { env: sandboxEnv(req.secrets) });
-      } catch (e) {
-        await docker("docker", ["rm", "-f", id]).catch(() => {});
-        await rm(hostDir, { recursive: true, force: true });
-        await store.setStatus(id, "destroyed");
-        throw e;
-      }
-    }
-    const sandbox = makeSandbox(id, id, await pickShell(id));
-    return { sandbox, release: async () => { await store.setStatus(id, "ready"); } };
+  async create(id: SandboxId, req: SandboxRequest): Promise<SandboxHandle> {
+    const image = req.image || DEFAULT_IMAGE;
+    if (!IMAGE_RE.test(image)) throw new Error(`docker provider: invalid image reference ${JSON.stringify(image)}`);
+    const hostDir = path.join(root(), id);
+    await materialize(req.workspaceRef, hostDir);
+    const args = [
+      "run", "-d", "--name", id, "-w", WORKDIR, "-v", `${toHostPath(hostDir)}:${WORKDIR}`,
+      "--network", env.SANDBOX_DOCKER_NETWORK, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+      "--pids-limit", env.SANDBOX_DOCKER_PIDS, "--memory", env.SANDBOX_DOCKER_MEMORY, "--cpus", env.SANDBOX_DOCKER_CPUS,
+      "--label", "pi.sandbox=1", "--label", `pi.workspace=${req.workspaceId}`,
+    ];
+    // Secrets travel through the CLI's environment (`-e K`), never as `-e K=V` in argv.
+    for (const k of Object.keys(req.secrets ?? {})) args.push("-e", k);
+    args.push("--", image, "sleep", "infinity");
+    await docker("docker", args, { env: sandboxEnv(req.secrets) });
+    return { sandbox: makeSandbox(id, id, await pickShell(id)), externalRef: hostDir };
   }
 
-  async capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef> {
-    const hostDir = path.join(root(), sb.id);
-    if (prev.kind === "git") return captureGit(hostDir, prev);
+  async connect(id: SandboxId, externalRef: string): Promise<SandboxHandle | null> {
+    if (!(await isAlive(id, externalRef))) return null;
+    return { sandbox: makeSandbox(id, id, await pickShell(id)), externalRef };
+  }
+
+  async destroy(id: SandboxId, externalRef: string | null): Promise<void> {
+    await docker("docker", ["rm", "-f", id]).catch(() => {});
+    const dir = externalRef ?? path.join(root(), id);
+    if (dir.startsWith(root() + path.sep)) await rm(dir, { recursive: true, force: true });
+  }
+
+  async capture(h: SandboxHandle, prev: WorkspaceRef): Promise<WorkspaceRef> {
+    if (prev.kind === "git") return captureGit(h.externalRef, prev);
     if (prev.kind === "local") return prev;
-    return captureDir(hostDir, prev, sb.id);
-  }
-
-  async reap(idleTtlMs: number): Promise<SandboxId[]> {
-    const rows = await store.listIdle("docker", idleTtlMs);
-    const ids: SandboxId[] = [];
-    for (const r of rows) {
-      await docker("docker", ["rm", "-f", r.id]).catch(() => {});
-      if (r.external_ref && r.external_ref.startsWith(root() + path.sep)) await rm(r.external_ref, { recursive: true, force: true });
-      await store.setStatus(r.id, "destroyed");
-      ids.push(r.id);
-    }
-    return ids;
+    return captureDir(h.externalRef, prev, h.sandbox.id);
   }
 }

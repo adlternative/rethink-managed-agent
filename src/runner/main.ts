@@ -6,9 +6,9 @@ import { consumeRuns, enqueueRun } from "../infra/queue.ts";
 import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
 import { createModelRegistry } from "../harness/models.ts";
 import { runSession, type RunDeps } from "../harness/run-turn.ts";
-import { allProviders, getProvider } from "../sandbox/provider.ts";
+import { sandboxManager } from "../sandbox/provider.ts";
 import { env } from "../shared/env.ts";
-import type { RunJob, SandboxProvider } from "../shared/types.ts";
+import type { RunJob, SandboxProviderName } from "../shared/types.ts";
 
 const REAP_INTERVAL_MS = 60_000;
 
@@ -16,10 +16,10 @@ await migrate();
 const models = createModelRegistry();
 
 /** Everything runSession needs, wired to infra + sandbox. Provider is chosen per session below. */
-function makeDeps(provider: SandboxProvider): RunDeps {
+function makeDeps(provider: SandboxProviderName): RunDeps {
   return {
     models,
-    provider,
+    sandboxes: sandboxManager.bind(provider),
     // runSession publishes each event itself (so deltas and events interleave in order).
     appendEvents: (id, payloads) => appendEvents(id, payloads, { publish: false }),
     listEvents: (id) => listAllEvents(id),
@@ -35,10 +35,10 @@ function makeDeps(provider: SandboxProvider): RunDeps {
   };
 }
 
-async function providerFor(sessionId: string): Promise<SandboxProvider> {
+async function providerFor(sessionId: string): Promise<SandboxProviderName> {
   const session = await repos.sessions.get(sessionId);
   const environment = session ? await repos.environments.get(session.environment_id) : null;
-  return getProvider(environment?.provider ?? env.SANDBOX_DEFAULT_PROVIDER);
+  return environment?.provider ?? env.SANDBOX_DEFAULT_PROVIDER;
 }
 
 async function handleJob(job: RunJob): Promise<"done" | "retry"> {
@@ -64,13 +64,12 @@ async function handleJob(job: RunJob): Promise<"done" | "retry"> {
 }
 
 async function reap(): Promise<void> {
-  for (const p of allProviders()) {
-    try {
-      const ids = await p.reap(env.SANDBOX_IDLE_TTL_MS);
-      if (ids.length) console.log(`[reaper] ${p.name}: destroyed ${ids.join(", ")}`);
-    } catch (e) {
-      console.error(`[reaper] ${p.name} failed`, e);
+  try {
+    for (const [name, ids] of Object.entries(await sandboxManager.reap(env.SANDBOX_IDLE_TTL_MS))) {
+      if (ids.length) console.log(`[reaper] ${name}: destroyed ${ids.join(", ")}`);
     }
+  } catch (e) {
+    console.error("[reaper] failed", e);
   }
 }
 

@@ -5,15 +5,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { Sandbox as E2bSandbox } from "e2b";
 import { env } from "../shared/env.ts";
-import { newId } from "../shared/ids.ts";
-import type { ExecChunk, ExecOptions, Sandbox, SandboxId, SandboxLease, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
-import * as store from "./lease-store.ts";
+import type { ExecChunk, ExecOptions, Sandbox, SandboxHandle, SandboxId, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
 import { captureDir } from "./workspace.ts";
 
 /**
  * e2b cloud sandboxes (https://e2b.dev). Unlike local/docker there is no host directory: the
  * workspace is materialized *inside* the remote sandbox and captured back over the SDK.
- * `external_ref` in the sandboxes table is the e2b sandbox id.
+ * externalRef = the e2b sandbox id.
  */
 const run = promisify(execFile);
 const WORKDIR = "/home/user/workspace";
@@ -121,60 +119,43 @@ function makeSandbox(id: SandboxId, sbx: E2bSandbox): Sandbox {
   };
 }
 
+/** A handle that also carries the live SDK object (needed by capture). */
+interface E2bHandle extends SandboxHandle { sbx: E2bSandbox }
+
 export class E2bProvider implements SandboxProvider {
   name = "e2b" as const;
-  /** Live SDK handles for sandboxes acquired by this process (needed by capture()). */
-  private live = new Map<SandboxId, E2bSandbox>();
 
-  async acquire(req: SandboxRequest): Promise<SandboxLease> {
-    let id: SandboxId;
-    let sbx: E2bSandbox | null = null;
-    const reused = req.affinity ? await store.findReadyByAffinity("e2b", req.affinity) : null;
-    if (reused?.external_ref) {
-      sbx = await E2bSandbox.connect(reused.external_ref, opts()).catch(() => null);
-      if (sbx && !(await sbx.isRunning().catch(() => false))) sbx = null;
+  async create(id: SandboxId, req: SandboxRequest): Promise<E2bHandle> {
+    const template = req.image || env.E2B_TEMPLATE;
+    if (!TEMPLATE_RE.test(template)) throw new Error(`e2b provider: invalid template name ${JSON.stringify(template)}`);
+    const sbx = await E2bSandbox.create(template, {
+      ...opts(),
+      timeoutMs: env.E2B_SANDBOX_TIMEOUT_MS,
+      metadata: { "pi.sandbox": id, "pi.workspace": req.workspaceId },
+      envs: req.secrets,
+    });
+    try {
+      await materializeRemote(sbx, req.workspaceRef);
+    } catch (e) {
+      await sbx.kill().catch(() => {});
+      throw e;
     }
-    if (sbx && reused) {
-      id = reused.id;
-    } else {
-      if (reused) await store.setStatus(reused.id, "destroyed");
-      if (req.affinity && (await store.findBusyByAffinity("e2b", req.affinity))) {
-        throw new Error(`workspace ${req.affinity} is in use by another running session; retry when it is idle`);
-      }
-      const template = req.image || env.E2B_TEMPLATE;
-      if (!TEMPLATE_RE.test(template)) throw new Error(`e2b provider: invalid template name ${JSON.stringify(template)}`);
-      id = newId("sbx");
-      await store.insert({ id, provider: "e2b", status: "busy", workspace_id: req.workspaceId, affinity: req.affinity ?? null, external_ref: null });
-      try {
-        sbx = await E2bSandbox.create(template, {
-          ...opts(),
-          timeoutMs: env.E2B_SANDBOX_TIMEOUT_MS,
-          metadata: { "pi.sandbox": id, "pi.workspace": req.workspaceId },
-          envs: req.secrets,
-        });
-        await store.setExternalRef(id, sbx.sandboxId);
-        await materializeRemote(sbx, req.workspaceRef);
-      } catch (e) {
-        await sbx?.kill().catch(() => {});
-        await store.setStatus(id, "destroyed");
-        throw e;
-      }
-    }
-    await sbx.setTimeout(env.E2B_SANDBOX_TIMEOUT_MS).catch(() => {});
-    this.live.set(id, sbx);
-    const sandbox = makeSandbox(id, sbx);
-    return {
-      sandbox,
-      release: async () => {
-        this.live.delete(id);
-        await store.setStatus(id, "ready");
-      },
-    };
+    return { sandbox: makeSandbox(id, sbx), externalRef: sbx.sandboxId, sbx };
   }
 
-  async capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef> {
-    const sbx = this.live.get(sb.id);
-    if (!sbx) throw new Error(`e2b provider: sandbox ${sb.id} is not held by this runner`);
+  async connect(id: SandboxId, externalRef: string): Promise<E2bHandle | null> {
+    const sbx = await E2bSandbox.connect(externalRef, opts()).catch(() => null);
+    if (!sbx || !(await sbx.isRunning().catch(() => false))) return null;
+    await sbx.setTimeout(env.E2B_SANDBOX_TIMEOUT_MS).catch(() => {});
+    return { sandbox: makeSandbox(id, sbx), externalRef, sbx };
+  }
+
+  async destroy(_id: SandboxId, externalRef: string | null): Promise<void> {
+    if (externalRef) await E2bSandbox.kill(externalRef, opts()).catch(() => {});
+  }
+
+  async capture(h: SandboxHandle, prev: WorkspaceRef): Promise<WorkspaceRef> {
+    const sbx = (h as E2bHandle).sbx;
     if (prev.kind === "local") return prev;
     if (prev.kind === "git") {
       const base = (await sh(sbx, `cd ${q(WORKDIR)} && git rev-parse HEAD`)).trim();
@@ -184,7 +165,7 @@ export class E2bProvider implements SandboxProvider {
     // dir / empty: tar the remote workdir, download it, and hand the extracted copy to captureDir.
     const tmp = await mkdtemp(path.join(tmpdir(), "e2b-cap-"));
     try {
-      await sh(sbx, `cd ${q(WORKDIR)} && tar czf /tmp/pi-capture.tgz . && true`);
+      await sh(sbx, `cd ${q(WORKDIR)} && tar czf /tmp/pi-capture.tgz .`);
       const bytes = await sbx.files.read("/tmp/pi-capture.tgz", { format: "bytes" });
       await sh(sbx, "rm -f /tmp/pi-capture.tgz");
       const tgz = path.join(tmp, "ws.tgz");
@@ -192,21 +173,9 @@ export class E2bProvider implements SandboxProvider {
       await writeFile(tgz, bytes);
       await mkdir(dir);
       await run("tar", ["xzf", tgz, "-C", dir]);
-      return await captureDir(dir, prev, sb.id);
+      return await captureDir(dir, prev, h.sandbox.id);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
-  }
-
-  async reap(idleTtlMs: number): Promise<SandboxId[]> {
-    const rows = await store.listIdle("e2b", idleTtlMs);
-    const ids: SandboxId[] = [];
-    for (const r of rows) {
-      if (r.external_ref) await E2bSandbox.kill(r.external_ref, opts()).catch(() => {});
-      this.live.delete(r.id);
-      await store.setStatus(r.id, "destroyed");
-      ids.push(r.id);
-    }
-    return ids;
   }
 }

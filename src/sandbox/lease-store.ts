@@ -55,3 +55,24 @@ export async function listIdle(provider: SandboxProviderName, olderThanMs: numbe
 export async function setExternalRef(id: SandboxId, externalRef: string): Promise<void> {
   await pool.query(`UPDATE sandboxes SET external_ref=$2, last_used_at=now() WHERE id=$1`, [id, externalRef]);
 }
+
+export async function get(id: SandboxId): Promise<SandboxRow | null> {
+  const r = await pool.query<SandboxRow>(`SELECT * FROM sandboxes WHERE id=$1`, [id]);
+  return r.rows[0] ?? null;
+}
+
+export async function list(opts: { includeDestroyed?: boolean } = {}): Promise<SandboxRow[]> {
+  const r = await pool.query<SandboxRow>(
+    opts.includeDestroyed ? `SELECT * FROM sandboxes ORDER BY created_at DESC` : `SELECT * FROM sandboxes WHERE status <> 'destroyed' ORDER BY created_at DESC`,
+  );
+  return r.rows;
+}
+
+/**
+ * Ask the reaper to destroy a ready sandbox on its next pass (the API process has no docker socket /
+ * SDK state, so it never destroys directly). Returns false if the sandbox is busy or already gone.
+ */
+export async function markForDestroy(id: SandboxId): Promise<boolean> {
+  const r = await pool.query(`UPDATE sandboxes SET last_used_at = to_timestamp(0) WHERE id=$1 AND status='ready'`, [id]);
+  return (r.rowCount ?? 0) > 0;
+}
