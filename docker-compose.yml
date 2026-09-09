@@ -28,6 +28,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SANDBOX_DEFAULT_PROVIDER: ${SANDBOX_DEFAULT_PROVIDER:-local}
       SANDBOX_LOCAL_ROOT: /data/sandboxes
+      WORKSPACE_ROOT: /data/workspaces
       # Host path of the sandboxes bind mount below. The docker provider passes it to `docker run -v`
       # (the host daemon resolves bind mounts, so container paths would silently mount nothing).
       SANDBOX_HOST_ROOT: ${SANDBOX_HOST_ROOT:-${PWD}/data/sandboxes}
@@ -35,6 +36,7 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ${SANDBOX_HOST_ROOT:-./data/sandboxes}:/data/sandboxes   # host bind (not a named volume) so sibling containers can mount workspaces
+      - workspaces:/data/workspaces   # persistent `dir` workspaces; only the runner reads them
       - /var/run/docker.sock:/var/run/docker.sock   # docker provider (sibling containers)
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
-volumes: { pgdata: {} }
+volumes: { pgdata: {}, workspaces: {} }

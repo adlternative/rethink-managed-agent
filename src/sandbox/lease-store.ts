@@ -1,5 +1,9 @@
 import { pool } from "../infra/db.ts";
+import { env } from "../shared/env.ts";
 import type { SandboxId, SandboxProviderName, SandboxRow } from "../shared/types.ts";
+
+/** A `busy` row older than this was left behind by a crashed runner (runs are capped at RUN_TIMEOUT_MS). */
+const ABANDONED_MS = env.RUN_TIMEOUT_MS + 5 * 60_000;
 
 export async function insert(row: Omit<SandboxRow, "last_used_at" | "created_at">): Promise<void> {
   await pool.query(
@@ -28,10 +32,22 @@ export async function findReadyByAffinity(provider: SandboxProviderName, affinit
   return r.rows[0] ?? null;
 }
 
+/** A live lease on the same affinity (another session is running in that workspace right now). */
+export async function findBusyByAffinity(provider: SandboxProviderName, affinity: string): Promise<SandboxRow | null> {
+  const r = await pool.query<SandboxRow>(
+    `SELECT * FROM sandboxes WHERE provider=$1 AND affinity=$2 AND status='busy' AND last_used_at > now() - ($3::bigint * interval '1 millisecond') LIMIT 1`,
+    [provider, affinity, ABANDONED_MS],
+  );
+  return r.rows[0] ?? null;
+}
+
+/** Sandboxes to destroy: ready ones idle past the ttl, plus busy ones abandoned by a dead runner. */
 export async function listIdle(provider: SandboxProviderName, olderThanMs: number): Promise<SandboxRow[]> {
   const r = await pool.query<SandboxRow>(
-    `SELECT * FROM sandboxes WHERE provider=$1 AND status='ready' AND last_used_at < now() - ($2::bigint * interval '1 millisecond')`,
-    [provider, olderThanMs],
+    `SELECT * FROM sandboxes WHERE provider=$1 AND (
+       (status='ready' AND last_used_at < now() - ($2::bigint * interval '1 millisecond'))
+       OR (status='busy' AND last_used_at < now() - ($3::bigint * interval '1 millisecond')))`,
+    [provider, olderThanMs, ABANDONED_MS],
   );
   return r.rows;
 }

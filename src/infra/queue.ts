@@ -5,7 +5,12 @@ import { redis } from "./pubsub.ts";
 
 const STREAM = "runs";
 const GROUP = "runners";
-const STALE_MS = 60_000;
+/**
+ * Pending entries idle longer than this are re-examined by any runner. A live run keeps the
+ * session `running` with a fresh heartbeat, so a re-examined job of a healthy run is simply
+ * left pending ("retry") until its owner acks it; only a dead runner's job is actually taken over.
+ */
+const STALE_MS = 120_000;
 
 export async function enqueueRun(job: RunJob): Promise<void> {
   await redis.xadd(STREAM, "*", "job", JSON.stringify(job));
@@ -26,8 +31,9 @@ function parseJob(fields: string[]): RunJob | null {
   return i >= 0 ? (JSON.parse(fields[i + 1]) as RunJob) : null;
 }
 
+/** Handler returns "done" to ack the entry, or "retry" to leave it pending for a later re-examination. */
 export async function consumeRuns(
-  handler: (job: RunJob) => Promise<void>,
+  handler: (job: RunJob) => Promise<"done" | "retry">,
   opts: { consumer?: string; signal?: AbortSignal } = {},
 ): Promise<void> {
   const consumer = opts.consumer ?? `runner-${process.pid}`;
@@ -37,13 +43,14 @@ export async function consumeRuns(
 
   const handle = async (entries: Entry[]) => {
     for (const [id, fields] of entries) {
+      let outcome: "done" | "retry" = "done";
       try {
         const job = parseJob(fields);
-        if (job) await handler(job);
+        if (job) outcome = await handler(job);
       } catch (e) {
         console.error("[queue] handler failed", id, e);
       }
-      await r.xack(STREAM, GROUP, id);
+      if (outcome === "done") await r.xack(STREAM, GROUP, id);
     }
   };
 

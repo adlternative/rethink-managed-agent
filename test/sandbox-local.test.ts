@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SandboxRow } from "../src/shared/types.ts";
@@ -14,15 +14,20 @@ vi.mock("../src/sandbox/lease-store.ts", () => ({
     if (r) r.status = "busy";
     return r ?? null;
   },
+  findBusyByAffinity: async (_p: string, affinity: string) => [...rows.values()].find((r) => r.affinity === affinity && r.status === "busy") ?? null,
   listIdle: async () => [...rows.values()].filter((r) => r.status === "ready"),
 }));
 
 let root: string;
+let wsRoot: string;
 let LocalProvider: typeof import("../src/sandbox/local.ts").LocalProvider;
 
 beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "sbx-"));
+  wsRoot = await mkdtemp(path.join(tmpdir(), "ws-"));
   process.env.SANDBOX_LOCAL_ROOT = root;
+  process.env.WORKSPACE_ROOT = wsRoot;
+  process.env.DATABASE_URL = "postgres://unused";
   ({ LocalProvider } = await import("../src/sandbox/local.ts"));
 });
 
@@ -47,20 +52,49 @@ describe("LocalProvider", () => {
     expect(r.out).toBe("hibar\n");
     expect(r.code).toBe(0);
 
+    // runner secrets never reach the sandbox env
+    process.env.PI_TEST_SECRET = "s3cret";
+    expect((await collect(sb.exec("echo \"[$PI_TEST_SECRET]\""))).out).toBe("[]\n");
+
+    // symlink escapes are rejected on the host side of file I/O
+    await collect(sb.exec("ln -s / esc && ln -s /nonexistent-target dangling"));
+    await expect(sb.readFile("esc/etc/hosts")).rejects.toThrow(/symlink/);
+    await expect(sb.writeFile("esc/tmp/pwned", new Uint8Array())).rejects.toThrow(/symlink/);
+    await expect(sb.writeFile("dangling", new Uint8Array())).rejects.toThrow(/symlink/);
+    await sb.writeFile("sub/new.txt", new TextEncoder().encode("ok")); // new file under a new dir is fine
+
     const t = await collect(sb.exec("sleep 5", { timeoutMs: 100 }));
     expect(t.code).not.toBe(0);
 
-    expect(await p.capture(sb, { kind: "empty" })).toEqual({ kind: "dir", path: sb.workdir });
+    // a second session on the same workspace while this one holds the lease is rejected
+    await expect(p.acquire({ workspaceId: "ws_1", workspaceRef: { kind: "empty" }, affinity: "a" })).rejects.toThrow(/in use/);
+
+    // capture copies into the persistent workspace root, outside the reapable sandbox dir
+    const ref = await p.capture(sb, { kind: "empty" });
+    expect(ref).toEqual({ kind: "dir", path: path.join(wsRoot, sb.id) });
+    const wsDir = (ref as { path: string }).path;
+    expect(await readFile(path.join(wsDir, "hello.txt"), "utf8")).toBe("hi");
+    // recapturing into an existing dir ref replaces it (deletions propagate)
+    await sb.writeFile("hello.txt", new TextEncoder().encode("hi2"));
+    await collect(sb.exec("rm sub/new.txt"));
+    expect(await p.capture(sb, ref)).toEqual(ref);
+    expect(await readFile(path.join(wsDir, "hello.txt"), "utf8")).toBe("hi2");
+    await expect(stat(path.join(wsDir, "sub/new.txt"))).rejects.toThrow();
 
     await lease.release();
     expect(rows.get(sb.id)!.status).toBe("ready");
 
-    const again = await p.acquire({ workspaceId: "ws_1", workspaceRef: { kind: "empty" }, affinity: "a" });
+    const again = await p.acquire({ workspaceId: "ws_1", workspaceRef: ref, affinity: "a" });
     expect(again.sandbox.id).toBe(sb.id);
     await again.release();
 
     expect(await p.reap(0)).toEqual([sb.id]);
     expect(rows.get(sb.id)!.status).toBe("destroyed");
     await expect(stat(sb.workdir)).rejects.toThrow();
+    // the workspace survives the reaper and rebuilds a fresh sandbox
+    const rebuilt = await p.acquire({ workspaceId: "ws_1", workspaceRef: ref, affinity: "a" });
+    expect(rebuilt.sandbox.id).not.toBe(sb.id);
+    expect(new TextDecoder().decode(await rebuilt.sandbox.readFile("hello.txt"))).toBe("hi2");
+    await rebuilt.release();
   });
 });

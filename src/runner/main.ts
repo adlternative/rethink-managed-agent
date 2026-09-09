@@ -1,8 +1,9 @@
 import { pool, repos } from "../infra/db.ts";
-import { appendEvents, listEvents } from "../infra/events.ts";
+import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, popSteer, publish, redis } from "../infra/pubsub.ts";
-import { consumeRuns } from "../infra/queue.ts";
+import { consumeRuns, enqueueRun } from "../infra/queue.ts";
+import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
 import { createModelRegistry } from "../harness/models.ts";
 import { runSession, type RunDeps } from "../harness/run-turn.ts";
 import { allProviders, getProvider } from "../sandbox/provider.ts";
@@ -21,16 +22,16 @@ function makeDeps(provider: SandboxProvider): RunDeps {
     provider,
     // runSession publishes each event itself (so deltas and events interleave in order).
     appendEvents: (id, payloads) => appendEvents(id, payloads, { publish: false }),
-    listEvents: (id) => listEvents(id),
+    listEvents: (id) => listAllEvents(id),
     publish,
     onInterrupt,
-    // Steer entries are persisted user events; only their content is fed into the live loop.
-    popSteer: async (id) => (await popSteer(id)).flatMap((s) => (s.type === "user.message" ? [s.content] : [])),
+    popSteer,
     getSession: (id) => repos.sessions.get(id),
     getWorkspace: (id) => repos.workspaces.get(id),
     getEnvironment: (id) => repos.environments.get(id),
-    updateWorkspaceRef: (id, ref) => repos.workspaces.updateRef(id, ref),
-    setSessionStatus: (id, status) => repos.sessions.setStatus(id, status),
+    updateWorkspaceRef: (id, ref, expected) => repos.workspaces.updateRef(id, ref, expected),
+    claimRun,
+    finishRun,
   };
 }
 
@@ -40,12 +41,24 @@ async function providerFor(sessionId: string): Promise<SandboxProvider> {
   return getProvider(environment?.provider ?? env.SANDBOX_DEFAULT_PROVIDER);
 }
 
-async function handleJob(job: RunJob): Promise<void> {
+async function handleJob(job: RunJob): Promise<"done" | "retry"> {
   const started = Date.now();
   console.log(`[runner] run ${job.session_id} (trigger_seq=${job.trigger_seq})`);
+  // Heartbeat while running so a re-examined job can tell a live run from a dead runner's.
+  const hb = setInterval(() => void heartbeat(job.session_id).catch(() => {}), HEARTBEAT_MS);
   try {
-    await runSession(job.session_id, makeDeps(await providerFor(job.session_id)));
+    const outcome = await runSession(job.session_id, makeDeps(await providerFor(job.session_id)));
+    if (outcome.status === "busy") {
+      console.log(`[runner] ${job.session_id} is running elsewhere; leaving job pending`);
+      return "retry";
+    }
+    if (outcome.unconsumedSeq !== null) {
+      console.log(`[runner] ${job.session_id}: user message seq=${outcome.unconsumedSeq} arrived after the last steer pop; enqueueing follow-up`);
+      await enqueueRun({ session_id: job.session_id, trigger_seq: outcome.unconsumedSeq });
+    }
+    return "done";
   } finally {
+    clearInterval(hb);
     console.log(`[runner] done ${job.session_id} in ${Date.now() - started}ms`);
   }
 }

@@ -74,8 +74,7 @@ export const sessions = new Hono()
     const s = await repos.sessions.get(id);
     if (!s) throw notFound("session", id);
     if (s.status !== "terminated") {
-      await appendEvents(id, [{ type: "session.status_terminated", reason: "archived" }]);
-      await repos.sessions.setStatus(id, "terminated");
+      await appendEvents(id, [{ type: "session.status_terminated", reason: "archived" }], { status: "terminated" });
     }
     return c.json({ ...s, status: "terminated" });
   })

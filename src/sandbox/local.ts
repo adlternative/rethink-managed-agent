@@ -4,12 +4,16 @@ import { env } from "../shared/env.ts";
 import { newId } from "../shared/ids.ts";
 import type { ExecChunk, ExecOptions, Sandbox, SandboxId, SandboxLease, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
 import * as store from "./lease-store.ts";
-import { materialize, captureGit } from "./workspace.ts";
-import { streamProcess, mergeEnv, resolveInside } from "./exec.ts";
+import { materialize, captureGit, captureDir } from "./workspace.ts";
+import { streamProcess, sandboxEnv, resolveInside, resolveInsideReal } from "./exec.ts";
 
 const root = () => path.resolve(env.SANDBOX_LOCAL_ROOT);
 const dirExists = (p: string) => stat(p).then((st) => st.isDirectory(), () => false);
 
+/**
+ * Dev-only provider: commands run on the runner host itself (no isolation). What it does offer:
+ * an allow-listed env (runner secrets never reach the model) and workdir-confined file I/O.
+ */
 function makeSandbox(id: SandboxId, workdir: string): Sandbox {
   return {
     id,
@@ -18,16 +22,16 @@ function makeSandbox(id: SandboxId, workdir: string): Sandbox {
     exec(cmd: string, opts: ExecOptions = {}): AsyncIterable<ExecChunk> {
       return streamProcess("bash", ["-lc", cmd], {
         cwd: opts.cwd ? resolveInside(workdir, workdir, opts.cwd) : workdir,
-        env: mergeEnv(opts.env),
+        env: sandboxEnv(opts.env),
         timeoutMs: opts.timeoutMs,
         signal: opts.signal,
       });
     },
     async readFile(p) {
-      return new Uint8Array(await readFile(resolveInside(workdir, workdir, p)));
+      return new Uint8Array(await readFile(await resolveInsideReal(workdir, workdir, p)));
     },
     async writeFile(p, data) {
-      const host = resolveInside(workdir, workdir, p);
+      const host = await resolveInsideReal(workdir, workdir, p);
       await mkdir(path.dirname(host), { recursive: true });
       await writeFile(host, data);
     },
@@ -47,8 +51,18 @@ export class LocalProvider implements SandboxProvider {
     } else {
       // A ready row whose directory is gone (different runner host, wiped volume) is stale: retire it.
       if (reused) await store.setStatus(reused.id, "destroyed");
+      // DESIGN §5: the provider rejects a duplicate affinity rather than letting two runs share a dir.
+      if (req.affinity && (await store.findBusyByAffinity("local", req.affinity))) {
+        throw new Error(`workspace ${req.affinity} is in use by another running session; retry when it is idle`);
+      }
       id = newId("sbx");
-      workdir = await materialize(req.workspaceRef, path.join(root(), id));
+      const dir = path.join(root(), id);
+      try {
+        workdir = await materialize(req.workspaceRef, dir);
+      } catch (e) {
+        await rm(dir, { recursive: true, force: true });
+        throw e;
+      }
       await store.insert({ id, provider: "local", status: "busy", workspace_id: req.workspaceId, affinity: req.affinity ?? null, external_ref: workdir });
     }
     const sandbox = makeSandbox(id, workdir);
@@ -61,7 +75,7 @@ export class LocalProvider implements SandboxProvider {
   async capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef> {
     if (prev.kind === "git") return captureGit(sb.workdir, prev);
     if (prev.kind === "local") return prev;
-    return { kind: "dir", path: sb.workdir };
+    return captureDir(sb.workdir, prev, sb.id);
   }
 
   async reap(idleTtlMs: number): Promise<SandboxId[]> {

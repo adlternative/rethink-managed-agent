@@ -1,6 +1,7 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type Static, type TSchema, Type } from "typebox";
 import { posix } from "node:path";
+import { env } from "../shared/env.ts";
 import type { BuiltinToolName, Sandbox } from "../shared/types.ts";
 
 export interface ToolContext {
@@ -52,13 +53,15 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
         const sb = await ctx.sandbox();
         let out = "";
         let code: number | undefined;
-        const opts = { cwd: sb.workdir, timeoutMs: timeout ? timeout * 1000 : undefined, signal: signal ?? ctx.signal };
+        // Always bounded: a runaway `sleep infinity` must not hold the runner and the lease forever.
+        const timeoutMs = Math.min(timeout ? timeout * 1000 : env.BASH_TIMEOUT_MS, env.BASH_MAX_TIMEOUT_MS);
+        const opts = { cwd: sb.workdir, timeoutMs, signal: signal ?? ctx.signal };
         for await (const chunk of sb.exec(command, opts)) {
           if (chunk.type === "exit") code = chunk.code;
           else out += chunk.data ?? "";
         }
         const body = truncateOutput(out);
-        if (code !== 0) throw new Error(`${body}\n\nCommand exited with code ${code ?? "unknown"}`);
+        if (code !== 0) throw new Error(`${body}\n\nCommand exited with code ${code ?? "unknown"}${code === 137 ? ` (killed: timeout ${timeoutMs}ms or interrupt)` : ""}`);
         return body || "(no output)";
       },
     ),

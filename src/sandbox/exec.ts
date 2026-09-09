@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ExecChunk, ExecOptions } from "../shared/types.ts";
 
@@ -36,17 +37,49 @@ export async function* streamProcess(
   }
 }
 
-/** Builds `ExecOptions.env` string map merged over process env. */
-export function mergeEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
-  return extra ? { ...process.env, ...extra } : process.env;
+/** Runner env vars a sandboxed process may see. Everything else (DB/Redis URLs, API keys) stays out. */
+const ENV_ALLOWLIST = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "SHELL", "TMPDIR"];
+
+/** Builds a minimal, allow-listed env for sandboxed processes (never the runner's full process.env). */
+export function sandboxEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const k of ENV_ALLOWLIST) if (process.env[k] !== undefined) out[k] = process.env[k];
+  return { ...out, ...extra };
 }
 
-/** Resolves `p` (relative to `workdir`, or absolute inside `workdir`) to a host path under `hostRoot`; rejects escapes. */
+/** Resolves `p` (relative to `workdir`, or absolute inside `workdir`) to a host path under `hostRoot`; rejects lexical escapes. */
 export function resolveInside(hostRoot: string, workdir: string, p: string): string {
   const inSandbox = path.posix.resolve(workdir, p);
   const rel = path.posix.relative(workdir, inSandbox);
   if (rel.startsWith("..") || path.posix.isAbsolute(rel)) throw new Error(`path escapes workdir: ${p}`);
   return path.join(hostRoot, rel);
+}
+
+/**
+ * `resolveInside` plus a symlink check: the real path of the deepest existing ancestor must still
+ * be under the real `hostRoot`, so `ln -s / esc; read esc/etc/passwd` cannot leave the workspace.
+ */
+export async function resolveInsideReal(hostRoot: string, workdir: string, p: string): Promise<string> {
+  const target = resolveInside(hostRoot, workdir, p);
+  const root = await realpath(hostRoot);
+  let probe = target;
+  for (;;) {
+    try {
+      const real = await realpath(probe);
+      const rest = path.relative(probe, target);
+      const realTarget = rest ? path.join(real, rest) : real;
+      if (realTarget !== root && !realTarget.startsWith(root + path.sep)) throw new Error(`path escapes workdir via symlink: ${p}`);
+      return realTarget;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      // ENOENT from realpath: either nothing is there, or a dangling symlink — which a later
+      // mkdir/write would follow — so reject the latter.
+      if ((await lstat(probe).catch(() => null))?.isSymbolicLink()) throw new Error(`path escapes workdir via symlink: ${p}`);
+      const parent = path.dirname(probe);
+      if (parent === probe) throw e;
+      probe = parent; // component does not exist yet (write to a new file): check its nearest ancestor
+    }
+  }
 }
 
 export type { ExecOptions };

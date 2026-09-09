@@ -95,8 +95,10 @@ export const repos = {
     async get(id: string): Promise<WorkspaceResource | null> {
       return iso(await one<WorkspaceResource>(pool, `SELECT * FROM workspaces WHERE id=$1`, [id]));
     },
-    async updateRef(id: string, ref: WorkspaceRef): Promise<void> {
-      await pool.query(`UPDATE workspaces SET ref=$2, updated_at=now() WHERE id=$1`, [id, JSON.stringify(ref)]);
+    /** Optimistic: only replaces `expected` (the ref this run started from). Returns false on a lost race. */
+    async updateRef(id: string, ref: WorkspaceRef, expected: WorkspaceRef): Promise<boolean> {
+      const r = await pool.query(`UPDATE workspaces SET ref=$2, updated_at=now() WHERE id=$1 AND ref=$3::jsonb`, [id, JSON.stringify(ref), JSON.stringify(expected)]);
+      return (r.rowCount ?? 0) > 0;
     },
   },
   sessions: {

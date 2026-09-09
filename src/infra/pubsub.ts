@@ -1,16 +1,22 @@
 import { Redis } from "ioredis";
 import { env } from "../shared/env.ts";
-import type { StreamDelta, UserEventInput } from "../shared/types.ts";
+import type { ContentBlock, StreamDelta } from "../shared/types.ts";
 
 /** Shared connection for commands (publish, lists). Subscribers need their own. */
 export const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null, lazyConnect: true });
 
-function subscriber(channel: string, onMessage: (msg: string) => void): () => void {
+/** Resolves once the SUBSCRIBE is acknowledged, so nothing published after return is missed. */
+async function subscriber(channel: string, onMessage: (msg: string) => void): Promise<() => void> {
   const sub = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
-  sub.subscribe(channel).catch((e) => console.error("[pubsub] subscribe failed", channel, e));
   sub.on("message", (ch, msg) => {
     if (ch === channel) onMessage(msg);
   });
+  try {
+    await sub.subscribe(channel);
+  } catch (e) {
+    sub.disconnect();
+    throw e;
+  }
   return () => {
     sub.disconnect();
   };
@@ -21,7 +27,7 @@ export async function publish(delta: StreamDelta): Promise<void> {
   await redis.publish(`sess:${id}`, JSON.stringify(delta));
 }
 
-export function subscribe(sessionId: string, cb: (d: StreamDelta) => void): () => void {
+export function subscribe(sessionId: string, cb: (d: StreamDelta) => void): Promise<() => void> {
   return subscriber(`sess:${sessionId}`, (msg) => cb(JSON.parse(msg) as StreamDelta));
 }
 
@@ -29,11 +35,15 @@ export async function publishInterrupt(sessionId: string): Promise<void> {
   await redis.publish(`interrupt:${sessionId}`, "1");
 }
 
-export function onInterrupt(sessionId: string, cb: () => void): () => void {
+export function onInterrupt(sessionId: string, cb: () => void): Promise<() => void> {
   return subscriber(`interrupt:${sessionId}`, () => cb());
 }
 
-type Steer = UserEventInput & { seq: number };
+/** A user message persisted while the session was running; `seq` lets the runner dedupe against the log. */
+export interface Steer {
+  seq: number;
+  content: ContentBlock[];
+}
 
 export async function pushSteer(sessionId: string, ev: Steer): Promise<void> {
   await redis.rpush(`steer:${sessionId}`, JSON.stringify(ev));

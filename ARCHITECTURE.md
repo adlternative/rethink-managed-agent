@@ -18,13 +18,16 @@ src/cli/        main.ts (thin client: create agent/env/session, send, stream)
 ```
 
 ## Runtime flow
-1. `POST /v1/sessions/:id/events` appends user events (seq assigned in a tx) and, for `user.message`,
-   enqueues `RunJob` if session is idle. If running: also `LPUSH steer:{session}` so the live loop picks it up
-   via pi `getSteeringMessages`. `user.interrupt`: `PUBLISH interrupt:{session}`.
-2. Runner claims job, sets status running (+ event), folds events into pi context, lazily acquires sandbox
-   on first tool call, runs pi `runAgentLoop`, appends events as they happen, publishes StreamDelta.
-3. On loop end: capture workspace -> `workspace.captured`, release lease -> `sandbox.released`,
-   `session.status_idle`.
+1. `POST /v1/sessions/:id/events` appends user events and reads `sessions.status` under the same row lock
+   (`withSession`); for `user.message`: idle -> enqueue `RunJob`; running -> `RPUSH steer:{session}` (with seq)
+   so the live loop picks it up via pi `getSteeringMessages`. `user.interrupt`: `PUBLISH interrupt:{session}`.
+2. Runner: subscribes to interrupts, then `claimRun` (one tx: status idle->running + `session.status_running`;
+   a `running` session whose heartbeat is stale is taken over, a live one makes the job stay pending), folds
+   the whole log into pi context, lazily acquires sandbox on first tool call, runs pi `runAgentLoop`, appends
+   events as they happen, publishes StreamDelta. Steer entries with seq <= folded lastSeq are dropped (dupes).
+3. On loop end: capture workspace -> `workspace.captured` (+ optimistic `workspaces.ref` update), release
+   lease -> `sandbox.released`, `finishRun` (one tx: `session.status_idle` + status idle + detect user
+   messages with seq > consumed -> runner enqueues a follow-up run).
 4. `GET /v1/sessions/:id/events/stream` (SSE): replay from `since` seq from DB, then subscribe to pubsub.
 
 ## Invariants

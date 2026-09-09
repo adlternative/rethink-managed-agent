@@ -85,7 +85,7 @@ Three objects with independent lifecycles:
 | Workspace | across sessions | `workspaces.ref` — a `WorkspaceRef`: `{kind:"git", remote, base, patch?}`, `{kind:"dir", path}`, `{kind:"local", path}`, or `{kind:"empty"}` |
 | Sandbox | minutes to hours; disposable | `sandboxes` table (lease registry) only |
 
-The session row never references a sandbox. When a tool first runs, the harness calls `provider.acquire({workspaceId, workspaceRef, image, affinity: workspaceId})`. The provider either reuses a `ready` sandbox with the same affinity (atomic `UPDATE ... FOR UPDATE SKIP LOCKED` marks it `busy`) or materializes the workspace ref into a fresh one (git clone + checkout + `git apply`, `cp -R` for `dir`, in-place for `local`). At the end of the run the provider *captures* the workspace (`git diff HEAD --binary` with untracked files included, or the managed dir path), the harness records `workspace.captured` and updates `workspaces.ref`, and the lease is released (status `ready`). The runner's reaper destroys sandboxes that have been `ready` longer than `SANDBOX_IDLE_TTL_MS`. A later turn — on any runner — rebuilds the workspace from the ref if the sandbox is gone.
+The session row never references a sandbox. When a tool first runs, the harness calls `provider.acquire({workspaceId, workspaceRef, image, affinity: workspaceId})`. The provider either reuses a `ready` sandbox with the same affinity (atomic `UPDATE ... FOR UPDATE SKIP LOCKED` marks it `busy`) or materializes the workspace ref into a fresh one (git clone + checkout + `git apply`, `cp -R` for `dir`, in-place for `local`). At the end of the run the provider *captures* the workspace (`git diff HEAD --binary` with untracked files included, or a copy of the sandbox dir into `WORKSPACE_ROOT/<id>` — the sandbox dir itself is ephemeral and reapable), the harness records `workspace.captured` (git remotes with embedded credentials are redacted there) and updates `workspaces.ref` — optimistically, only if the ref is still the one the run started from — and the lease is released (status `ready`). A provider rejects `acquire` while another session holds a `busy` lease on the same affinity (DESIGN §5), so two runs never write one workspace at once. The runner's reaper destroys sandboxes that have been `ready` longer than `SANDBOX_IDLE_TTL_MS`. A later turn — on any runner — rebuilds the workspace from the ref if the sandbox is gone.
 
 ## Adding a sandbox provider
 
@@ -120,7 +120,7 @@ npm run runner                # in another terminal; consumes the run queue and 
 scripts/e2e.sh
 ```
 
-`SANDBOX_LOCAL_ROOT` (default `./data/sandboxes`) is where the `local` provider (and the `docker` provider's bind mounts) put workspaces. Run more runners for more concurrency; they share one consumer group and reclaim jobs left pending by a dead runner after 60s.
+`SANDBOX_LOCAL_ROOT` (default `./data/sandboxes`) is where the `local` provider (and the `docker` provider's bind mounts) put workspaces. `WORKSPACE_ROOT` (default `./data/workspaces`) is where captured `dir` workspaces live; the reaper never touches it. Run more runners for more concurrency: they share one consumer group; a job pending longer than 120s is re-examined by any runner, and `claimRun` (`UPDATE sessions ... WHERE status='idle'`, or `running` with a heartbeat older than 90s) decides whether that run is alive (job stays pending) or dead (taken over). The `local` provider is dev-only: commands run on the runner host with an allow-listed env; use `docker` for untrusted code (containers get `--network none`, `--cap-drop ALL`, pids/memory/cpu limits — see the `SANDBOX_DOCKER_*` variables).
 
 Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sandbox), `npm run cli -- <cmd>`.
 
@@ -134,12 +134,17 @@ Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sand
 | `QODER_API_KEY` | `qoder` | Bearer token sent to the proxy; the proxy ignores it but pi-ai refuses to send requests without one |
 | `ANTHROPIC_API_KEY` | | Enables the `anthropic` provider |
 | `SANDBOX_DEFAULT_PROVIDER` | `local` | Fallback when an environment has no provider |
-| `SANDBOX_LOCAL_ROOT` | `./data/sandboxes` | Directory (as seen by the runner) for sandbox workspaces |
+| `SANDBOX_LOCAL_ROOT` | `./data/sandboxes` | Directory (as seen by the runner) for ephemeral sandbox dirs |
+| `WORKSPACE_ROOT` | `./data/workspaces` | Persistent captured `dir` workspaces (never reaped) |
+| `LOCAL_WORKSPACE_ALLOW_ROOT` | | Enables `{kind:"local", path}` workspace specs, confined to this directory; empty rejects them |
+| `SANDBOX_DOCKER_NETWORK` / `_MEMORY` / `_CPUS` / `_PIDS` | `none` / `2g` / `2` / `512` | Docker sandbox limits |
 | `SANDBOX_HOST_ROOT` | | Same directory as seen by the docker host; required for the `docker` provider when the runner is a container (compose sets it) |
 | `SANDBOX_IDLE_TTL_MS` | `600000` | Reaper threshold for idle sandboxes |
 | `API_PORT` | `8080` | Also the host port published by compose |
 | `PG_HOST_PORT` / `REDIS_HOST_PORT` | `5432` / `6379` | Host ports published by compose only |
 | `MAX_TURNS` | `50` | Tool-using turns per run |
+| `BASH_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` | `600000` / `900000` | Default and cap for one `bash` tool call |
+| `RUN_TIMEOUT_MS` | `1800000` | Wall-clock cap for one run; exceeding it aborts with `session.error{type:"run_timeout"}` |
 
 ## Layout
 
