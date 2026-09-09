@@ -167,8 +167,12 @@ sql/schema.sql, scripts/e2e.sh, test/
 streaming, tool folding and slash commands. See [pma-cli/README.md](pma-cli/README.md).
 
 ```bash
-cd pma-cli && npm install && npm run build && node bundle/pma.js --help
+make install          # builds pma-cli and puts `pma` in ~/.local/bin
+pma login --host http://localhost:8080
+pma --help
 ```
+
+Other targets: `make up` / `make down` / `make logs` (compose), `make e2e`, `make test`, `make diagram`.
 
 The older single-file `npm run cli` client is kept for scripts/e2e.sh.
 
