@@ -1,5 +1,7 @@
-import { runAgentLoopContinue, type AgentContext, type AgentEvent, type AgentLoopConfig, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Message, Models, UserMessage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
 import { env } from "../shared/env.ts";
 import type {
   ContentBlock,
@@ -17,7 +19,7 @@ import type {
   WorkspaceResource,
 } from "../shared/types.ts";
 import { foldEvents, toContentBlocks } from "./fold.ts";
-import { resolveModel } from "./models.ts";
+import { createPiSession } from "./pi-session.ts";
 import { createTools, type ToolContext } from "./tools.ts";
 
 export type Unsubscribe = () => void | Promise<void>;
@@ -30,7 +32,6 @@ export interface SteerMessage {
 
 /** Everything runSession needs from the outside world; no DB/Redis code lives here. */
 export interface RunDeps {
-  models: Models;
   sandboxes: SandboxService;
   /** Append events (seq assigned by the store). Must NOT publish; runSession publishes each appended event. */
   appendEvents(sessionId: SessionId, payloads: SessionEventPayload[]): Promise<SessionEvent[]>;
@@ -60,8 +61,12 @@ export type RunOutcome = { status: "busy" } | { status: "done"; stopReason: Stop
 const DEFAULT_SYSTEM_PROMPT =
   "You are a coding agent working inside a sandboxed workspace. Use the available tools to inspect and change files and to run commands. All paths are relative to the workspace root. Be concise.";
 
-const LLM_ROLES = new Set(["user", "assistant", "toolResult"]);
-const convertToLlm = (messages: AgentMessage[]): Message[] => messages.filter((m): m is Message => LLM_ROLES.has(m.role));
+const blocksText = (content: ContentBlock[]) => content.map((b) => b.text).join("");
+function userText(m: AgentMessage): string {
+  const c = (m as { content: unknown }).content;
+  if (typeof c === "string") return c;
+  return (c as { type: string; text?: string }[]).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+}
 
 function textBlocks(content: { type: string; text?: string }[]): ContentBlock[] {
   return content.flatMap((c) => (c.type === "text" && c.text !== undefined ? [{ type: "text" as const, text: c.text }] : []));
@@ -142,70 +147,113 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     abort.abort();
   }, env.RUN_TIMEOUT_MS);
 
+  const finish = async (): Promise<RunOutcome> => {
+    loopDone = true;
+    clearTimeout(wallClock);
+    await unsubscribe();
+    const finished = await deps.finishRun(sessionId, stopReason, consumedSeq);
+    await publishAll(finished.events);
+    return { status: "done", stopReason, unconsumedSeq: finished.unconsumedSeq };
+  };
+
+  let pi: Awaited<ReturnType<typeof createPiSession>> | null = null;
+  let steerTimer: NodeJS.Timeout | null = null;
   try {
     const { messages, lastSeq } = foldEvents(await deps.listEvents(sessionId));
     consumedSeq = lastSeq;
-    const context: AgentContext = {
-      systemPrompt: session.agent.system ?? DEFAULT_SYSTEM_PROMPT,
-      messages,
-      tools: createTools(session.agent.tools, ctx),
-    };
-    let turns = 0;
-    const config: AgentLoopConfig = {
-      model: resolveModel(deps.models, session.agent.model),
-      convertToLlm,
-      toolExecution: "sequential",
-      getSteeringMessages: async () =>
-        (await deps.popSteer(sessionId))
-          .filter((s) => s.seq > consumedSeq) // already in the folded log (stale entry from an earlier run)
-          .map((s): UserMessage => {
-            consumedSeq = Math.max(consumedSeq, s.seq);
-            return { role: "user", content: textBlocks(s.content), timestamp: Date.now() };
-          }),
-      shouldStopAfterTurn: ({ toolResults }) => {
-        turns++;
-        if (toolResults.length > 0 && turns >= env.MAX_TURNS) {
-          stopReason = "max_turns";
-          return true;
-        }
-        return false;
-      },
-    };
 
-    const sink = async (ev: AgentEvent) => {
-      switch (ev.type) {
-        case "message_update":
-          if (ev.assistantMessageEvent.type === "text_delta") {
-            await deps.publish({ type: "agent.message_delta", session_id: sessionId, text: ev.assistantMessageEvent.delta });
-          }
-          break;
-        case "tool_execution_start":
-          await emit({ type: "agent.tool_use", tool_use_id: ev.toolCallId, name: ev.toolName, input: ev.args });
-          break;
-        case "message_end": {
-          const m = ev.message;
-          if (m.role === "assistant") {
-            await emit({ type: "agent.message", content: toContentBlocks(m), pi: m });
-            // pi-ai reports "error" (not "aborted") when the signal was already aborted before the
-            // request started — e.g. an interrupt that landed during the previous tool call.
-            if (m.stopReason === "aborted" || (m.stopReason === "error" && abort.signal.aborted)) {
-              if (stopReason === "end_turn") stopReason = "interrupted";
-            } else if (m.stopReason === "error") {
-              stopReason = "error";
-              await emit({ type: "session.error", error: { type: "model_error", message: m.errorMessage ?? "unknown model error" } });
+    // pi's AgentSession appends the prompt itself, so seed everything before the trailing user message.
+    const last = messages[messages.length - 1];
+    const promptText = last?.role === "user" ? userText(last) : null;
+    const history = promptText !== null ? messages.slice(0, -1) : messages;
+    // A log ending in an assistant message has nothing to continue from (duplicate job for an
+    // already-answered message): end the turn quietly.
+    if (last?.role === "assistant") return await finish();
+
+    // Extensions see `cwd`. The sandbox is leased lazily (maybe never), so cwd cannot be the live
+    // sandbox dir: use the persisted workspace copy when it lives on this host (`dir` refs), else a
+    // per-workspace scratch dir. Files there are a snapshot from the last capture, not the live tree.
+    const cwd = workspace.ref.kind === "dir" ? workspace.ref.path : path.join(env.PI_AGENT_ROOT, "cwd", workspace.id);
+    await mkdir(cwd, { recursive: true });
+    pi = await createPiSession({
+      agent: session.agent,
+      cwd,
+      history,
+      tools: createTools(session.agent.tools, ctx),
+      systemPrompt: session.agent.system ?? DEFAULT_SYSTEM_PROMPT,
+    });
+    if (pi.extensionTools.length) console.log(`[pi] ${sessionId}: extension tools ${pi.extensionTools.join(", ")}`);
+
+    let turns = 0;
+    let modelError: string | null = null;
+    const unsub = pi.session.subscribe((ev: AgentSessionEvent) => {
+      void (async () => {
+        switch (ev.type) {
+          case "message_update":
+            if (ev.assistantMessageEvent.type === "text_delta") {
+              await deps.publish({ type: "agent.message_delta", session_id: sessionId, text: ev.assistantMessageEvent.delta });
             }
-          } else if (m.role === "toolResult") {
-            await emit({ type: "agent.tool_result", tool_use_id: m.toolCallId, content: textBlocks(m.content), is_error: m.isError, pi: m });
+            break;
+          case "tool_execution_start":
+            await emit({ type: "agent.tool_use", tool_use_id: ev.toolCallId, name: ev.toolName, input: ev.args });
+            break;
+          case "message_end": {
+            const m = ev.message;
+            if (m.role === "assistant") {
+              if (m.stopReason === "error" && !abort.signal.aborted) {
+                // pi retries transient provider errors itself; persist only the fact, as one
+                // session.error at the end, instead of an empty agent.message per attempt.
+                modelError = m.errorMessage ?? "unknown model error";
+                break;
+              }
+              modelError = null;
+              await emit({ type: "agent.message", content: toContentBlocks(m), pi: m });
+              if (m.stopReason === "aborted" || (m.stopReason === "error" && abort.signal.aborted)) {
+                if (stopReason === "end_turn") stopReason = "interrupted";
+              }
+            } else if (m.role === "toolResult") {
+              await emit({ type: "agent.tool_result", tool_use_id: m.toolCallId, content: textBlocks(m.content), is_error: m.isError, pi: m });
+            }
+            break;
           }
-          break;
+          case "turn_end":
+            turns++;
+            if (ev.toolResults.length > 0 && turns >= env.MAX_TURNS && stopReason === "end_turn") {
+              stopReason = "max_turns";
+              void pi?.session.abort();
+            }
+            break;
+          case "compaction_end":
+            if (!ev.aborted && ev.result) console.log(`[pi] ${sessionId}: context compacted (${ev.reason})`);
+            break;
         }
+      })().catch((e) => console.error(`[pi] ${sessionId}: event handler failed`, e));
+    });
+
+    // Interrupt from the API -> pi abort. Steered user messages -> pi steer (deduped by seq).
+    const onAbort = () => void pi?.session.abort();
+    abort.signal.addEventListener("abort", onAbort, { once: true });
+    const drainSteer = async () => {
+      for (const s of await deps.popSteer(sessionId)) {
+        if (s.seq <= consumedSeq) continue;
+        consumedSeq = Math.max(consumedSeq, s.seq);
+        await pi?.session.steer(blocksText(s.content));
       }
     };
+    steerTimer = setInterval(() => void drainSteer().catch(() => {}), 1000);
 
-    // A log ending in an assistant message has nothing to continue from (duplicate job for an
-    // already-answered message): end the turn quietly instead of letting pi throw.
-    const nothingToDo = messages.length > 0 && messages[messages.length - 1]!.role === "assistant";
-    if (!nothingToDo) await runAgentLoopContinue(context, config, sink, abort.signal, deps.models.streamSimple.bind(deps.models));
+    try {
+      if (promptText !== null) await pi.session.prompt(promptText, { expandPromptTemplates: true, source: "extension" });
+      else await pi.session.prompt("(continue)", { expandPromptTemplates: false, source: "extension" });
+      await drainSteer();
+    } finally {
+      unsub();
+      abort.signal.removeEventListener("abort", onAbort);
+    }
+    if (modelError !== null && stopReason === "end_turn") {
+      stopReason = "error";
+      await emit({ type: "session.error", error: { type: "model_error", message: modelError } });
+    }
   } catch (err) {
     if (abort.signal.aborted) {
       if (stopReason === "end_turn") stopReason = "interrupted";
@@ -217,6 +265,8 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   } finally {
     loopDone = true;
     clearTimeout(wallClock);
+    if (steerTimer) clearInterval(steerTimer);
+    pi?.dispose();
     await unsubscribe();
     if (stopReason === "error" && abort.signal.aborted) {
       await emit({ type: "session.error", error: { type: "run_timeout", message: `run exceeded RUN_TIMEOUT_MS (${env.RUN_TIMEOUT_MS})` } });

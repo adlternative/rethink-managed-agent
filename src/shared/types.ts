@@ -25,6 +25,11 @@ export interface AgentResource {
   model: ModelRef;
   system: string | null;
   tools: BuiltinToolName[];
+  /**
+   * pi packages (extensions / skills / prompts) loaded into the harness for this agent:
+   * "npm:<pkg>", "git:<url>", or a local path readable by the runner. See docs/PI_EXTENSIONS.md.
+   */
+  packages: string[];
   created_at: string;
 }
 

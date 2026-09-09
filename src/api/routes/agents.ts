@@ -16,15 +16,25 @@ export function validateModel(model: unknown): ModelRef {
   return { provider: m.provider, id: m.id };
 }
 
+/** Package sources pi understands: npm:<pkg>, git:<url>, or a local path on the runner. */
+export function validatePackages(packages: unknown): string[] {
+  if (packages === undefined || packages === null) return [];
+  if (!Array.isArray(packages) || !packages.every((p) => typeof p === "string" && p.trim() && !/\s/.test(p))) {
+    throw invalid("packages must be an array of package sources (npm:<pkg>, git:<url>, or a path)");
+  }
+  return packages as string[];
+}
+
 export const agents = new Hono()
   .post("/", async (c) => {
-    const body = await readJson<{ name?: string; model?: unknown; system?: string; tools?: unknown }>(c);
+    const body = await readJson<{ name?: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown }>(c);
     if (!body.name) throw invalid("name is required");
     const agent = await repos.agents.create({
       name: body.name,
       model: validateModel(body.model),
       system: body.system ?? null,
       tools: validateTools(body.tools),
+      packages: validatePackages(body.packages),
     });
     return c.json(agent, 201);
   })

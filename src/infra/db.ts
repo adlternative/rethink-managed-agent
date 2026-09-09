@@ -55,8 +55,8 @@ export const repos = {
     async create(input: Omit<AgentResource, "id" | "created_at">): Promise<AgentResource> {
       const row = await one<AgentResource>(
         pool,
-        `INSERT INTO agents (id, name, model, system, tools) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [newId("agent"), input.name, JSON.stringify(input.model), input.system, JSON.stringify(input.tools)],
+        `INSERT INTO agents (id, name, model, system, tools, packages) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+        [newId("agent"), input.name, JSON.stringify(input.model), input.system, JSON.stringify(input.tools), JSON.stringify(input.packages ?? [])],
       );
       return iso(row)!;
     },

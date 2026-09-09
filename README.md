@@ -161,6 +161,13 @@ src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
 
+## pi packages (extensions / skills / prompts)
+
+The harness *is* pi: the runner hosts `@earendil-works/pi-coding-agent`'s `AgentSession` headlessly, so
+pi packages load unchanged. Create an agent with `packages: ["npm:...", "git:...", "/path"]` and its
+extensions (registered tools, `tool_call` policy hooks, context hooks), skills and prompt templates are
+active in every session. UI-only and cwd-bound extensions do not apply; see [docs/PI_EXTENSIONS.md](docs/PI_EXTENSIONS.md).
+
 ## CLI
 
 `pma-cli/` is a terminal client modelled on qca-cli: subcommands for every resource plus an Ink TUI with

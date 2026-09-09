@@ -117,7 +117,7 @@
       "id": "runner",
       "type": "backend",
       "label": "Runner",
-      "sublabel": "pi agent loop + 内置工具",
+      "sublabel": "pi AgentSession + 沙箱工具",
       "pos": [
         670,
         300
@@ -346,7 +346,7 @@
       "dot": "emerald",
       "title": "薄 Harness",
       "items": [
-        "直接依赖 pi-agent-core 的 runAgentLoop，不重写 loop",
+        "Runner 内托管 pi 的 AgentSession，pi 包（扩展 / skills / prompts）原样可用",
         "events 表是唯一真相，session 状态由折叠事件得到",
         "多 runner 副本靠 consumer group 和行锁分担"
       ]

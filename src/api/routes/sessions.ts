@@ -3,11 +3,11 @@ import { repos } from "../../infra/db.ts";
 import { appendEvents } from "../../infra/events.ts";
 import type { AgentResource, SessionResource, WorkspaceRef, WorkspaceResource, WorkspaceSpec } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
-import { validateModel, validateTools } from "./agents.ts";
+import { validateModel, validatePackages, validateTools } from "./agents.ts";
 import { validateWorkspaceSpec } from "./environments.ts";
 import { events, sendUserEvents, validateUserEvents } from "./events.ts";
 
-type AgentInput = string | { type: "agent_with_overrides"; id: string; model?: unknown; system?: string; tools?: unknown };
+type AgentInput = string | { type: "agent_with_overrides"; id: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown };
 
 export function initialRef(spec: WorkspaceSpec): WorkspaceRef {
   if (spec.kind === "git") return { kind: "git", remote: spec.remote, base: spec.ref ?? "HEAD" };
@@ -27,6 +27,7 @@ async function resolveAgent(input: AgentInput | undefined): Promise<SessionResou
     model: input.model !== undefined ? validateModel(input.model) : snap.model,
     system: input.system !== undefined ? input.system : snap.system,
     tools: input.tools !== undefined ? validateTools(input.tools) : snap.tools,
+    packages: input.packages !== undefined ? validatePackages(input.packages) : (snap.packages ?? []),
   };
 }
 

@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS agents (
   model JSONB NOT NULL,
   system TEXT,
   tools JSONB NOT NULL DEFAULT '["bash","read","write","edit"]',
+  packages JSONB NOT NULL DEFAULT '[]',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS environments (
@@ -52,3 +53,4 @@ CREATE TABLE IF NOT EXISTS events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (session_id, seq)
 );
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS packages JSONB NOT NULL DEFAULT '[]';

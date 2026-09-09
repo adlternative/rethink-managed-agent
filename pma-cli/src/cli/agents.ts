@@ -4,7 +4,7 @@ import { die, parseArgs, printJson, str, table } from "../lib/args.ts";
 const USAGE = `agents subcommand:
   list
   get <id>
-  create <name> <provider/model> [--system <prompt>] [--tools bash,read,write,edit]
+  create <name> <provider/model> [--system <prompt>] [--tools bash,read,write,edit] [--packages npm:x,git:y,/path]
 example:
   pma agents create coder qoder/ultimate --system "You are a careful engineer"`;
 
@@ -14,7 +14,7 @@ export async function cmdAgents(args: string[]): Promise<void> {
   switch (sub) {
     case "list": case "ls": {
       const { data } = (await apiGet("/agents")) as { data: Agent[] };
-      table([["ID", "NAME", "MODEL", "TOOLS"], ...data.map((x) => [x.id, x.name, `${x.model.provider}/${x.model.id}`, x.tools.join(",")])]);
+      table([["ID", "NAME", "MODEL", "TOOLS", "PACKAGES"], ...data.map((x) => [x.id, x.name, `${x.model.provider}/${x.model.id}`, x.tools.join(","), (x.packages ?? []).join(",")])]);
       return;
     }
     case "get":
@@ -26,6 +26,7 @@ export async function cmdAgents(args: string[]): Promise<void> {
       const body: Record<string, unknown> = { name: a, model: { provider, id: rest.join("/") } };
       if (str(flags, "system")) body.system = str(flags, "system");
       if (str(flags, "tools")) body.tools = str(flags, "tools")!.split(",");
+      if (str(flags, "packages")) body.packages = str(flags, "packages")!.split(",");
       return printJson(await apiPost("/agents", body));
     }
     default:

@@ -1,0 +1,6 @@
+{
+  "name": "pi-ext-demo",
+  "version": "0.0.1",
+  "type": "module",
+  "pi": { "extensions": ["./index.ts"], "skills": ["./skills"] }
+}

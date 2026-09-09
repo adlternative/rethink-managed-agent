@@ -4,7 +4,6 @@ import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, popSteer, publish, redis } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun } from "../infra/queue.ts";
 import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
-import { createModelRegistry } from "../harness/models.ts";
 import { runSession, type RunDeps } from "../harness/run-turn.ts";
 import { sandboxManager } from "../sandbox/provider.ts";
 import { env } from "../shared/env.ts";
@@ -13,12 +12,10 @@ import type { RunJob, SandboxProviderName } from "../shared/types.ts";
 const REAP_INTERVAL_MS = 60_000;
 
 await migrate();
-const models = createModelRegistry();
 
 /** Everything runSession needs, wired to infra + sandbox. Provider is chosen per session below. */
 function makeDeps(provider: SandboxProviderName): RunDeps {
   return {
-    models,
     sandboxes: sandboxManager.bind(provider),
     // runSession publishes each event itself (so deltas and events interleave in order).
     appendEvents: (id, payloads) => appendEvents(id, payloads, { publish: false }),

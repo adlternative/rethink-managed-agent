@@ -30,6 +30,7 @@ services:
       E2B_API_KEY: ${E2B_API_KEY:-}
       E2B_TEMPLATE: ${E2B_TEMPLATE:-base}
       SANDBOX_LOCAL_ROOT: /data/sandboxes
+      PI_AGENT_ROOT: /data/pi-agents
       WORKSPACE_ROOT: /data/workspaces
       # Host path of the sandboxes bind mount below. The docker provider passes it to `docker run -v`
       # (the host daemon resolves bind mounts, so container paths would silently mount nothing).
@@ -39,6 +40,7 @@ services:
     volumes:
       - ${SANDBOX_HOST_ROOT:-./data/sandboxes}:/data/sandboxes   # host bind (not a named volume) so sibling containers can mount workspaces
       - workspaces:/data/workspaces   # persistent `dir` workspaces; only the runner reads them
+      - piagents:/data/pi-agents      # per-agent pi packages (extensions/skills/prompts)
       - /var/run/docker.sock:/var/run/docker.sock   # docker provider (sibling containers)
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
-volumes: { pgdata: {}, workspaces: {} }
+volumes: { pgdata: {}, workspaces: {}, piagents: {} }

@@ -14,7 +14,7 @@ done
 
 id() { grep -o '"id": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/'; }
 
-AGENT=$($CLI agent create --name e2e --provider qoder --model ultimate | id)
+AGENT=$($CLI agent create --name e2e --provider qoder --model ${E2E_MODEL:-kmodel} | id)
 ENV=$($CLI env create --name e2e --provider local | id)
 SESSION=$($CLI session create --agent "$AGENT" --env "$ENV" | id)
 echo "agent=$AGENT env=$ENV session=$SESSION"
