@@ -7,7 +7,7 @@ All types live in `src/shared/types.ts` — code against them, do not redefine t
 src/shared/     types.ts (contract), ids.ts (newId("sess")), env.ts (config from process.env)
 src/infra/      db.ts (pg pool + typed repos), events.ts (append/list/fold), pubsub.ts (redis pub/sub for
                 StreamDelta), queue.ts (Redis Streams job queue for RunJob), migrate.ts (applies sql/schema.sql)
-src/sandbox/    provider.ts (registry: getProvider(name)), local.ts, docker.ts, workspace.ts (materialize/capture
+src/sandbox/    provider.ts (registry: getProvider(name)), local.ts, docker.ts, e2b.ts (remote materialize/capture), workspace.ts (materialize/capture
                 helpers shared by providers), lease-store.ts (sandboxes table)
 src/harness/    models.ts (pi-ai Models with qoder + anthropic providers), tools.ts (bash/read/write/edit
                 AgentTools over ctx.sandbox()), fold.ts (events -> pi AgentMessage[]), run-turn.ts (one

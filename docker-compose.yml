@@ -27,6 +27,8 @@ services:
       QODER_BASE_URL: http://host.docker.internal:4141/v1
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SANDBOX_DEFAULT_PROVIDER: ${SANDBOX_DEFAULT_PROVIDER:-local}
+      E2B_API_KEY: ${E2B_API_KEY:-}
+      E2B_TEMPLATE: ${E2B_TEMPLATE:-base}
       SANDBOX_LOCAL_ROOT: /data/sandboxes
       WORKSPACE_ROOT: /data/workspaces
       # Host path of the sandboxes bind mount below. The docker provider passes it to `docker run -v`

@@ -30,7 +30,7 @@ Talking to it by hand with the bundled CLI (`PI_API` defaults to `http://localho
 
 ```sh
 npm run cli -- agent create --name dev --provider qoder --model ultimate
-npm run cli -- env create --name local --provider local            # or --provider docker --image node:22-alpine
+npm run cli -- env create --name local --provider local            # or --provider docker --image node:22-alpine, or --provider e2b --image base
 npm run cli -- session create --agent agent_xxx --env env_xxx
 npm run cli -- send sess_xxx "list the files here and add a README" --wait
 npm run cli -- events sess_xxx
@@ -45,7 +45,7 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | GET | `/healthz` | | `{ok:true}` |
 | POST | `/v1/agents` | `{name, model:{provider,id}, system?, tools?}` | `tools` defaults to all four builtins |
 | GET | `/v1/agents`, `/v1/agents/:id` | | |
-| POST | `/v1/environments` | `{name, provider:"local"\|"docker", image?, workspace?}` | `workspace` is the default `WorkspaceSpec`: `{kind:"empty"}` (default), `{kind:"git", remote, ref?}`, `{kind:"local", path}` |
+| POST | `/v1/environments` | `{name, provider:"local"\|"docker"\|"e2b", image?, workspace?}` | `workspace` is the default `WorkspaceSpec`: `{kind:"empty"}` (default), `{kind:"git", remote, ref?}`, `{kind:"local", path}` |
 | GET | `/v1/environments`, `/v1/environments/:id` | | |
 | POST | `/v1/sessions` | `{agent: id \| {type:"agent_with_overrides", id, model?, system?, tools?}, environment_id, workspace? \| workspace_id?, initial_events?}` | Snapshots the agent config into the session. Omit `workspace*` to use the environment default; pass `workspace_id` to continue an existing workspace |
 | GET | `/v1/sessions`, `/v1/sessions/:id` | | `status` is `idle` / `running` / `terminated` |
@@ -158,6 +158,16 @@ src/runner/    main.ts
 src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
+
+## Sandbox providers
+
+| provider | where code runs | workspace transport | notes |
+|---|---|---|---|
+| `local` | runner host, `bash -lc` | in place | dev only, no isolation |
+| `docker` | sibling container via docker socket | bind mount | default `--network none`, caps dropped, resource limits |
+| `e2b` | e2b cloud sandbox (https://e2b.dev) | materialized inside the sandbox over the SDK; captured back as git patch or tarball | needs `E2B_API_KEY`; `image` is the e2b template name |
+
+All three implement the same `SandboxProvider` interface (`acquire` / `capture` / `reap`) and share the lease table, affinity reuse and reaper. Adding a provider means one file under `src/sandbox/` plus a registry entry.
 
 ## Architecture diagram
 

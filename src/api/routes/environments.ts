@@ -42,7 +42,7 @@ export const environments = new Hono()
   .post("/", async (c) => {
     const body = await readJson<{ name?: string; provider?: string; image?: string; workspace?: unknown }>(c);
     if (!body.name) throw invalid("name is required");
-    if (body.provider !== "local" && body.provider !== "docker") throw invalid("provider must be 'local' | 'docker'");
+    if (body.provider !== "local" && body.provider !== "docker" && body.provider !== "e2b") throw invalid("provider must be 'local' | 'docker' | 'e2b'");
     const env = await repos.environments.create({
       name: body.name,
       provider: body.provider,

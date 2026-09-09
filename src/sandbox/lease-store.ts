@@ -51,3 +51,7 @@ export async function listIdle(provider: SandboxProviderName, olderThanMs: numbe
   );
   return r.rows;
 }
+
+export async function setExternalRef(id: SandboxId, externalRef: string): Promise<void> {
+  await pool.query(`UPDATE sandboxes SET external_ref=$2, last_used_at=now() WHERE id=$1`, [id, externalRef]);
+}

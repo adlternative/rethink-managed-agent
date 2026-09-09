@@ -183,6 +183,20 @@
         150,
         60
       ]
+    },
+    {
+      "id": "e2b",
+      "type": "cloud",
+      "label": "e2b Sandbox",
+      "sublabel": "云端 · SDK 直连",
+      "pos": [
+        900,
+        600
+      ],
+      "size": [
+        150,
+        60
+      ]
     }
   ],
   "boundaries": [
@@ -197,7 +211,8 @@
         "runner",
         "docker",
         "local",
-        "workspaces"
+        "workspaces",
+        "e2b"
       ]
     },
     {
@@ -205,7 +220,8 @@
       "label": "可插拔 Sandbox 层",
       "wraps": [
         "docker",
-        "local"
+        "local",
+        "e2b"
       ]
     }
   ],
@@ -300,6 +316,21 @@
       "from": "local",
       "to": "workspaces",
       "variant": "dashed"
+    },
+    {
+      "id": "runner-e2b",
+      "from": "runner",
+      "to": "e2b",
+      "label": "租约 (cloud)",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "e2b-ws",
+      "from": "e2b",
+      "to": "workspaces",
+      "variant": "dashed"
     }
   ],
   "cards": [
@@ -326,7 +357,8 @@
       "items": [
         "session 不持有 sandbox，只在工具调用时懒租",
         "同一 workspace 的多个 session 通过 affinity 复用容器",
-        "turn 结束 capture 到 Workspace 卷，sandbox 可随时销毁"
+        "turn 结束 capture 到 Workspace 卷，sandbox 可随时销毁",
+        "provider 可插拔：local / docker / e2b 同一接口"
       ]
     }
   ]

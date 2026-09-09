@@ -29,12 +29,12 @@ export interface AgentResource {
 }
 
 // ---------- Environment ----------
-export type SandboxProviderName = "local" | "docker";
+export type SandboxProviderName = "local" | "docker" | "e2b";
 export interface EnvironmentResource {
   id: EnvironmentId;
   name: string;
   provider: SandboxProviderName;
-  /** docker image for docker provider; ignored by local */
+  /** docker image (docker provider) or e2b template name (e2b provider); ignored by local */
   image: string | null;
   /** default workspace spec for sessions created in this env (may be overridden per session) */
   workspace: WorkspaceSpec;

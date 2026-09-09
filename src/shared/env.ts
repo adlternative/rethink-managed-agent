@@ -5,7 +5,7 @@ export const env = {
   /** The qoder proxy ignores the bearer token, but pi-ai refuses to send a request without one. */
   QODER_API_KEY: process.env.QODER_API_KEY || "qoder",
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "",
-  SANDBOX_DEFAULT_PROVIDER: (process.env.SANDBOX_DEFAULT_PROVIDER ?? "local") as "local" | "docker",
+  SANDBOX_DEFAULT_PROVIDER: (process.env.SANDBOX_DEFAULT_PROVIDER ?? "local") as "local" | "docker" | "e2b",
   /** Ephemeral sandbox dirs (reaped when idle). */
   SANDBOX_LOCAL_ROOT: process.env.SANDBOX_LOCAL_ROOT ?? "./data/sandboxes",
   /** Persistent `dir` workspaces; captured into from sandboxes, never reaped. */
@@ -27,6 +27,11 @@ export const env = {
   SANDBOX_DOCKER_MEMORY: process.env.SANDBOX_DOCKER_MEMORY ?? "2g",
   SANDBOX_DOCKER_CPUS: process.env.SANDBOX_DOCKER_CPUS ?? "2",
   SANDBOX_DOCKER_PIDS: process.env.SANDBOX_DOCKER_PIDS ?? "512",
+  /** e2b cloud sandboxes (https://e2b.dev). Empty key disables the provider. */
+  E2B_API_KEY: process.env.E2B_API_KEY ?? "",
+  E2B_TEMPLATE: process.env.E2B_TEMPLATE ?? "base",
+  /** Lifetime asked of e2b on acquire (refreshed on every acquire). Keep >= SANDBOX_IDLE_TTL_MS so reuse works. */
+  E2B_SANDBOX_TIMEOUT_MS: Number(process.env.E2B_SANDBOX_TIMEOUT_MS ?? 1200000),
   API_PORT: Number(process.env.API_PORT ?? 8080),
   MAX_TURNS: Number(process.env.MAX_TURNS ?? 50),
   /** Default and hard cap for a single bash tool call. */
