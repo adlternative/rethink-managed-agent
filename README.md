@@ -158,3 +158,11 @@ src/runner/    main.ts
 src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
+
+## Architecture diagram
+
+The diagram source is `docs/architecture.archify.json`. The rendered HTML is a build artifact and is not committed:
+
+```bash
+bash scripts/diagram.sh --open   # renders docs/architecture.html and opens it
+```
