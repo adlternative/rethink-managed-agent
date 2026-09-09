@@ -16,6 +16,8 @@ interface Message {
   toolStatus?: "running" | "success" | "error";
   result?: string;
   streaming?: boolean;
+  /** Optimistically shown user message not yet confirmed by its persisted event. */
+  pending?: boolean;
 }
 let nextId = 1;
 const msg = (m: Omit<Message, "id">): Message => ({ id: nextId++, ...m });
@@ -155,7 +157,16 @@ function App({ opts }: { opts: TuiOptions }) {
         break;
       case "session.status_terminated": setGenerating(false); finishStream(); sys("session terminated"); break;
       case "session.error": sys(`✗ ${p.error.type}: ${p.error.message}`); break;
-      case "user.message": setMessages((prev) => [...prev, msg({ role: "user", content: textOf(p.content) })]); break;
+      case "user.message": {
+        const text = textOf(p.content);
+        setMessages((prev) => {
+          // Our own send: the optimistic copy is already on screen (the POST reply may still be in flight).
+          const i = prev.findIndex((m) => m.role === "user" && m.pending && m.content === text);
+          if (i >= 0) return prev.map((m, k) => (k === i ? { ...m, pending: false } : m));
+          return [...prev, msg({ role: "user", content: text })];
+        });
+        break;
+      }
       case "agent.message": {
         const text = textOf(p.content);
         setMessages((prev) => {
@@ -212,8 +223,7 @@ function App({ opts }: { opts: TuiOptions }) {
     const s = await createSession({ agent: opts.agent, env: opts.env, workspaceId: opts.workspaceId, model: modelOverride, message: first });
     lastSeq.current = 0;
     streamingMsg.current = null;
-    setMessages(first ? [msg({ role: "user", content: first })] : []);
-    if (first) lastSeq.current = 1; // the seeded user.message is seq 1
+    setMessages(first ? [msg({ role: "user", content: first, pending: true })] : []);
     setGenerating(!!first);
     setSandboxInfo("");
     setSession(s);
@@ -242,7 +252,7 @@ function App({ opts }: { opts: TuiOptions }) {
     setHistIdx(-1);
     try {
       if (!session) { await newSession(text); return; }
-      setMessages((prev) => [...prev, msg({ role: "user", content: text })]);
+      setMessages((prev) => [...prev, msg({ role: "user", content: text, pending: true })]);
       const { events } = await sendMessage(session.id, text);
       for (const e of events) lastSeq.current = Math.max(lastSeq.current, e.seq);
       if (!generating) setGenerating(true);
