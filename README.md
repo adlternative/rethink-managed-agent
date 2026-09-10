@@ -163,6 +163,22 @@ src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
 
+## System prompt
+
+The prompt is the agent's `system` text plus the smallest possible framework sections, and it is
+inspectable: `GET /v1/sessions/:id/system_prompt` (`pma sessions prompt <id>`, `/prompt` in the TUI)
+returns exactly what the last run sent. The default, when `system` is empty, is one sentence:
+"You are a coding agent working in a sandboxed workspace. Paths are relative to the workspace root."
+
+Sections are appended only when they apply, one short block each: `Skills (…)` listing skills the model can
+load with the `skill` tool, `Memory (…)` listing mounts, and text plugins add via `context` /
+`before_agent_start` hooks. To own the layout, use placeholders in `system`: `{{skills}}`, `{{memory}}`,
+`{{plugins}}` — then only the placeholders you wrote are rendered, where you put them.
+
+Change it at any level: `PATCH /v1/agents/:id {system}` (`pma agents update <id> --system … | --system-file F`)
+for future sessions; `PATCH /v1/sessions/:id {system}` (`pma sessions set-system <id> …`, `/prompt set …`)
+for a running session, applied on its next turn and recorded as `session.updated`.
+
 ## Files, skills, memory stores (Managed Agents-shaped)
 
 Binary content lives in an S3-compatible **blob store** (MinIO in compose; `BLOB_ENDPOINT` / `BLOB_BUCKET` /

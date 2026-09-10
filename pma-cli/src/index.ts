@@ -18,7 +18,7 @@ subcommands:
   logout
   models
   providers  list | get <id> | create <id> --api A --base-url U [--auth-env E] [--models id:ctx,...] | update <id> | delete <id>
-  agents     list | get <id> | create <name> <provider/model> [--system S] [--tools t,t] [--packages p,p] [--skills id,id]
+  agents     list | get <id> | create <name> <provider/model> [--system S|--system-file F] [...] | update <id> [--system S ...]
   envs       list | get <id> | create <name> --provider local|docker|e2b [--image I] [--network bridge] [--plugin-host sandbox] [--git URL]
   sessions   list | get <id> | create [--environments ...] [--memory-stores mem[:path]] | attach | mount | unmount | skill add|remove | archive | delete
   session    events <id> | send <id> <text> [--wait] [--file path]... | stream <id> | interrupt <id> | export <id>

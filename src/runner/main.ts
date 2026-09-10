@@ -1,4 +1,4 @@
-import { files, memoryStores, pluginStore, pool, repos, skills, toolOutputs } from "../infra/db.ts";
+import { files, memoryStores, pluginStore, pool, repos, sessionConfig, skills, toolOutputs } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, redis } from "../infra/pubsub.ts";
@@ -144,6 +144,7 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     finishRun,
     recordUsage,
     toolOutputs,
+    recordSystemPrompt: (id, prompt) => sessionConfig.recordSystemPrompt(id, prompt),
     files: { get: async (id) => { const f = await files.content(id); return f ? { name: f.meta.filename, mime: f.meta.mime_type, data: new Uint8Array(f.data) } : null; } },
     getSkills: async (refs) => (await skills.getMany(refs.map((r) => r.skill_id))).map((s) => ({ name: s.name, description: s.description, body: s.body, source: `skill:${s.id}` })),
     getMemoryStores: async (mounts) => {

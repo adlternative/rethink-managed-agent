@@ -46,6 +46,20 @@ export const agents = new Hono()
     });
     return c.json(agent, 201);
   })
+  /** Edit an agent; existing sessions keep their snapshot (change a live one with PATCH /v1/sessions/:id). */
+  .patch("/:id", async (c) => {
+    const body = await readJson<{ name?: string; model?: unknown; system?: string | null; tools?: unknown; packages?: unknown; skills?: unknown }>(c);
+    const patch: Record<string, unknown> = {};
+    if (body.name !== undefined) patch.name = String(body.name);
+    if (body.model !== undefined) patch.model = validateModel(body.model);
+    if (body.system !== undefined) patch.system = body.system === null ? null : String(body.system);
+    if (body.tools !== undefined) patch.tools = validateTools(body.tools);
+    if (body.packages !== undefined) patch.packages = validatePackages(body.packages);
+    if (body.skills !== undefined) patch.skills = validateSkillRefs(body.skills);
+    const a = await repos.agents.update(c.req.param("id"), patch);
+    if (!a) throw notFound("agent", c.req.param("id"));
+    return c.json(a);
+  })
   .get("/", async (c) => c.json({ data: await repos.agents.list() }))
   .get("/:id", async (c) => {
     const a = await repos.agents.get(c.req.param("id"));

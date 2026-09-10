@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
-import { apiGet, apiPost, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, ApiError, type Agent, type ContextSize, type Environment, type ModelInfo, type Session, type SessionEvent, type Usage } from "../lib/client.ts";
+import { apiGet, apiPost, apiRequest, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, ApiError, type Agent, type ContextSize, type Environment, type ModelInfo, type Session, type SessionEvent, type Usage } from "../lib/client.ts";
 import { loadConfig, saveConfig } from "../lib/config.ts";
 import { createSession } from "../cli/sessions.ts";
 import { Input } from "./Input.tsx";
@@ -71,6 +71,7 @@ const COMMANDS: { name: string; desc: string }[] = [
   { name: "/env", desc: "Pick default environment" },
   { name: "/model", desc: "Model override for the next /new" },
   { name: "/status", desc: "Session info" },
+  { name: "/prompt", desc: "Show the system prompt as sent (/prompt set <text> changes it)" },
   { name: "/sandboxes", desc: "List sandboxes" },
   { name: "/export", desc: "Export conversation to a file (--json)" },
   { name: "/cancel", desc: "Interrupt the running turn" },
@@ -437,6 +438,14 @@ function App({ opts }: { opts: TuiOptions }) {
             `usage     ${u ? `${fmtTokens(u.total_tokens)} tokens · in ${fmtTokens(u.input)} · cache ${fmtTokens(u.cache_read)} · out ${fmtTokens(u.output)} · ${u.requests} requests` : "-"}`,
             `envs      ${(s.environments ?? []).map((e) => `${e.key}=${e.environment_id}`).join(", ") || s.environment_id}`,
             `workspace ${s.workspace_id}`, `sandbox   ${sandboxInfo || "-"}`, `host      ${cfg.host}`].join("\n"));
+          return;
+        }
+        case "/prompt": {
+          if (!session) return sys("no session");
+          if (arg.startsWith("set ")) { await apiRequest("PATCH", `/sessions/${session.id}`, { system: arg.slice(4) }); sys("system prompt updated (next turn)"); return; }
+          if (arg === "reset") { await apiRequest("PATCH", `/sessions/${session.id}`, { system: null }); sys("system prompt reset to default (next turn)"); return; }
+          const r = (await apiGet(`/sessions/${session.id}/system_prompt`)) as { rendered: string; source: string };
+          sys(`system prompt (${r.source}):\n${r.rendered}`);
           return;
         }
         case "/sessions": {

@@ -93,6 +93,15 @@ export const repos = {
     async get(id: string): Promise<AgentResource | null> {
       return iso(await one<AgentResource>(pool, `SELECT * FROM agents WHERE id=$1`, [id]));
     },
+    async update(id: string, patch: Partial<Omit<AgentResource, "id" | "created_at">>): Promise<AgentResource | null> {
+      const row = await one<AgentResource>(
+        pool,
+        `UPDATE agents SET name=COALESCE($2,name), model=COALESCE($3::jsonb,model), system=CASE WHEN $8 THEN $4 ELSE system END,
+           tools=COALESCE($5::jsonb,tools), packages=COALESCE($6::jsonb,packages), skills=COALESCE($7::jsonb,skills) WHERE id=$1 RETURNING *`,
+        [id, patch.name ?? null, patch.model ? JSON.stringify(patch.model) : null, patch.system ?? null, patch.tools ? JSON.stringify(patch.tools) : null, patch.packages ? JSON.stringify(patch.packages) : null, patch.skills ? JSON.stringify(patch.skills) : null, "system" in patch],
+      );
+      return iso(row);
+    },
     async list(): Promise<AgentResource[]> {
       return isoAll(await many<AgentResource>(pool, `SELECT * FROM agents ORDER BY created_at`));
     },
@@ -297,6 +306,16 @@ export const memoryStores = {
 
 /** Mid-session configuration changes (mounts / skills). Applied by the runner from the next run. */
 export const sessionConfig = {
+  async setSystem(id: string, system: string | null): Promise<void> {
+    await pool.query(`UPDATE sessions SET agent = jsonb_set(agent, '{system}', $2::jsonb), updated_at=now() WHERE id=$1`, [id, JSON.stringify(system)]);
+  },
+  async recordSystemPrompt(id: string, prompt: string): Promise<void> {
+    await pool.query(`UPDATE sessions SET last_system_prompt=$2 WHERE id=$1`, [id, prompt]);
+  },
+  async lastSystemPrompt(id: string): Promise<string | null> {
+    const r = await pool.query<{ last_system_prompt: string | null }>(`SELECT last_system_prompt FROM sessions WHERE id=$1`, [id]);
+    return r.rows[0]?.last_system_prompt ?? null;
+  },
   async setMemoryStores(id: string, mounts: MemoryMount[]): Promise<void> {
     await pool.query(`UPDATE sessions SET memory_stores=$2, updated_at=now() WHERE id=$1`, [id, JSON.stringify(mounts)]);
   },

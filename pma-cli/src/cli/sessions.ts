@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, fmtCtx, fmtTokens, type Session } from "../lib/client.ts";
+import { apiDelete, apiGet, apiPost, apiRequest, fmtCtx, fmtTokens, type Session } from "../lib/client.ts";
 import { loadConfig } from "../lib/config.ts";
 import { die, fmtTime, parseArgs, printJson, str, table } from "../lib/args.ts";
 
@@ -10,6 +10,8 @@ const USAGE = `sessions subcommand:
   attach <id> <key>=<env_id>[:fork]
   mount <id> <mem_id>[:mount_path]      /  unmount <id> <mem_id>        (memory stores; next turn)
   skill <id> add <skill_id>             /  skill <id> remove <skill_id>
+  set-system <id> (--system <text> | --system-file F | --no-system)      change this session's system prompt (next turn)
+  prompt <id>                           show the system prompt as actually sent
   archive <id>
   delete <id>`;
 
@@ -73,6 +75,18 @@ export async function cmdSessions(args: string[]): Promise<void> {
       const [, , op, sid] = positional;
       if (!a || !sid || (op !== "add" && op !== "remove")) die("usage: pma sessions skill <session> add|remove <skill_id>");
       return printJson(op === "add" ? await apiPost(`/sessions/${a}/skills`, { type: "custom", skill_id: sid }) : await apiDelete(`/sessions/${a}/skills/${sid}`));
+    }
+    case "set-system": {
+      if (!a) die(USAGE);
+      const system = flags["no-system"] ? null : str(flags, "system") ?? (str(flags, "system-file") ? await (await import("node:fs/promises")).readFile(str(flags, "system-file")!, "utf8") : undefined);
+      if (system === undefined) die("usage: pma sessions set-system <id> --system <text> | --system-file F | --no-system");
+      return printJson(await apiRequest("PATCH", `/sessions/${a}`, { system }));
+    }
+    case "prompt": {
+      if (!a) die(USAGE);
+      const r = (await apiGet(`/sessions/${a}/system_prompt`)) as { rendered: string; source: string };
+      console.log(`# source: ${r.source}\n${r.rendered}`);
+      return;
     }
     case "archive":
       if (!a) die("usage: pma sessions archive <id>");

@@ -37,6 +37,7 @@ import type { HostBundle } from "../plugins/bundle.ts";
 import type { SessionInfo } from "../plugins/protocol.ts";
 import { foldEvents, toContentBlocks, type FoldFiles } from "./fold.ts";
 import { mountMemories, syncMemoriesBack, writeAttachments, type Mounted } from "./mounts.ts";
+import { DEFAULT_SYSTEM_PROMPT, renderSystemPrompt, type PromptSections } from "./system-prompt.ts";
 import { compactMessages, contextTokens, needsCompaction, settingsFromEnv } from "./compaction.ts";
 import { resolveModel } from "./models.ts";
 import { createTools, truncateOutput, type ToolContext } from "./tools.ts";
@@ -102,6 +103,8 @@ export interface RunDeps {
   finishRun(sessionId: SessionId, stopReason: StopReason, consumedSeq: number): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }>;
   /** Accumulate one model request's usage on the session row. */
   recordUsage(sessionId: SessionId, usage: Omit<Usage, "requests">, context: ContextSize): Promise<Usage>;
+  /** Store the system prompt actually sent this run (GET /v1/sessions/:id/system_prompt). */
+  recordSystemPrompt(sessionId: SessionId, prompt: string): Promise<void>;
   /** Uploaded files (for image blocks and document attachments). */
   files: FoldFiles;
   /** Skill resources referenced by the agent / session. */
@@ -115,8 +118,6 @@ export interface RunDeps {
 
 export type RunOutcome = { status: "busy" } | { status: "done"; stopReason: StopReason; unconsumedSeq: number | null };
 
-const DEFAULT_SYSTEM_PROMPT =
-  "You are a coding agent working inside a sandboxed workspace. Use the available tools to inspect and change files and to run commands. All paths are relative to the workspace root. Be concise.";
 
 const LLM_ROLES = new Set(["user", "assistant", "toolResult"]);
 const convertToLlm = (messages: AgentMessage[]): Message[] => messages.filter((m): m is Message => LLM_ROLES.has(m.role));
@@ -161,13 +162,6 @@ function skillTool(skills: Skill[], prompts: PromptTemplate[]): AgentTool | null
       return { content: [{ type: "text", text: s.body }], details: {} };
     },
   };
-}
-
-function skillsPrompt(skills: Skill[], prompts: PromptTemplate[]): string {
-  const lines: string[] = [];
-  if (skills.length) lines.push("Available skills (load one with the `skill` tool before using it):", ...skills.map((s) => `- ${s.name}: ${s.description}`));
-  if (prompts.length) lines.push("Available prompt templates (load with the `skill` tool):", ...prompts.map((p) => `- ${p.name}: ${p.description}`));
-  return lines.join("\n");
 }
 
 function isAllowedUrl(url: string): boolean {
@@ -403,15 +397,19 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     const allSkills = [...plugins.skills, ...dbSkills];
     const st = skillTool(allSkills, plugins.prompts);
     if (st) tools.push(st);
-    const memoryPrompt = memoryStores.length
-      ? `Persistent memory directories are mounted at ${memoryStores.map((m) => m.mount_path).join(", ")}${memoryStores.some((m) => m.store.description) ? ` (${memoryStores.filter((m) => m.store.description).map((m) => `${m.mount_path}: ${m.store.description}`).join("; ")})` : ""}. They survive this session: read them for prior notes and write durable notes there (e.g. <mount>/notes.md) for future sessions.`
-      : "";
-    const baseSystemPrompt = [session.agent.system ?? DEFAULT_SYSTEM_PROMPT, skillsPrompt(allSkills, plugins.prompts), memoryPrompt].filter(Boolean).join("\n\n");
-
-    let runSystemPrompt = baseSystemPrompt;
+    // The prompt is the user's text plus minimal sections; plugins contribute through {{plugins}}.
+    const sections: PromptSections = {
+      skills: allSkills.map((x) => ({ name: x.name, description: x.description })),
+      prompts: plugins.prompts.map((x) => ({ name: x.name, description: x.description })),
+      memory: memoryStores.map((m) => ({ mount_path: m.mount_path, description: m.store.description || undefined })),
+    };
+    let userSystem: string = session.agent.system ?? "";
+    let pluginText = ""; // from before_agent_start (whole run)
+    const baseSystemPrompt = renderSystemPrompt(userSystem, sections);
     const systemPromptFor = async (msgs: AgentMessage[]): Promise<string> => {
-      const r = await host?.emit(info, { type: "context", systemPrompt: runSystemPrompt, messageCount: msgs.length, contextTokens: contextTokens(msgs), contextWindow: model.contextWindow });
-      return r?.appendSystemPrompt ? `${runSystemPrompt}\n\n${r.appendSystemPrompt}` : runSystemPrompt;
+      const r = await host?.emit(info, { type: "context", systemPrompt: baseSystemPrompt, messageCount: msgs.length, contextTokens: contextTokens(msgs), contextWindow: model.contextWindow });
+      const plug = [pluginText, r?.appendSystemPrompt ?? ""].filter(Boolean).join("\n\n");
+      return renderSystemPrompt(userSystem, { ...sections, plugins: plug });
     };
 
     await host?.emit(info, { type: "session_start", sessionId });
@@ -441,8 +439,8 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       }
       if (!skipModel) {
         const pre = await host?.emit(info, { type: "before_agent_start", systemPrompt: baseSystemPrompt, messageCount: messages.length, trigger: text });
-        if (pre?.systemPrompt) runSystemPrompt = pre.systemPrompt;
-        if (pre?.appendSystemPrompt) runSystemPrompt = `${runSystemPrompt}\n\n${pre.appendSystemPrompt}`;
+        if (pre?.systemPrompt) userSystem = pre.systemPrompt;
+        if (pre?.appendSystemPrompt) pluginText = pre.appendSystemPrompt;
         if (pre?.injectMessage) {
           const injected: UserMessage = { role: "user", content: [{ type: "text", text: pre.injectMessage }], timestamp: Date.now() };
           const seq = seqOf.get(messages[messages.length - 1]!);
@@ -452,6 +450,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       }
     }
     const context: AgentContext = { systemPrompt: await systemPromptFor(messages), messages, tools };
+    await deps.recordSystemPrompt(sessionId, context.systemPrompt);
     const config: AgentLoopConfig = {
       model,
       convertToLlm,

@@ -6,7 +6,8 @@ import { invalid, notFound, readJson } from "../errors.ts";
 import { validateModel, validatePackages, validateTools } from "./agents.ts";
 import { validateSkillRefs } from "./skills.ts";
 import { validateMounts } from "./memories.ts";
-import { sessionConfig } from "../../infra/db.ts";
+import { sessionConfig, skills as skillsRepo } from "../../infra/db.ts";
+import { renderSystemPrompt } from "../../harness/system-prompt.ts";
 import { validateWorkspaceSpec } from "./environments.ts";
 import { events, sendUserEvents, validateUserEvents } from "./events.ts";
 
@@ -99,6 +100,31 @@ export const sessions = new Hono()
       await sendUserEvents(session, validateUserEvents(body.initial_events));
     }
     return c.json(session, 201);
+  })
+  /** Change this session's system prompt (next turn). `null` restores the default. */
+  .patch("/:id", async (c) => {
+    const s = await getLive(c.req.param("id"));
+    const body = await readJson<{ system?: string | null }>(c);
+    if (body.system === undefined) throw invalid("body must include system (string or null)");
+    const system = body.system === null ? null : String(body.system);
+    await sessionConfig.setSystem(s.id, system);
+    await appendEvents(s.id, [{ type: "session.updated", changes: { system } }]);
+    return c.json({ ...s, agent: { ...s.agent, system } });
+  })
+  /**
+   * The system prompt as it is actually sent: the one recorded by the last run, or a preview rendered
+   * from the current configuration (package skills and plugin text only appear once a run happened).
+   */
+  .get("/:id/system_prompt", async (c) => {
+    const s = await repos.sessions.get(c.req.param("id"));
+    if (!s) throw notFound("session", c.req.param("id"));
+    const last = await sessionConfig.lastSystemPrompt(s.id);
+    const dbSkills = await skillsRepo.getMany((s.agent.skills ?? []).map((r) => r.skill_id));
+    const preview = renderSystemPrompt(s.agent.system, {
+      skills: dbSkills.map((x) => ({ name: x.name, description: x.description })),
+      memory: s.memory_stores.map((m) => ({ mount_path: m.mount_path })),
+    });
+    return c.json({ session_id: s.id, system: s.agent.system, rendered: last ?? preview, source: last ? "last_run" : "preview" });
   })
   /** Mid-session changes: mount / unmount memory stores and add / remove skills. Applied from the next turn. */
   .post("/:id/memory_stores", async (c) => {
