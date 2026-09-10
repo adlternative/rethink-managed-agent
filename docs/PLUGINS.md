@@ -128,6 +128,8 @@ Hooks and tools are wired into the pi-agent-core loop in `src/harness/run-turn.t
 | `fork` | `fork` tool: delegate a standalone brief to a sub-agent (`ctx.agent.run`), optionally read-only |
 | `safety-net` | `tool_call` hook blocking `rm -rf /`, force push, hard reset, `DROP TABLE`, disk wipes |
 | `web-fetch` | `web_fetch` tool over `ctx.fetch` plus a `web-research` skill |
+| `outcome` | Managed-Agents-style outcomes: `/outcome <goal> \| rubric: … \| max: N`; at `session_end` a read-only sub-agent gathers evidence, the model judges it, and `needs_revision` feedback is sent back as a new turn until satisfied or the cap |
+| `webhook` | `/webhook set <url> [secret]`; POSTs `session.started` / `session.ended` / `session.error` through `ctx.fetch` with an HMAC-SHA256 `x-pma-signature` |
 
 All four, plus the pi fixture below, were exercised in a live session; see the commit message for the transcript summary.
 
@@ -142,3 +144,11 @@ work; anything that needs the TUI or the local filesystem does not, by design.
 The earlier experiment that hosted pi-coding-agent's own `AgentSession` (full pi extension API,
 extensions running unsandboxed in the runner) is kept behind `EXPERIMENTAL_PI_PACKAGES=1`; see
 `docs/PI_EXTENSIONS.md`. It is not the supported path.
+
+## What is a plugin vs core
+
+Outcomes and webhooks are plugins (above): they only need hooks, `ctx.model`, `ctx.agent.run`, `ctx.fetch`
+and `ctx.session.send`. Scheduled runs are not: plugins only live inside a run, so a cron trigger needs a
+process that exists between runs. Today that is any external scheduler calling
+`pma sessions create --agent … --env … --message …` (or the HTTP API); a `/v1/schedules` table plus a
+runner tick is the ~100-line core addition if platform-managed schedules are ever wanted.

@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-webhook", "version": "0.1.0", "type": "module", "description": "POST session lifecycle events to a URL (HMAC-SHA256 signed). Configure with /webhook set <url> [secret].", "pma": { "plugins": ["./index.ts"] } }

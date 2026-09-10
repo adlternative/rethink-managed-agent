@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-outcome", "version": "0.1.0", "type": "module", "description": "Define an outcome with a rubric; the plugin judges the run when it ends and sends the agent back with feedback until it is satisfied (max iterations).", "pma": { "plugins": ["./index.ts"] } }
