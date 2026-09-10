@@ -1,0 +1,9 @@
+> pwd
+
+
+
+▪ bash({"command":"pwd"})
+  /data/sandboxes/sbx_hq5wQvnzrrnm
+  
+
+The current workspace root is `/data/sandboxes/sbx_hq5wQvnzrrnm`.

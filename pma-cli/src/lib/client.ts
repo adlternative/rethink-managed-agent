@@ -41,10 +41,10 @@ export function interrupt(sessionId: string): Promise<unknown> {
 }
 
 export type StreamItem =
-  | { type: "agent.message_delta"; text: string }
-  | { type: "agent.thinking_delta"; text: string }
-  | { type: "agent.tool_use_start"; index: number; name: string }
-  | { type: "agent.tool_use_delta"; index: number; text: string }
+  | { type: "agent.message_delta"; stream_id: string; text: string }
+  | { type: "agent.thinking_delta"; stream_id: string; text: string }
+  | { type: "agent.tool_use_start"; stream_id: string; index: number; name: string }
+  | { type: "agent.tool_use_delta"; stream_id: string; index: number; text: string }
   | { type: "event"; event: SessionEvent };
 
 /**
@@ -85,9 +85,10 @@ export async function streamEvents(
           }
           if (!data) continue;
           const parsed = JSON.parse(data);
-          const item: StreamItem = type === "agent.message_delta" || type === "agent.thinking_delta" ? { type, text: parsed.text }
-            : type === "agent.tool_use_start" ? { type, index: parsed.index, name: parsed.name }
-            : type === "agent.tool_use_delta" ? { type, index: parsed.index, text: parsed.text }
+          const sid = String(parsed.stream_id ?? "");
+          const item: StreamItem = type === "agent.message_delta" || type === "agent.thinking_delta" ? { type, stream_id: sid, text: parsed.text }
+            : type === "agent.tool_use_start" ? { type, stream_id: sid, index: parsed.index, name: parsed.name }
+            : type === "agent.tool_use_delta" ? { type, stream_id: sid, index: parsed.index, text: parsed.text }
             : { type: "event", event: parsed };
           if (item.type === "event") last = Math.max(last, item.event.seq);
           if (onItem(item)) { await reader.cancel().catch(() => {}); return last; }

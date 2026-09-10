@@ -17,6 +17,8 @@ interface Message {
   /** streaming tool-call argument fragments (before the persisted agent.tool_use arrives) */
   argsPreview?: string;
   streamIndex?: number;
+  /** stream id shared by an assistant message's deltas and its persisted event */
+  streamId?: string;
   result?: string;
   streaming?: boolean;
   /** Optimistically shown user message not yet confirmed by its persisted event. */
@@ -41,7 +43,10 @@ function buildMessages(events: SessionEvent[]): { messages: Message[]; lastSeq: 
     const p = e.payload;
     switch (e.type) {
       case "user.message": out.push(msg({ role: "user", content: textOf(p.content) })); break;
-      case "agent.message": { const t = textOf(p.content); if (t) out.push(msg({ role: "agent", content: t })); break; }
+      case "agent.message": {
+        if (p.thinking) out.push(msg({ role: "thinking", content: p.thinking }));
+        const t = textOf(p.content); if (t) out.push(msg({ role: "agent", content: t })); break;
+      }
       case "agent.tool_use": { const m = msg({ role: "tool", content: formatToolDesc(p.name, p.input), toolName: p.name, toolUseId: p.tool_use_id, toolStatus: "success" }); tools.set(p.tool_use_id, m); out.push(m); break; }
       case "agent.tool_result": { const m = tools.get(p.tool_use_id); if (m) { m.result = textOf(p.content); m.toolStatus = p.is_error ? "error" : "success"; } break; }
       case "session.status_running": running = true; break;
@@ -152,12 +157,12 @@ function App({ opts }: { opts: TuiOptions }) {
     if (item.type === "agent.thinking_delta") {
       setMessages((prev) => {
         const cur = thinkingMsg.current;
-        if (cur && prev.includes(cur)) {
+        if (cur && prev.includes(cur) && cur.streamId === item.stream_id) {
           const upd = { ...cur, content: cur.content + item.text };
           thinkingMsg.current = upd;
           return prev.map((m) => (m === cur ? upd : m));
         }
-        const m = msg({ role: "thinking", content: item.text, streaming: true });
+        const m = msg({ role: "thinking", content: item.text, streaming: true, streamId: item.stream_id });
         thinkingMsg.current = m;
         return [...prev, m];
       });
@@ -186,12 +191,12 @@ function App({ opts }: { opts: TuiOptions }) {
       finishThinking();
       setMessages((prev) => {
         const cur = streamingMsg.current;
-        if (cur && prev.includes(cur)) {
+        if (cur && prev.includes(cur) && cur.streamId === item.stream_id) {
           const upd = { ...cur, content: cur.content + item.text };
           streamingMsg.current = upd;
           return prev.map((m) => (m === cur ? upd : m));
         }
-        const m = msg({ role: "agent", content: item.text, streaming: true });
+        const m = msg({ role: "agent", content: item.text, streaming: true, streamId: item.stream_id });
         streamingMsg.current = m;
         return [...prev, m];
       });
@@ -225,11 +230,17 @@ function App({ opts }: { opts: TuiOptions }) {
       }
       case "agent.message": {
         const text = textOf(p.content);
+        finishThinking();
         setMessages((prev) => {
           const cur = streamingMsg.current;
           streamingMsg.current = null;
-          if (cur && prev.includes(cur)) return prev.map((m) => (m === cur ? { ...m, content: text || m.content, streaming: false } : m));
-          return text ? [...prev, msg({ role: "agent", content: text })] : prev;
+          const byId = p.stream_id ? prev.find((m) => m.role === "agent" && m.streamId === p.stream_id) : undefined;
+          const target = byId ?? (cur && prev.includes(cur) ? cur : undefined);
+          let next = prev;
+          if (target) next = prev.map((m) => (m === target ? { ...m, content: text || m.content, streaming: false } : m));
+          else if (p.thinking && !prev.some((m) => m.role === "thinking" && m.streamId === p.stream_id)) next = [...prev, msg({ role: "thinking", content: p.thinking })];
+          if (!target && text) next = [...next, msg({ role: "agent", content: text, streamId: p.stream_id })];
+          return next;
         });
         break;
       }

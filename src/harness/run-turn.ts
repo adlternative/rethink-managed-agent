@@ -97,6 +97,8 @@ export interface RunDeps {
   finishRun(sessionId: SessionId, stopReason: StopReason, consumedSeq: number): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }>;
   /** Accumulate one model request's usage on the session row. */
   recordUsage(sessionId: SessionId, usage: Omit<Usage, "requests">, context: ContextSize): Promise<Usage>;
+  /** Spill store for oversized tool outputs. */
+  toolOutputs: { put(sessionId: SessionId, toolUseId: string, toolName: string, content: string): Promise<void>; get(sessionId: SessionId, toolUseId: string): Promise<{ tool_name: string; content: string; bytes: number } | null> };
 }
 
 export type RunOutcome = { status: "busy" } | { status: "done"; stopReason: StopReason; unconsumedSeq: number | null };
@@ -111,6 +113,7 @@ function textBlocks(content: { type: string; text?: string }[]): ContentBlock[] 
   return content.flatMap((c) => (c.type === "text" && c.text !== undefined ? [{ type: "text" as const, text: c.text }] : []));
 }
 const blocksText = (content: { type: string; text?: string }[]) => textBlocks(content).map((b) => b.text).join("");
+const thinkingText = (m: { content: { type: string; thinking?: string }[] }) => m.content.filter((c) => c.type === "thinking").map((c) => c.thinking ?? "").join("\n");
 
 /** Credentials embedded in a remote URL must not land in the event log. */
 export function redactRef(ref: WorkspaceRef): WorkspaceRef {
@@ -204,6 +207,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   const ctx: ToolContext = {
     signal: abort.signal,
     envKeys: [...envs.keys()],
+    spill: {
+      put: (toolUseId, toolName, content) => deps.toolOutputs.put(sessionId, toolUseId, toolName, content),
+      get: (toolUseId) => deps.toolOutputs.get(sessionId, toolUseId),
+    },
     sandbox: async (key = "main") => {
       const e = envs.get(key);
       if (!e) throw new Error(`no environment ${JSON.stringify(key)} attached to this session (have: ${[...envs.keys()].join(", ")})`);
@@ -341,7 +348,6 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         const prompt: UserMessage = { role: "user", content: [{ type: "text", text: task }], timestamp: Date.now() };
         await runAgentLoop([prompt], sub, cfg, async (ev) => {
           if (ev.type === "message_end" && ev.message.role === "assistant") last = blocksText(ev.message.content);
-          if (ev.type === "tool_execution_start") await deps.publish({ type: "agent.message_delta", session_id: sessionId, text: "" });
         }, abort.signal, deps.models.streamSimple.bind(deps.models));
         return last;
       },
@@ -408,17 +414,24 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       },
     };
 
+    // Every assistant message gets a stream id: its deltas and its persisted agent.message share it,
+    // so a client that reconnects mid-stream can attach late deltas and finalize the right message.
+    let streamSeq = 0;
+    let streamId = "";
     const sink = async (ev: AgentEvent) => {
       switch (ev.type) {
+        case "message_start":
+          if (ev.message.role === "assistant") streamId = `${sessionId}:${Date.now().toString(36)}:${++streamSeq}`;
+          break;
         case "message_update": {
           const e = ev.assistantMessageEvent;
           // Stream-only previews (never persisted): text, reasoning, and tool-call argument fragments.
-          if (e.type === "text_delta") await deps.publish({ type: "agent.message_delta", session_id: sessionId, text: e.delta });
-          else if (e.type === "thinking_delta") await deps.publish({ type: "agent.thinking_delta", session_id: sessionId, text: e.delta });
+          if (e.type === "text_delta") await deps.publish({ type: "agent.message_delta", session_id: sessionId, stream_id: streamId, text: e.delta });
+          else if (e.type === "thinking_delta") await deps.publish({ type: "agent.thinking_delta", session_id: sessionId, stream_id: streamId, text: e.delta });
           else if (e.type === "toolcall_start") {
             const block = e.partial.content[e.contentIndex];
-            await deps.publish({ type: "agent.tool_use_start", session_id: sessionId, index: e.contentIndex, name: block?.type === "toolCall" ? block.name : "tool" });
-          } else if (e.type === "toolcall_delta") await deps.publish({ type: "agent.tool_use_delta", session_id: sessionId, index: e.contentIndex, text: e.delta });
+            await deps.publish({ type: "agent.tool_use_start", session_id: sessionId, stream_id: streamId, index: e.contentIndex, name: block?.type === "toolCall" ? block.name : "tool" });
+          } else if (e.type === "toolcall_delta") await deps.publish({ type: "agent.tool_use_delta", session_id: sessionId, stream_id: streamId, index: e.contentIndex, text: e.delta });
           break;
         }
         case "tool_execution_start":
@@ -427,7 +440,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         case "message_end": {
           const m = ev.message;
           if (m.role === "assistant") {
-            const [ev2] = await deps.appendEvents(sessionId, [{ type: "agent.message", content: toContentBlocks(m), pi: m }]);
+            const [ev2] = await deps.appendEvents(sessionId, [{ type: "agent.message", content: toContentBlocks(m), pi: m, stream_id: streamId, thinking: thinkingText(m) || undefined }]);
             seqOf.set(m, ev2!.seq);
             await publishAll([ev2!]);
             // Usage is first-class: one span per model request, cumulative counters on the session.

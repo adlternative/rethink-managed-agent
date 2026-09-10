@@ -10,6 +10,11 @@ export interface ToolContext {
   /** Keys of the environments attached to the session; the `env` tool parameter is offered when there are several. */
   envKeys?: string[];
   signal?: AbortSignal;
+  /** Spill-to-store: keep the full text of an oversized tool result, keyed by tool call id. */
+  spill?: {
+    put(toolUseId: string, toolName: string, content: string): Promise<void>;
+    get(toolUseId: string): Promise<{ tool_name: string; content: string; bytes: number } | null>;
+  };
 }
 
 /** Adds the optional `env` parameter when a session has more than one environment attached. */
@@ -24,25 +29,36 @@ function withEnv<S extends TSchema>(ctx: ToolContext, schema: S): TSchema {
 const MAX_OUTPUT_CHARS = 30_000;
 
 /** Keep head and tail of oversized output so both the start and the final error remain visible. */
-export function truncateOutput(s: string, max = MAX_OUTPUT_CHARS): string {
+export function truncateOutput(s: string, max = MAX_OUTPUT_CHARS, note = ""): string {
   if (s.length <= max) return s;
   const half = Math.floor(max / 2);
-  return `${s.slice(0, half)}\n\n[... ${s.length - max} chars truncated ...]\n\n${s.slice(-half)}`;
+  return `${s.slice(0, half)}\n\n[... ${s.length - max} chars truncated ...${note}]\n\n${s.slice(-half)}`;
+}
+
+/**
+ * Truncate for the model, but keep the whole thing: the full text goes to the spill store under
+ * the tool call id and the note tells the model how to get at it with `tool_output`.
+ */
+async function truncateWithSpill(ctx: ToolContext, toolUseId: string, toolName: string, s: string): Promise<string> {
+  if (s.length <= MAX_OUTPUT_CHARS) return s;
+  if (!ctx.spill) return truncateOutput(s);
+  await ctx.spill.put(toolUseId, toolName, s);
+  return truncateOutput(s, MAX_OUTPUT_CHARS, ` full ${s.length} chars kept: call tool_output with tool_use_id "${toolUseId}" and a grep pattern or offset/limit to read the rest`);
 }
 
 function tool(
   name: BuiltinToolName,
   description: string,
   parameters: TSchema,
-  run: (params: any, signal?: AbortSignal) => Promise<string>,
+  run: (params: any, signal: AbortSignal | undefined, toolCallId: string) => Promise<string>,
 ): AgentTool {
   return {
     name,
     label: name,
     description,
     parameters,
-    async execute(_id, params, signal): Promise<AgentToolResult<undefined>> {
-      const text = await run(params, signal);
+    async execute(id, params, signal): Promise<AgentToolResult<undefined>> {
+      const text = await run(params, signal, id);
       return { content: [{ type: "text", text }], details: undefined };
     },
   };
@@ -60,7 +76,7 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
         command: Type.String({ description: "Bash command to execute" }),
         timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional)" })),
       })),
-      async ({ command, timeout, env: envKey }, signal) => {
+      async ({ command, timeout, env: envKey }, signal, toolCallId) => {
         const sb = await ctx.sandbox(envKey);
         let out = "";
         let code: number | undefined;
@@ -71,7 +87,7 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
           if (chunk.type === "exit") code = chunk.code;
           else out += chunk.data ?? "";
         }
-        const body = truncateOutput(out);
+        const body = await truncateWithSpill(ctx, toolCallId, "bash", out);
         if (code !== 0) throw new Error(`${body}\n\nCommand exited with code ${code ?? "unknown"}${code === 137 ? ` (killed: timeout ${timeoutMs}ms or interrupt)` : ""}`);
         return body || "(no output)";
       },
@@ -86,7 +102,7 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
         offset: Type.Optional(Type.Number({ description: "First line to read (1-indexed)" })),
         limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
       })),
-      async ({ path, offset, limit, env: envKey }) => {
+      async ({ path, offset, limit, env: envKey }, _signal, toolCallId) => {
         const sb = await ctx.sandbox(envKey);
         const lines = (await readText(sb, resolvePath(sb, path))).split("\n");
         const start = Math.max(0, (offset ?? 1) - 1);
@@ -97,7 +113,7 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
           .map((l, i) => `${String(start + i + 1).padStart(6)}\t${l}`)
           .join("\n");
         if (end < lines.length) out += `\n\n[${lines.length - end} more lines. Use offset=${end + 1} to continue.]`;
-        return truncateOutput(out);
+        return truncateWithSpill(ctx, toolCallId, "read", out);
       },
     ),
 
@@ -141,10 +157,47 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
     ),
 };
 
+/** Reads back a spilled tool output: grep for lines, or a line window. */
+function toolOutputTool(ctx: ToolContext): AgentTool {
+  return {
+    name: "tool_output",
+    label: "tool_output",
+    description: "Read the full output of an earlier tool call whose result was truncated. Give the tool_use_id from the truncation note plus either `grep` (regex; returns matching lines with line numbers, max 200) or `offset`/`limit` (1-indexed line window, default 200 lines).",
+    parameters: Type.Object({
+      tool_use_id: Type.String(),
+      grep: Type.Optional(Type.String({ description: "regex; case-insensitive" })),
+      offset: Type.Optional(Type.Integer({ minimum: 1 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })),
+    }),
+    executionMode: "sequential",
+    async execute(_id, params) {
+      const { tool_use_id, grep, offset, limit } = params as { tool_use_id: string; grep?: string; offset?: number; limit?: number };
+      const rec = await ctx.spill?.get(tool_use_id);
+      if (!rec) throw new Error(`no stored output for tool call ${tool_use_id}`);
+      const lines = rec.content.split("\n");
+      let out: string;
+      if (grep) {
+        let re: RegExp;
+        try { re = new RegExp(grep, "i"); } catch (e) { throw new Error(`bad grep regex: ${(e as Error).message}`); }
+        const hits = lines.map((l, i) => [i + 1, l] as const).filter(([, l]) => re.test(l));
+        out = hits.slice(0, 200).map(([n, l]) => `${String(n).padStart(6)}\t${l}`).join("\n") + (hits.length > 200 ? `\n\n[${hits.length - 200} more matches]` : "") || "(no matches)";
+      } else {
+        const start = Math.max(0, (offset ?? 1) - 1);
+        const end = Math.min(lines.length, start + (limit ?? 200));
+        out = lines.slice(start, end).map((l, i) => `${String(start + i + 1).padStart(6)}\t${l}`).join("\n");
+        if (end < lines.length) out += `\n\n[${lines.length - end} more lines. Use offset=${end + 1} to continue.]`;
+      }
+      return { content: [{ type: "text", text: `(${rec.tool_name} output, ${lines.length} lines, ${rec.bytes} bytes)\n${truncateOutput(out)}` }], details: undefined };
+    },
+  };
+}
+
 export function createTools(names: BuiltinToolName[], ctx: ToolContext): AgentTool[] {
-  return names.map((name) => {
+  const tools = names.map((name) => {
     const make = factories[name];
     if (!make) throw new Error(`Unknown builtin tool: ${name}`);
     return make(ctx);
   });
+  if (ctx.spill) tools.push(toolOutputTool(ctx));
+  return tools;
 }

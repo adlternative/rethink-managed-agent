@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { repos } from "../../infra/db.ts";
+import { repos, toolOutputs } from "../../infra/db.ts";
 import { appendEvents } from "../../infra/events.ts";
 import type { AgentResource, SessionEnvironment, SessionResource, WorkspaceRef, WorkspaceResource, WorkspaceSpec } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
@@ -101,6 +101,12 @@ export const sessions = new Hono()
     return c.json({ ...s, environments: [...s.environments, e] }, 201);
   })
   .get("/", async (c) => c.json({ data: await repos.sessions.list() }))
+  /** Full text of a tool result that was truncated for the model. */
+  .get("/:id/tool-outputs/:toolUseId", async (c) => {
+    const rec = await toolOutputs.get(c.req.param("id"), c.req.param("toolUseId"));
+    if (!rec) throw notFound("tool output", c.req.param("toolUseId"));
+    return c.text(rec.content, 200, { "content-type": "text/plain; charset=utf-8", "x-tool-name": rec.tool_name });
+  })
   .get("/:id", async (c) => {
     const s = await repos.sessions.get(c.req.param("id"));
     if (!s) throw notFound("session", c.req.param("id"));

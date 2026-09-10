@@ -194,3 +194,17 @@ export const pluginStore = {
     );
   },
 };
+
+export const toolOutputs = {
+  async put(sessionId: string, toolUseId: string, toolName: string, content: string): Promise<void> {
+    await pool.query(
+      `INSERT INTO tool_outputs (session_id, tool_use_id, tool_name, content, bytes) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (session_id, tool_use_id) DO UPDATE SET content=EXCLUDED.content, bytes=EXCLUDED.bytes`,
+      [sessionId, toolUseId, toolName, content, Buffer.byteLength(content)],
+    );
+  },
+  async get(sessionId: string, toolUseId: string): Promise<{ tool_name: string; content: string; bytes: number } | null> {
+    const r = await pool.query<{ tool_name: string; content: string; bytes: number }>(`SELECT tool_name, content, bytes FROM tool_outputs WHERE session_id=$1 AND tool_use_id=$2`, [sessionId, toolUseId]);
+    return r.rows[0] ?? null;
+  },
+};

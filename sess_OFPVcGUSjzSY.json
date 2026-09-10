@@ -1,0 +1,294 @@
+[
+  {
+    "id": "evt_th_gYttANmMU",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 1,
+    "type": "user.message",
+    "payload": {
+      "type": "user.message",
+      "content": [
+        {
+          "text": "pwd",
+          "type": "text"
+        }
+      ]
+    },
+    "created_at": "2026-09-10T09:30:11.921Z"
+  },
+  {
+    "id": "evt_INKsqRapqju7",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 2,
+    "type": "session.status_running",
+    "payload": {
+      "type": "session.status_running"
+    },
+    "created_at": "2026-09-10T09:30:11.938Z"
+  },
+  {
+    "id": "evt_S4ws1RK_4tm9",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 3,
+    "type": "agent.message",
+    "payload": {
+      "pi": {
+        "api": "openai-completions",
+        "role": "assistant",
+        "model": "ultimate",
+        "usage": {
+          "cost": {
+            "input": 0,
+            "total": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "input": 988,
+          "output": 52,
+          "cacheRead": 0,
+          "reasoning": 0,
+          "cacheWrite": 0,
+          "totalTokens": 1040
+        },
+        "content": [
+          {
+            "id": "toolu_bdrk_01VZd3pybYA6STiLmE9THQby",
+            "name": "bash",
+            "type": "toolCall",
+            "arguments": {
+              "command": "pwd"
+            }
+          }
+        ],
+        "provider": "qoder",
+        "timestamp": 1789032611955,
+        "responseId": "75a68a1c-7ac0-4014-8e3b-5b018f2b1858",
+        "stopReason": "toolUse",
+        "rawStopReason": "tool_calls"
+      },
+      "type": "agent.message",
+      "content": []
+    },
+    "created_at": "2026-09-10T09:30:14.394Z"
+  },
+  {
+    "id": "evt_CAjAJPWRpxw3",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 4,
+    "type": "span.model_request_end",
+    "payload": {
+      "type": "span.model_request_end",
+      "model": "qoder/ultimate",
+      "usage": {
+        "input": 988,
+        "output": 52,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total_tokens": 1040
+      },
+      "context": {
+        "model": "qoder/ultimate",
+        "ratio": 0.00104,
+        "tokens": 1040,
+        "window": 1000000
+      },
+      "stop_reason": "toolUse"
+    },
+    "created_at": "2026-09-10T09:30:14.413Z"
+  },
+  {
+    "id": "evt_6aFoE5pX457Y",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 5,
+    "type": "agent.tool_use",
+    "payload": {
+      "name": "bash",
+      "type": "agent.tool_use",
+      "input": {
+        "command": "pwd"
+      },
+      "tool_use_id": "toolu_bdrk_01VZd3pybYA6STiLmE9THQby"
+    },
+    "created_at": "2026-09-10T09:30:14.418Z"
+  },
+  {
+    "id": "evt_Ojsg3R16_Ih2",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 6,
+    "type": "sandbox.acquired",
+    "payload": {
+      "env": "main",
+      "type": "sandbox.acquired",
+      "origin": "created",
+      "provider": "local",
+      "sandbox_id": "sbx_hq5wQvnzrrnm"
+    },
+    "created_at": "2026-09-10T09:30:14.436Z"
+  },
+  {
+    "id": "evt_ZzstCH70xw7M",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 7,
+    "type": "agent.tool_result",
+    "payload": {
+      "pi": {
+        "role": "toolResult",
+        "content": [
+          {
+            "text": "/data/sandboxes/sbx_hq5wQvnzrrnm\n",
+            "type": "text"
+          }
+        ],
+        "isError": false,
+        "toolName": "bash",
+        "timestamp": 1789032614445,
+        "toolCallId": "toolu_bdrk_01VZd3pybYA6STiLmE9THQby"
+      },
+      "type": "agent.tool_result",
+      "content": [
+        {
+          "text": "/data/sandboxes/sbx_hq5wQvnzrrnm\n",
+          "type": "text"
+        }
+      ],
+      "is_error": false,
+      "tool_use_id": "toolu_bdrk_01VZd3pybYA6STiLmE9THQby"
+    },
+    "created_at": "2026-09-10T09:30:14.446Z"
+  },
+  {
+    "id": "evt_q2resMeIkGq-",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 8,
+    "type": "agent.message",
+    "payload": {
+      "pi": {
+        "api": "openai-completions",
+        "role": "assistant",
+        "model": "ultimate",
+        "usage": {
+          "cost": {
+            "input": 0,
+            "total": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "input": 1073,
+          "output": 30,
+          "cacheRead": 0,
+          "reasoning": 0,
+          "cacheWrite": 0,
+          "totalTokens": 1103
+        },
+        "content": [
+          {
+            "text": "The current workspace root is `/data/sandboxes/sbx_hq5wQvnzrrnm`.",
+            "type": "text"
+          }
+        ],
+        "provider": "qoder",
+        "timestamp": 1789032614450,
+        "responseId": "11d61b31-cf2a-42d5-b5e6-0f9c601d1985",
+        "stopReason": "stop",
+        "rawStopReason": "stop"
+      },
+      "type": "agent.message",
+      "content": [
+        {
+          "text": "The current workspace root is `/data/sandboxes/sbx_hq5wQvnzrrnm`.",
+          "type": "text"
+        }
+      ]
+    },
+    "created_at": "2026-09-10T09:30:17.676Z"
+  },
+  {
+    "id": "evt_edo5pkoic_FV",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 9,
+    "type": "span.model_request_end",
+    "payload": {
+      "type": "span.model_request_end",
+      "model": "qoder/ultimate",
+      "usage": {
+        "input": 1073,
+        "output": 30,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total_tokens": 1103
+      },
+      "context": {
+        "model": "qoder/ultimate",
+        "ratio": 0.001103,
+        "tokens": 1103,
+        "window": 1000000
+      },
+      "stop_reason": "stop"
+    },
+    "created_at": "2026-09-10T09:30:17.690Z"
+  },
+  {
+    "id": "evt_CeJqjf7HRqBq",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 10,
+    "type": "workspace.captured",
+    "payload": {
+      "env": "main",
+      "ref": {
+        "kind": "dir",
+        "path": "/data/workspaces/sbx_hq5wQvnzrrnm"
+      },
+      "type": "workspace.captured",
+      "workspace_id": "ws_KfZk1gQv6gWC"
+    },
+    "created_at": "2026-09-10T09:30:17.704Z"
+  },
+  {
+    "id": "evt_Oez1DH8lwZxt",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 11,
+    "type": "sandbox.released",
+    "payload": {
+      "env": "main",
+      "type": "sandbox.released",
+      "sandbox_id": "sbx_hq5wQvnzrrnm"
+    },
+    "created_at": "2026-09-10T09:30:17.715Z"
+  },
+  {
+    "id": "evt_waLAG70dZ8a4",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 12,
+    "type": "session.usage",
+    "payload": {
+      "type": "session.usage",
+      "usage": {
+        "input": 2061,
+        "output": 82,
+        "requests": 2,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total_tokens": 2143
+      },
+      "context": {
+        "model": "qoder/ultimate",
+        "ratio": 0.001103,
+        "tokens": 1103,
+        "window": 1000000
+      }
+    },
+    "created_at": "2026-09-10T09:30:17.719Z"
+  },
+  {
+    "id": "evt_l8YxGk5JYojO",
+    "session_id": "sess_OFPVcGUSjzSY",
+    "seq": 13,
+    "type": "session.status_idle",
+    "payload": {
+      "type": "session.status_idle",
+      "stop_reason": "end_turn"
+    },
+    "created_at": "2026-09-10T09:30:17.719Z"
+  }
+]

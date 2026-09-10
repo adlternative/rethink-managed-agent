@@ -1,4 +1,4 @@
-import { pluginStore, pool, repos } from "../infra/db.ts";
+import { pluginStore, pool, repos, toolOutputs } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, onProvidersChanged, popSteer, publish, redis } from "../infra/pubsub.ts";
@@ -137,6 +137,7 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     claimRun,
     finishRun,
     recordUsage,
+    toolOutputs,
   };
 }
 

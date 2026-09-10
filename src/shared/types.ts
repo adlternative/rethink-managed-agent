@@ -256,7 +256,7 @@ export type UserEventInput =
 export type SessionEventPayload =
   | { type: "user.message"; content: ContentBlock[] }
   | { type: "user.interrupt" }
-  | { type: "agent.message"; content: ContentBlock[]; /** full pi message for lossless refold */ pi: AgentMessage }
+  | { type: "agent.message"; content: ContentBlock[]; /** full pi message for lossless refold */ pi: AgentMessage; /** matches the deltas that previewed this message */ stream_id?: string; /** reasoning text, when the model produced any */ thinking?: string }
   | { type: "agent.tool_use"; tool_use_id: string; name: string; input: unknown }
   | { type: "agent.tool_result"; tool_use_id: string; content: ContentBlock[]; is_error: boolean; /** full pi toolResult message */ pi: AgentMessage }
   | { type: "session.status_running" }
@@ -289,12 +289,12 @@ export interface SessionEvent {
 // ---------- Streaming deltas (not persisted; pub/sub only) ----------
 export type StreamDelta =
   | { type: "event"; event: SessionEvent }
-  | { type: "agent.message_delta"; session_id: SessionId; text: string }
-  /** reasoning tokens as they stream; never persisted */
-  | { type: "agent.thinking_delta"; session_id: SessionId; text: string }
+  | { type: "agent.message_delta"; session_id: SessionId; stream_id: string; text: string }
+  /** reasoning tokens as they stream; the final text is persisted on agent.message.thinking */
+  | { type: "agent.thinking_delta"; session_id: SessionId; stream_id: string; text: string }
   /** a tool call is being generated: name known at start, JSON argument fragments follow; the persisted agent.tool_use carries the final input */
-  | { type: "agent.tool_use_start"; session_id: SessionId; index: number; name: string }
-  | { type: "agent.tool_use_delta"; session_id: SessionId; index: number; text: string };
+  | { type: "agent.tool_use_start"; session_id: SessionId; stream_id: string; index: number; name: string }
+  | { type: "agent.tool_use_delta"; session_id: SessionId; stream_id: string; index: number; text: string };
 
 // ---------- Queue (MQ) ----------
 export interface RunJob {
