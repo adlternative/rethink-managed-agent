@@ -21,7 +21,9 @@ export const env = {
    * must use host paths. Empty means "the runner is on the host" (paths are used verbatim).
    */
   SANDBOX_HOST_ROOT: process.env.SANDBOX_HOST_ROOT ?? "",
+  /** Idle tiers: ready -> paused after IDLE_TTL (providers without pause destroy instead); paused -> destroyed after PAUSED_TTL. */
   SANDBOX_IDLE_TTL_MS: Number(process.env.SANDBOX_IDLE_TTL_MS ?? 600000),
+  SANDBOX_PAUSED_TTL_MS: Number(process.env.SANDBOX_PAUSED_TTL_MS ?? 24 * 3600 * 1000),
   /** Docker sandbox limits. Network defaults to none: model code gets no egress unless an operator opts in. */
   SANDBOX_DOCKER_NETWORK: process.env.SANDBOX_DOCKER_NETWORK ?? "none",
   SANDBOX_DOCKER_MEMORY: process.env.SANDBOX_DOCKER_MEMORY ?? "2g",

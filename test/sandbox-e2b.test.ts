@@ -14,12 +14,14 @@ vi.mock("../src/sandbox/lease-store.ts", () => ({
   get: async (id: string) => rows.get(id) ?? null,
   list: async () => [...rows.values()].filter((r) => r.status !== "destroyed"),
   findReadyByAffinity: async (p: string, affinity: string) => {
-    const r = [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && r.status === "ready");
-    if (r) r.status = "busy";
-    return r ?? null;
+    const r = [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && (r.status === "ready" || r.status === "paused"));
+    if (!r) return null;
+    const prev = r.status; r.status = "busy";
+    return { ...r, status: prev };
   },
   findBusyByAffinity: async (p: string, affinity: string) => [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && r.status === "busy") ?? null,
   listIdle: async (p: string) => [...rows.values()].filter((r) => r.provider === p && r.status === "ready"),
+  listToDestroy: async (p: string, ttl: number) => [...rows.values()].filter((r) => r.provider === p && ((r.status === "paused" && ttl === 0) || r.status === "destroying")),
 }));
 
 // ---- fake e2b SDK: a tiny in-memory "remote" filesystem + shell that records commands ----
@@ -38,8 +40,10 @@ class FakeSandbox {
   static async connect(id: string) {
     const f = fakes.get(id);
     if (!f) throw new Error("not found");
+    f.running = true; // e2b resumes a paused sandbox on connect
     return new FakeSandbox(f);
   }
+  static async pause(id: string) { const f = fakes.get(id); if (f) f.running = false; return true; }
   static async kill(id: string) { killedIds.push(id); const f = fakes.get(id); if (f) f.running = false; return true; }
   async isRunning() { return this.fake.running; }
   async setTimeout() {}
@@ -135,7 +139,9 @@ describe("E2bProvider", () => {
     await lease2.release();
 
     // reap kills remotely and retires the row
-    expect((await manager.reap(0)).e2b).toEqual([sb.id]);
+    expect((await manager.reap(0, 3_600_000)).e2b).toEqual({ paused: [sb.id], destroyed: [] }); // e2b pauses first
+    expect(rows.get(sb.id)!.status).toBe("paused");
+    expect((await manager.reap(0, 0)).e2b.destroyed).toEqual([sb.id]); // then paused past ttl -> destroyed
     expect(killedIds).toEqual([fake.id]);
     expect(rows.get(sb.id)!.status).toBe("destroyed");
   });

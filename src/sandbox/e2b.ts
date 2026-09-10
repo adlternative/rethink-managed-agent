@@ -150,6 +150,14 @@ export class E2bProvider implements SandboxProvider {
     return { sandbox: makeSandbox(id, sbx), externalRef, sbx };
   }
 
+  /** e2b keeps a snapshot (memory + fs); Sandbox.connect() resumes it transparently. */
+  async pause(_id: SandboxId, externalRef: string): Promise<void> {
+    await E2bSandbox.pause(externalRef, opts());
+  }
+  async resume(): Promise<void> {
+    /* connect() auto-resumes a paused e2b sandbox */
+  }
+
   async destroy(_id: SandboxId, externalRef: string | null): Promise<void> {
     if (externalRef) await E2bSandbox.kill(externalRef, opts()).catch(() => {});
   }

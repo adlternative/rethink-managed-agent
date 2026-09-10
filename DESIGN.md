@@ -278,3 +278,19 @@ workspace ──N:1 sandbox lease（affinity = workspace.id，同一时刻至多
 - 不在一个沙箱里跑多个会话的并发写：仍由 affinity 互斥保证。
 - 不做跨会话共享租约的"沙箱池"语义：沙箱复用只发生在同一 workspace 内。
 - 不支持一个 workspace 同时挂到两个环境，附加环境要么自带 workspace，要么 fork 主 workspace。
+
+## 12. 沙箱 idle / pause / resume
+
+租约释放后沙箱不立即销毁，而是分两级退役，两个阈值都可配：
+
+```
+busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paused ──idle > SANDBOX_PAUSED_TTL_MS──► destroyed
+                    ▲                                     │
+                    └──────────── 下次 acquire 自动 resume ─┘
+```
+
+- **ready**：容器还在跑，命中同一 workspace 的会话秒级接上（`origin: reused`）。
+- **paused**：docker 用 `stop`，释放 CPU 和内存，文件系统层保留（已装依赖、缓存都在）；e2b 用 SDK 的 `pause` 快照，连内存态都保留。下次 acquire 时 manager 先 `resume` 再 `connect`（`origin: resumed`）。没有 pause 能力的 provider（local）直接销毁。
+- **destroyed**：之后再来就是从 workspace ref 重建（`origin: created`）。
+
+运维入口：`POST /v1/sandboxes/:id/pause` 和 `DELETE`，都由 runner 的 reaper 在下一轮执行，API 进程不直接碰容器。`sandbox.acquired` 事件带 `origin` 字段，能看出每次是新建、复用还是恢复。

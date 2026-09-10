@@ -21,4 +21,14 @@ export const sandboxes = new Hono()
     if (row.status === "busy") throw new ApiError(409, "sandbox_busy", `sandbox ${id} is leased by a running session`);
     await store.markForDestroy(id);
     return c.json({ id, status: "destroying" }, 202);
+  })
+  /** Pause a ready sandbox on the reaper's next pass (docker: stop; e2b: snapshot). Resumes on next use. */
+  .post("/:id/pause", async (c) => {
+    const id = c.req.param("id");
+    const row = await store.get(id);
+    if (!row) throw notFound("sandbox", id);
+    if (row.status === "paused") return c.json({ id, status: "paused" });
+    if (row.status !== "ready") throw new ApiError(409, "sandbox_not_idle", `sandbox ${id} is ${row.status}`);
+    await store.markForPause(id);
+    return c.json({ id, status: "pausing" }, 202);
   });

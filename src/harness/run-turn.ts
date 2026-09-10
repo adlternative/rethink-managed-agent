@@ -211,7 +211,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         .then(
           async (l) => {
             slot.lease = l;
-            await emit({ type: "sandbox.acquired", sandbox_id: l.sandbox.id, provider: l.sandbox.provider, env: key });
+            await emit({ type: "sandbox.acquired", sandbox_id: l.sandbox.id, provider: l.sandbox.provider, env: key, origin: l.origin });
             return l;
           },
           (err) => {

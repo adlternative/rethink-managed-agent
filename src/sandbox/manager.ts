@@ -34,9 +34,17 @@ export class SandboxManager {
     let id: SandboxId;
     let handle: SandboxHandle | null = null;
 
-    // 1. Reuse: a ready sandbox with the same affinity (row atomically flipped to busy).
+    // 1. Reuse: an idle (ready or paused) sandbox with the same affinity, row atomically flipped to busy.
     const reused = req.affinity ? await store.findReadyByAffinity(name, req.affinity) : null;
-    if (reused?.external_ref) handle = await provider.connect(reused.id, reused.external_ref).catch(() => null);
+    let origin: SandboxLease["origin"] = "created";
+    if (reused?.external_ref) {
+      if (reused.status === "paused") {
+        // Resume before connecting; a failed resume falls through to "stale row" handling below.
+        await provider.resume?.(reused.id, reused.external_ref).catch((e) => console.warn(`[sandbox] resume ${reused.id} failed: ${e?.message ?? e}`));
+      }
+      handle = await provider.connect(reused.id, reused.external_ref).catch(() => null);
+      origin = reused.status === "paused" ? "resumed" : "reused";
+    }
     if (reused && handle) {
       id = reused.id;
     } else {
@@ -64,6 +72,7 @@ export class SandboxManager {
     this.held.set(id, { provider, handle });
     return {
       sandbox: handle.sandbox,
+      origin,
       release: async () => {
         this.held.delete(id);
         await store.setStatus(id, "ready");
@@ -95,16 +104,36 @@ export class SandboxManager {
     return true;
   }
 
-  /** Destroy sandboxes idle past the ttl (plus busy ones abandoned by a dead runner), across all providers. */
-  async reap(idleTtlMs: number): Promise<Record<SandboxProviderName, SandboxId[]>> {
-    const out = {} as Record<SandboxProviderName, SandboxId[]>;
+  /**
+   * Two idle tiers, across all providers:
+   *   ready  --idle > idleTtl-->  paused   (providers without pause(): destroyed)
+   *   paused --idle > pausedTtl--> destroyed; plus rows marked 'destroying' and busy ones abandoned by a dead runner.
+   */
+  async reap(idleTtlMs: number, pausedTtlMs: number): Promise<Record<SandboxProviderName, { paused: SandboxId[]; destroyed: SandboxId[] }>> {
+    const out = {} as Record<SandboxProviderName, { paused: SandboxId[]; destroyed: SandboxId[] }>;
     for (const p of Object.values(this.providers)) {
-      out[p.name] = [];
+      out[p.name] = { paused: [], destroyed: [] };
       for (const r of await store.listIdle(p.name, idleTtlMs)) {
+        if (p.pause && r.external_ref) {
+          try {
+            await p.pause(r.id, r.external_ref);
+            await store.setStatus(r.id, "paused");
+            out[p.name].paused.push(r.id);
+            continue;
+          } catch (e) {
+            console.error(`[reaper] ${p.name} pause ${r.id} failed; destroying`, e);
+          }
+        }
         await p.destroy(r.id, r.external_ref).catch((e) => console.error(`[reaper] ${p.name} destroy ${r.id} failed`, e));
         this.held.delete(r.id);
         await store.setStatus(r.id, "destroyed");
-        out[p.name].push(r.id);
+        out[p.name].destroyed.push(r.id);
+      }
+      for (const r of await store.listToDestroy(p.name, pausedTtlMs)) {
+        await p.destroy(r.id, r.external_ref).catch((e) => console.error(`[reaper] ${p.name} destroy ${r.id} failed`, e));
+        this.held.delete(r.id);
+        await store.setStatus(r.id, "destroyed");
+        out[p.name].destroyed.push(r.id);
       }
     }
     return out;

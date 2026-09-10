@@ -119,6 +119,8 @@ export interface SandboxRequest {
 export interface SandboxLease {
   sandbox: Sandbox;
   release(): Promise<void>;
+  /** how the lease was obtained */
+  origin: "created" | "reused" | "resumed";
 }
 /** A live sandbox as seen by its provider. `externalRef` is what `connect`/`destroy` need later (dir, container, remote id). */
 export interface SandboxHandle {
@@ -137,6 +139,12 @@ export interface SandboxProvider {
   connect(id: SandboxId, externalRef: string): Promise<SandboxHandle | null>;
   /** Tear down; must tolerate an already-gone sandbox. */
   destroy(id: SandboxId, externalRef: string | null): Promise<void>;
+  /**
+   * Optional idle tiers: pause frees compute but keeps the sandbox's filesystem (installed deps,
+   * build caches) so resume is fast; connect() must accept a paused sandbox and resume it.
+   */
+  pause?(id: SandboxId, externalRef: string): Promise<void>;
+  resume?(id: SandboxId, externalRef: string): Promise<void>;
   /** Capture the current workspace state from a live sandbox. */
   capture(handle: SandboxHandle, prev: WorkspaceRef): Promise<WorkspaceRef>;
 }
@@ -148,8 +156,11 @@ export interface SandboxService {
 export interface SandboxRow {
   id: SandboxId;
   provider: SandboxProviderName;
-  status: "ready" | "busy" | "destroyed";
-  /** `busy` rows carry the runner-side handle only in memory; the row is the durable record. */
+  /**
+   * busy: leased by a run · ready: idle, running · paused: idle, compute released (provider.pause) ·
+   * destroying: retire on the reaper's next pass · destroyed.
+   */
+  status: "ready" | "busy" | "paused" | "destroying" | "destroyed";
   workspace_id: WorkspaceId | null;
   affinity: string | null;
   external_ref: string | null; // container id / host dir
@@ -201,7 +212,7 @@ export type SessionEventPayload =
   | { type: "session.status_idle"; stop_reason: StopReason }
   | { type: "session.status_terminated"; reason?: string }
   | { type: "session.error"; error: { type: string; message: string } }
-  | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName; env?: string }
+  | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName; env?: string; origin?: "created" | "reused" | "resumed" }
   | { type: "sandbox.released"; sandbox_id: SandboxId; env?: string }
   | { type: "workspace.captured"; ref: WorkspaceRef; workspace_id?: WorkspaceId; env?: string }
   /** a sub-agent session was created for this session */

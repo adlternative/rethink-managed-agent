@@ -160,8 +160,9 @@ async function handleJob(job: RunJob): Promise<"done" | "retry"> {
 
 async function reap(): Promise<void> {
   try {
-    for (const [name, ids] of Object.entries(await sandboxManager.reap(env.SANDBOX_IDLE_TTL_MS))) {
-      if (ids.length) console.log(`[reaper] ${name}: destroyed ${ids.join(", ")}`);
+    for (const [name, r] of Object.entries(await sandboxManager.reap(env.SANDBOX_IDLE_TTL_MS, env.SANDBOX_PAUSED_TTL_MS))) {
+      if (r.paused.length) console.log(`[reaper] ${name}: paused ${r.paused.join(", ")}`);
+      if (r.destroyed.length) console.log(`[reaper] ${name}: destroyed ${r.destroyed.join(", ")}`);
     }
   } catch (e) {
     console.error("[reaper] failed", e);

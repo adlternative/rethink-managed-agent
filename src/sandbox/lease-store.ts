@@ -20,16 +20,23 @@ export async function touch(id: SandboxId): Promise<void> {
   await pool.query(`UPDATE sandboxes SET last_used_at=now() WHERE id=$1`, [id]);
 }
 
-/** Atomically claims a ready sandbox with matching affinity (marks it busy). */
+/**
+ * Atomically claims an idle (ready or paused) sandbox with matching affinity, marking it busy.
+ * The returned row's `status` is the state it was in *before* the claim, so the caller knows
+ * whether to resume it.
+ */
 export async function findReadyByAffinity(provider: SandboxProviderName, affinity: string): Promise<SandboxRow | null> {
-  const r = await pool.query<SandboxRow>(
-    `UPDATE sandboxes SET status='busy', last_used_at=now()
-     WHERE id = (SELECT id FROM sandboxes WHERE provider=$1 AND affinity=$2 AND status='ready'
-                 ORDER BY last_used_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
-     RETURNING *`,
+  const r = await pool.query<SandboxRow & { prev_status: SandboxRow["status"] }>(
+    `WITH pick AS (
+       SELECT id, status AS prev_status FROM sandboxes
+       WHERE provider=$1 AND affinity=$2 AND status IN ('ready','paused')
+       ORDER BY (status <> 'ready'), last_used_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
+     UPDATE sandboxes s SET status='busy', last_used_at=now() FROM pick
+     WHERE s.id = pick.id RETURNING s.*, pick.prev_status`,
     [provider, affinity],
   );
-  return r.rows[0] ?? null;
+  const row = r.rows[0];
+  return row ? { ...row, status: row.prev_status } : null;
 }
 
 /** A live lease on the same affinity (another session is running in that workspace right now). */
@@ -41,13 +48,23 @@ export async function findBusyByAffinity(provider: SandboxProviderName, affinity
   return r.rows[0] ?? null;
 }
 
-/** Sandboxes to destroy: ready ones idle past the ttl, plus busy ones abandoned by a dead runner. */
+/** Ready sandboxes idle past the ttl (candidates to pause, or destroy without pause support). */
 export async function listIdle(provider: SandboxProviderName, olderThanMs: number): Promise<SandboxRow[]> {
   const r = await pool.query<SandboxRow>(
+    `SELECT * FROM sandboxes WHERE provider=$1 AND status='ready' AND last_used_at < now() - ($2::bigint * interval '1 millisecond')`,
+    [provider, olderThanMs],
+  );
+  return r.rows;
+}
+
+/** Sandboxes to destroy: paused past the ttl, marked 'destroying', or busy but abandoned by a dead runner. */
+export async function listToDestroy(provider: SandboxProviderName, pausedTtlMs: number): Promise<SandboxRow[]> {
+  const r = await pool.query<SandboxRow>(
     `SELECT * FROM sandboxes WHERE provider=$1 AND (
-       (status='ready' AND last_used_at < now() - ($2::bigint * interval '1 millisecond'))
+       status='destroying'
+       OR (status='paused' AND last_used_at < now() - ($2::bigint * interval '1 millisecond'))
        OR (status='busy' AND last_used_at < now() - ($3::bigint * interval '1 millisecond')))`,
-    [provider, olderThanMs, ABANDONED_MS],
+    [provider, pausedTtlMs, ABANDONED_MS],
   );
   return r.rows;
 }
@@ -73,6 +90,12 @@ export async function list(opts: { includeDestroyed?: boolean } = {}): Promise<S
  * SDK state, so it never destroys directly). Returns false if the sandbox is busy or already gone.
  */
 export async function markForDestroy(id: SandboxId): Promise<boolean> {
+  const r = await pool.query(`UPDATE sandboxes SET status='destroying' WHERE id=$1 AND status IN ('ready','paused')`, [id]);
+  return (r.rowCount ?? 0) > 0;
+}
+
+/** Ask the reaper to pause a ready sandbox on its next pass. */
+export async function markForPause(id: SandboxId): Promise<boolean> {
   const r = await pool.query(`UPDATE sandboxes SET last_used_at = to_timestamp(0) WHERE id=$1 AND status='ready'`, [id]);
   return (r.rowCount ?? 0) > 0;
 }

@@ -13,12 +13,14 @@ vi.mock("../src/sandbox/lease-store.ts", () => ({
   get: async (id: string) => rows.get(id) ?? null,
   list: async () => [...rows.values()].filter((r) => r.status !== "destroyed"),
   findReadyByAffinity: async (p: string, affinity: string) => {
-    const r = [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && r.status === "ready");
-    if (r) r.status = "busy";
-    return r ?? null;
+    const r = [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && (r.status === "ready" || r.status === "paused"));
+    if (!r) return null;
+    const prev = r.status; r.status = "busy";
+    return { ...r, status: prev };
   },
   findBusyByAffinity: async (p: string, affinity: string) => [...rows.values()].find((r) => r.provider === p && r.affinity === affinity && r.status === "busy") ?? null,
   listIdle: async (p: string) => [...rows.values()].filter((r) => r.provider === p && r.status === "ready"),
+  listToDestroy: async (p: string, ttl: number) => [...rows.values()].filter((r) => r.provider === p && ((r.status === "paused" && ttl === 0) || r.status === "destroying")),
 }));
 
 let root: string;
@@ -92,7 +94,7 @@ describe("LocalProvider", () => {
     expect(again.sandbox.id).toBe(sb.id);
     await again.release();
 
-    expect((await manager.reap(0)).local).toEqual([sb.id]);
+    expect((await manager.reap(0, 0)).local.destroyed).toEqual([sb.id]); // local has no pause(): idle -> destroyed
     expect(rows.get(sb.id)!.status).toBe("destroyed");
     await expect(stat(sb.workdir)).rejects.toThrow();
     // the workspace survives the reaper and rebuilds a fresh sandbox

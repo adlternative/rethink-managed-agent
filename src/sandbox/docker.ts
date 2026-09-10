@@ -125,6 +125,14 @@ export class DockerProvider implements SandboxProvider {
     return { sandbox: makeSandbox(id, id, await pickShell(id)), externalRef };
   }
 
+  /** stop/start: frees CPU and memory, keeps the container's filesystem (installed deps, caches). */
+  async pause(id: SandboxId): Promise<void> {
+    await docker("docker", ["stop", "-t", "5", id]);
+  }
+  async resume(id: SandboxId): Promise<void> {
+    await docker("docker", ["start", id]);
+  }
+
   async destroy(id: SandboxId, externalRef: string | null): Promise<void> {
     await docker("docker", ["rm", "-f", id]).catch(() => {});
     const dir = externalRef ?? path.join(root(), id);

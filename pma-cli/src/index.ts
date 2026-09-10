@@ -21,7 +21,7 @@ subcommands:
   envs       list | get <id> | create <name> --provider local|docker|e2b [--image I] [--network bridge] [--plugin-host sandbox] [--git URL]
   sessions   list | get <id> | create [--environments main=e1,k=e2[:fork]] | attach <id> k=e[:fork] | archive | delete
   session    events <id> | send <id> <text> [--wait] | stream <id> | interrupt <id> | export <id>
-  sandboxes  list [--all] | get <id> | delete <id>
+  sandboxes  list [--all] | get <id> | pause <id> | delete <id>
 
 env: PMA_HOST, PMA_TOKEN, PMA_HEADERS (JSON), PMA_CONFIG (config path; default ~/.pma/config.json)`;
 
