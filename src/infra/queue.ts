@@ -34,37 +34,46 @@ function parseJob(fields: string[]): RunJob | null {
 /** Handler returns "done" to ack the entry, or "retry" to leave it pending for a later re-examination. */
 export async function consumeRuns(
   handler: (job: RunJob) => Promise<"done" | "retry">,
-  opts: { consumer?: string; signal?: AbortSignal } = {},
+  opts: { consumer?: string; signal?: AbortSignal; concurrency?: number } = {},
 ): Promise<void> {
   const consumer = opts.consumer ?? `runner-${process.pid}`;
+  const concurrency = Math.max(1, opts.concurrency ?? 1);
+  const inflight = new Set<Promise<void>>();
   // Dedicated connection: XREADGROUP BLOCK would stall the shared one.
   const r = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
   await ensureGroup(r);
 
-  const handle = async (entries: Entry[]) => {
+  // Entries run concurrently up to `concurrency`; each is ACKed when its handler settles.
+  const handle = (entries: Entry[]) => {
     for (const [id, fields] of entries) {
-      let outcome: "done" | "retry" = "done";
-      try {
-        const job = parseJob(fields);
-        if (job) outcome = await handler(job);
-      } catch (e) {
-        console.error("[queue] handler failed", id, e);
-      }
-      if (outcome === "done") await r.xack(STREAM, GROUP, id);
+      const p = (async () => {
+        let outcome: "done" | "retry" = "done";
+        try {
+          const job = parseJob(fields);
+          if (job) outcome = await handler(job);
+        } catch (e) {
+          console.error("[queue] handler failed", id, e);
+        }
+        if (outcome === "done") await r.xack(STREAM, GROUP, id).catch(() => {});
+      })();
+      inflight.add(p);
+      void p.finally(() => inflight.delete(p));
     }
   };
 
   try {
     while (!opts.signal?.aborted) {
+      const free = concurrency - inflight.size;
+      if (free <= 0) { await Promise.race(inflight); continue; }
       // Reclaim messages left pending by dead consumers.
-      const claimed = (await r.xautoclaim(STREAM, GROUP, consumer, STALE_MS, "0-0", "COUNT", 10)) as [string, Entry[]];
-      if (claimed[1]?.length) await handle(claimed[1]);
-
-      const res = (await r.xreadgroup("GROUP", GROUP, consumer, "COUNT", 1, "BLOCK", 5000, "STREAMS", STREAM, ">")) as
+      const claimed = (await r.xautoclaim(STREAM, GROUP, consumer, STALE_MS, "0-0", "COUNT", free)) as [string, Entry[]];
+      if (claimed[1]?.length) handle(claimed[1]);
+      const res = (await r.xreadgroup("GROUP", GROUP, consumer, "COUNT", Math.max(1, concurrency - inflight.size), "BLOCK", 5000, "STREAMS", STREAM, ">")) as
         | [string, Entry[]][]
         | null;
-      if (res) for (const [, entries] of res) await handle(entries);
+      if (res) for (const [, entries] of res) handle(entries);
     }
+    await Promise.allSettled(inflight);
   } finally {
     r.disconnect();
   }

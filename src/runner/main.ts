@@ -4,7 +4,11 @@ import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, popSteer, publish, redis } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun } from "../infra/queue.ts";
 import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
-import { runSession, type AgentPlugins, type RunDeps } from "../harness/run-turn.ts";
+import { runSession, type AgentPlugins, type ChildSpawn, type RunDeps } from "../harness/run-turn.ts";
+import { workspaceRoot } from "../sandbox/workspace.ts";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdir } from "node:fs/promises";
 import { createModelRegistry } from "../harness/models.ts";
 import { PluginHost } from "../plugins/client.ts";
 import { buildHostBundle } from "../plugins/bundle.ts";
@@ -13,7 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxManager } from "../sandbox/provider.ts";
 import { env } from "../shared/env.ts";
-import type { RunJob, SandboxProviderName } from "../shared/types.ts";
+import type { RunJob, SandboxProviderName, SessionResource, WorkspaceRef } from "../shared/types.ts";
 
 const REAP_INTERVAL_MS = 60_000;
 
@@ -55,12 +59,62 @@ function pluginsFor(agent: Parameters<RunDeps["pluginsFor"]>[0]): Promise<AgentP
   return p;
 }
 
-function makeDeps(provider: SandboxProviderName): RunDeps {
+const run = promisify(execFile);
+
+/** Fork a workspace for a child session: metadata refs are copied; `dir` refs are copied on disk (runner owns that volume). */
+async function forkWorkspace(parentWorkspaceId: string) {
+  const parent = await repos.workspaces.get(parentWorkspaceId);
+  if (!parent) throw new Error(`workspace ${parentWorkspaceId} not found`);
+  if (parent.ref.kind === "local") throw new Error("local workspaces cannot be forked");
+  const child = await repos.workspaces.create(parent.spec, parent.ref);
+  if (parent.ref.kind === "dir") {
+    const dest = path.join(workspaceRoot(), child.id);
+    await mkdir(dest, { recursive: true });
+    await run("cp", ["-R", `${parent.ref.path}/.`, dest]);
+    const ref: WorkspaceRef = { kind: "dir", path: dest };
+    await repos.workspaces.updateRef(child.id, ref, parent.ref);
+  }
+  return child;
+}
+
+const children: ChildSpawn = {
+  async spawn(parent, envRow, task, system) {
+    const ws = await forkWorkspace(envRow.workspace_id);
+    const child = await repos.sessions.create({
+      agent_id: parent.agent_id,
+      environment_id: envRow.environment_id,
+      workspace_id: ws.id,
+      agent: system ? { ...parent.agent, system } : parent.agent,
+      environments: [{ key: "main", environment_id: envRow.environment_id, workspace_id: ws.id }],
+      parent_id: parent.id,
+    });
+    const [ev] = await appendEvents(child.id, [{ type: "user.message", content: [{ type: "text", text: task }] }]);
+    await enqueueRun({ session_id: child.id, trigger_seq: ev!.seq });
+    return child;
+  },
+  async wait(childId, signal) {
+    for (;;) {
+      if (signal.aborted) throw new Error("parent run aborted while waiting for child session");
+      const s = await repos.sessions.get(childId);
+      if (!s) throw new Error(`child session ${childId} disappeared`);
+      // idle *after* having run: the child starts idle before its job is claimed, so wait for status_running first
+      if (s.status === "terminated") return s;
+      if (s.status === "idle") {
+        const evs = await listAllEvents(childId);
+        if (evs.some((e) => e.type === "session.status_idle")) return s;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  },
+};
+
+function makeDeps(_provider: SandboxProviderName): RunDeps {
   return {
     models,
     pluginsFor,
     pluginStore,
-    sandboxes: sandboxManager.bind(provider),
+    sandboxFor: (name) => sandboxManager.bind(name),
+    children,
     // runSession publishes each event itself (so deltas and events interleave in order).
     appendEvents: (id, payloads) => appendEvents(id, payloads, { publish: false }),
     listEvents: (id) => listAllEvents(id),
@@ -126,9 +180,9 @@ const shutdown = (sig: string) => {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
-console.log(`[runner] consuming runs (default provider=${env.SANDBOX_DEFAULT_PROVIDER}, idle ttl=${env.SANDBOX_IDLE_TTL_MS}ms)`);
+console.log(`[runner] consuming runs (concurrency=${env.RUNNER_CONCURRENCY}, default provider=${env.SANDBOX_DEFAULT_PROVIDER}, idle ttl=${env.SANDBOX_IDLE_TTL_MS}ms)`);
 try {
-  await consumeRuns(handleJob, { signal: stopping.signal });
+  await consumeRuns(handleJob, { signal: stopping.signal, concurrency: env.RUNNER_CONCURRENCY });
 } finally {
   clearInterval(reaper);
   await Promise.allSettled([pool.end(), redis.quit()]);

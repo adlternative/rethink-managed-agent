@@ -73,7 +73,10 @@ function summarize(e: SessionEvent): string {
   const s = e.type === "user.message" || e.type === "agent.message" || e.type === "agent.tool_result" ? textOf(p.content)
     : e.type === "agent.tool_use" ? `${p.name} ${JSON.stringify(p.input)}`
     : e.type === "session.status_idle" ? p.stop_reason
-    : e.type === "sandbox.acquired" ? `${p.provider} ${p.sandbox_id}`
+    : e.type === "sandbox.acquired" ? `${p.provider} ${p.sandbox_id}${p.env ? ` [${p.env}]` : ""}`
+    : e.type === "workspace.captured" ? `${p.workspace_id ?? ""}${p.env ? ` [${p.env}]` : ""}`
+    : e.type === "session.thread_created" ? `${p.child_session_id} [${p.env}] ${p.task}`
+    : e.type === "agent.thread_message_received" ? `${p.child_session_id} (${p.stop_reason}) ${textOf(p.content)}`
     : e.type === "session.error" ? `${p.error.type}: ${p.error.message}` : "";
   return s.replace(/\s+/g, " ").slice(0, 80);
 }

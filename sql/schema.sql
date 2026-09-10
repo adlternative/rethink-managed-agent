@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS session_environments (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  environment_id TEXT NOT NULL REFERENCES environments(id),
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (session_id, key)
+);
 -- append-only. (session_id, seq) is the cursor; never UPDATE rows.
 CREATE TABLE IF NOT EXISTS events (
   id TEXT NOT NULL,
@@ -67,3 +75,6 @@ CREATE TABLE IF NOT EXISTS plugin_store (
 );
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'none';
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS plugin_host TEXT NOT NULL DEFAULT 'runner';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_id TEXT;
+INSERT INTO session_environments (session_id, key, environment_id, workspace_id)
+  SELECT id, 'main', environment_id, workspace_id FROM sessions s WHERE NOT EXISTS (SELECT 1 FROM session_environments e WHERE e.session_id = s.id) ON CONFLICT DO NOTHING;

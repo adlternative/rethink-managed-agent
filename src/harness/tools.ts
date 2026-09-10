@@ -5,9 +5,20 @@ import { env } from "../shared/env.ts";
 import type { BuiltinToolName, Sandbox } from "../shared/types.ts";
 
 export interface ToolContext {
-  /** Lazily acquires the sandbox; pure-chat turns never call this. */
-  sandbox(): Promise<Sandbox>;
+  /** Lazily acquires the sandbox of an attached environment (default "main"); pure-chat turns never call this. */
+  sandbox(env?: string): Promise<Sandbox>;
+  /** Keys of the environments attached to the session; the `env` tool parameter is offered when there are several. */
+  envKeys?: string[];
   signal?: AbortSignal;
+}
+
+/** Adds the optional `env` parameter when a session has more than one environment attached. */
+function withEnv<S extends TSchema>(ctx: ToolContext, schema: S): TSchema {
+  if (!ctx.envKeys || ctx.envKeys.length <= 1) return schema;
+  return Type.Object({
+    ...(schema as unknown as { properties: Record<string, TSchema> }).properties,
+    env: Type.Optional(Type.String({ description: `Which attached environment to run in: ${ctx.envKeys.join(" | ")} (default main)` })),
+  }, { required: (schema as unknown as { required?: string[] }).required });
 }
 
 const MAX_OUTPUT_CHARS = 30_000;
@@ -19,11 +30,11 @@ export function truncateOutput(s: string, max = MAX_OUTPUT_CHARS): string {
   return `${s.slice(0, half)}\n\n[... ${s.length - max} chars truncated ...]\n\n${s.slice(-half)}`;
 }
 
-function tool<S extends TSchema>(
+function tool(
   name: BuiltinToolName,
   description: string,
-  parameters: S,
-  run: (params: Static<S>, signal?: AbortSignal) => Promise<string>,
+  parameters: TSchema,
+  run: (params: any, signal?: AbortSignal) => Promise<string>,
 ): AgentTool {
   return {
     name,
@@ -31,7 +42,7 @@ function tool<S extends TSchema>(
     description,
     parameters,
     async execute(_id, params, signal): Promise<AgentToolResult<undefined>> {
-      const text = await run(params as Static<S>, signal);
+      const text = await run(params, signal);
       return { content: [{ type: "text", text }], details: undefined };
     },
   };
@@ -45,12 +56,12 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
     tool(
       "bash",
       "Execute a bash command in the workspace root. Returns combined stdout/stderr; fails on non-zero exit.",
-      Type.Object({
+      withEnv(ctx, Type.Object({
         command: Type.String({ description: "Bash command to execute" }),
         timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional)" })),
-      }),
-      async ({ command, timeout }, signal) => {
-        const sb = await ctx.sandbox();
+      })),
+      async ({ command, timeout, env: envKey }, signal) => {
+        const sb = await ctx.sandbox(envKey);
         let out = "";
         let code: number | undefined;
         // Always bounded: a runaway `sleep infinity` must not hold the runner and the lease forever.
@@ -70,13 +81,13 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
     tool(
       "read",
       "Read a text file with line numbers. Use offset (1-indexed) and limit for large files.",
-      Type.Object({
+      withEnv(ctx, Type.Object({
         path: Type.String({ description: "Path relative to the workspace root" }),
         offset: Type.Optional(Type.Number({ description: "First line to read (1-indexed)" })),
         limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
-      }),
-      async ({ path, offset, limit }) => {
-        const sb = await ctx.sandbox();
+      })),
+      async ({ path, offset, limit, env: envKey }) => {
+        const sb = await ctx.sandbox(envKey);
         const lines = (await readText(sb, resolvePath(sb, path))).split("\n");
         const start = Math.max(0, (offset ?? 1) - 1);
         if (start >= lines.length) throw new Error(`Offset ${offset} is beyond end of file (${lines.length} lines)`);
@@ -94,12 +105,12 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
     tool(
       "write",
       "Write content to a file, creating or overwriting it.",
-      Type.Object({
+      withEnv(ctx, Type.Object({
         path: Type.String({ description: "Path relative to the workspace root" }),
         content: Type.String({ description: "Full file content" }),
-      }),
-      async ({ path, content }) => {
-        const sb = await ctx.sandbox();
+      })),
+      async ({ path, content, env: envKey }) => {
+        const sb = await ctx.sandbox(envKey);
         const data = Buffer.from(content, "utf8");
         await sb.writeFile(resolvePath(sb, path), data);
         return `Wrote ${data.length} bytes to ${path}`;
@@ -110,13 +121,13 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
     tool(
       "edit",
       "Replace exactly one occurrence of oldText with newText in a file. oldText must match exactly and be unique.",
-      Type.Object({
+      withEnv(ctx, Type.Object({
         path: Type.String({ description: "Path relative to the workspace root" }),
         oldText: Type.String({ description: "Exact text to replace (must be unique in the file)" }),
         newText: Type.String({ description: "Replacement text" }),
-      }),
-      async ({ path, oldText, newText }) => {
-        const sb = await ctx.sandbox();
+      })),
+      async ({ path, oldText, newText, env: envKey }) => {
+        const sb = await ctx.sandbox(envKey);
         const abs = resolvePath(sb, path);
         const src = await readText(sb, abs);
         const at = src.indexOf(oldText);

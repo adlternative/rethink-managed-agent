@@ -39,6 +39,8 @@ export default function (p: PluginAPI) {
 | `ctx.store.get / set(key, value, "agent" \| "workspace")` | JSON KV in Postgres (`plugin_store`) | runner |
 | `ctx.model.complete(prompt, {system, maxTokens})` | one-shot completion with the session's model | runner |
 | `ctx.agent.run(task, {system, maxTurns, tools})` | a sub-agent loop with the builtin tools in the same sandbox; returns its final text | runner + sandbox |
+| `ctx.agent.run(task, {isolated: true, env?})` | a real child session on a fork of the workspace with its own sandbox (runs on any runner slot); returns `{report, patch?, sessionId}` and records thread events on the parent | runner + child sandbox |
+| `ctx.sandbox.*(…, {env})`, `ctx.sandbox.envs()` | target one of the session's attached environments | sandbox |
 | `ctx.fetch(url, init)` | HTTP through the runner, host allowlist `PLUGIN_FETCH_ALLOW` (default `*`) | runner |
 | `ctx.log(...)` | runner log | runner |
 

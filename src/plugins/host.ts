@@ -66,8 +66,9 @@ function makeContext(session: SessionInfo): PluginContext {
     workspaceId: session.workspaceId,
     sandbox: {
       exec: (command, opts) => call("sandbox.exec", { command, ...opts }),
-      readFile: (p) => call("sandbox.readFile", { path: p }),
-      writeFile: (p, content) => call("sandbox.writeFile", { path: p, content }).then(() => undefined),
+      readFile: (p, opts) => call("sandbox.readFile", { path: p, ...opts }),
+      writeFile: (p, content, opts) => call("sandbox.writeFile", { path: p, content, ...opts }).then(() => undefined),
+      envs: () => call("sandbox.envs", {}),
     },
     store: {
       get: (key, scope = "agent") => call("store.get", { key, scope }) as Promise<never>,

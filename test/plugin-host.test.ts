@@ -14,6 +14,7 @@ const caps: Capabilities = {
   sandboxExec: async (command) => { calls.push(`exec:${command}`); return { stdout: `ran ${command}`, stderr: "", code: 0 }; },
   sandboxRead: async (p) => `content of ${p}`,
   sandboxWrite: async (p) => { calls.push(`write:${p}`); },
+  sandboxEnvs: () => ["main"],
   storeGet: async (key, scope) => store.get(`${scope}:${key}`) ?? null,
   storeSet: async (key, scope, value) => { store.set(`${scope}:${key}`, value); },
   modelComplete: async (prompt) => `completed: ${prompt}`,

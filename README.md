@@ -51,6 +51,7 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | GET | `/v1/sessions`, `/v1/sessions/:id` | | `status` is `idle` / `running` / `terminated` |
 | DELETE | `/v1/sessions/:id` | | Cascades to events |
 | POST | `/v1/sessions/:id/archive` | | Appends `session.status_terminated` |
+| POST | `/v1/sessions/:id/environments` | `{key, environment_id, workspace?\|workspace_id?\|fork_from?}` | attach another sandbox to a session (tools take `env`) |
 | GET | `/v1/models` | | models the runner can resolve |
 | GET | `/v1/sandboxes` | | lease registry view; `DELETE /v1/sandboxes/:id` retires a ready sandbox via the reaper |
 | POST | `/v1/sessions/:id/events` | `{events:[{type:"user.message", content:[{type:"text", text}]} \| {type:"user.interrupt"}]}` | Idle session: enqueues a run. Running session: message is steered into the live loop. Interrupt: aborts the loop |
@@ -159,6 +160,20 @@ src/api/       main.ts, routes/{agents,environments,sessions,events}.ts
 src/runner/    main.ts
 src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
+```
+
+## Sessions ↔ sandboxes (N:N)
+
+A session attaches one or more environments (`environments: [{key:"main", ...}, {key:"browser", ...}]`,
+or `POST /v1/sessions/:id/environments` later); each has its own workspace and leases its own sandbox on
+demand, and the builtin tools take an `env` parameter to pick one. Several sessions may share a workspace
+(and therefore its sandbox, one live lease at a time). Sub-agents: `ctx.agent.run(task, {isolated: true})`
+creates a child session (`parent_id`) on a *fork* of the workspace with its own sandbox; the parent gets
+`session.thread_created` / `agent.thread_message_received` with the child's report and patch. See DESIGN.md §11.
+
+```bash
+pma sessions create --environments "main=$LOCAL_ENV,dk=$DOCKER_ENV"     # two sandboxes, one conversation
+pma sessions attach sess_x browser=$E2B_ENV:fork                         # later, on a fork of main's workspace
 ```
 
 ## Plugins

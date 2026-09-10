@@ -45,10 +45,12 @@ export type HookName = HookEvent["type"];
 
 // ---------- capabilities (all mediated by the runner) ----------
 export interface SandboxCapability {
-  /** Run a shell command in the session's sandbox; resolves with combined output and exit code. */
-  exec(command: string, opts?: { cwd?: string; timeoutMs?: number }): Promise<{ stdout: string; stderr: string; code: number }>;
-  readFile(path: string): Promise<string>;
-  writeFile(path: string, content: string): Promise<void>;
+  /** Run a shell command in one of the session's sandboxes (`env` = attached environment key, default "main"). */
+  exec(command: string, opts?: { cwd?: string; timeoutMs?: number; env?: string }): Promise<{ stdout: string; stderr: string; code: number }>;
+  readFile(path: string, opts?: { env?: string }): Promise<string>;
+  writeFile(path: string, content: string, opts?: { env?: string }): Promise<void>;
+  /** Keys of the environments attached to this session ("main" first). */
+  envs(): Promise<string[]>;
 }
 export interface StoreCapability {
   /** Per-agent (or per-workspace with scope "workspace") JSON document store, persisted in Postgres. */
@@ -61,10 +63,13 @@ export interface ModelCapability {
 }
 export interface AgentCapability {
   /**
-   * Run a sub-agent in the same sandbox: its own loop, the session's builtin tools, own context.
-   * Returns the sub-agent's final text. Events are recorded on the parent session as tool output.
+   * Run a sub-agent. Default: an inline loop in the same sandbox (own context, builtin tools) that
+   * returns its final text. `isolated: true`: a real child session on a *fork* of the workspace with
+   * its own sandbox, run by any runner; returns the child's report and, for git workspaces, the
+   * patch it produced (the parent decides whether to apply it). The parent session records
+   * session.thread_created / agent.thread_message_received.
    */
-  run(task: string, opts?: { system?: string; maxTurns?: number; tools?: string[] }): Promise<string>;
+  run(task: string, opts?: { system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }): Promise<string | { report: string; patch?: string; sessionId: string }>;
 }
 export interface FetchCapability {
   /** HTTP via the runner; the agent's allowlist (env PLUGIN_FETCH_ALLOW) is enforced there. */

@@ -2,6 +2,7 @@ import pg from "pg";
 import { env } from "../shared/env.ts";
 import { newId } from "../shared/ids.ts";
 import type {
+  SessionEnvironment,
   AgentResource,
   EnvironmentResource,
   SessionResource,
@@ -102,24 +103,50 @@ export const repos = {
     },
   },
   sessions: {
+    /**
+     * Creates the session plus its environment rows in one tx. `environments[0]` must be "main"
+     * (or is created from environment_id/workspace_id when omitted).
+     */
     async create(input: {
       agent_id: string;
       environment_id: string;
       workspace_id: string;
       agent: SessionResource["agent"];
+      environments?: SessionEnvironment[];
+      parent_id?: string | null;
     }): Promise<SessionResource> {
-      const row = await one<SessionResource>(
-        pool,
-        `INSERT INTO sessions (id, agent_id, environment_id, workspace_id, agent) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [newId("sess"), input.agent_id, input.environment_id, input.workspace_id, JSON.stringify(input.agent)],
-      );
-      return iso(row)!;
+      const envs: SessionEnvironment[] = input.environments?.length
+        ? input.environments
+        : [{ key: "main", environment_id: input.environment_id, workspace_id: input.workspace_id }];
+      const main = envs.find((e) => e.key === "main");
+      if (!main) throw new Error("session environments must include key 'main'");
+      return tx(async (c) => {
+        const row = await one<SessionResource>(
+          c,
+          `INSERT INTO sessions (id, agent_id, environment_id, workspace_id, agent, parent_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+          [newId("sess"), input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null],
+        );
+        for (const e of envs) {
+          await c.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4)`, [row!.id, e.key, e.environment_id, e.workspace_id]);
+        }
+        return { ...iso(row)!, environments: envs };
+      });
+    },
+    async attachEnvironment(sessionId: string, e: SessionEnvironment): Promise<void> {
+      await pool.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4)`, [sessionId, e.key, e.environment_id, e.workspace_id]);
+    },
+    async environments(sessionId: string): Promise<SessionEnvironment[]> {
+      const rows = await many<SessionEnvironment & { created_at: string }>(pool, `SELECT key, environment_id, workspace_id FROM session_environments WHERE session_id=$1 ORDER BY (key <> 'main'), created_at`, [sessionId]);
+      return rows.map(({ key, environment_id, workspace_id }) => ({ key, environment_id, workspace_id }));
     },
     async get(id: string): Promise<SessionResource | null> {
-      return iso(await one<SessionResource>(pool, `SELECT * FROM sessions WHERE id=$1`, [id]));
+      const row = iso(await one<SessionResource>(pool, `SELECT * FROM sessions WHERE id=$1`, [id]));
+      return row ? { ...row, environments: await repos.sessions.environments(id) } : null;
     },
     async list(): Promise<SessionResource[]> {
-      return isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions ORDER BY created_at`));
+      const rows = isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions ORDER BY created_at`));
+      const envs = await many<SessionEnvironment & { session_id: string }>(pool, `SELECT session_id, key, environment_id, workspace_id FROM session_environments ORDER BY (key <> 'main'), created_at`);
+      return rows.map((r) => ({ ...r, environments: envs.filter((e) => e.session_id === r.id).map(({ key, environment_id, workspace_id }) => ({ key, environment_id, workspace_id })) }));
     },
     async setStatus(id: string, status: SessionStatus): Promise<void> {
       await pool.query(`UPDATE sessions SET status=$2, updated_at=now() WHERE id=$1`, [id, status]);

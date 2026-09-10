@@ -248,3 +248,33 @@ export default {
 7. 扩展：子 agent 工具、审批 hook。
 
 每一步都应保持 core 不长。如果某个功能让 core 变厚，先问它能不能是 extension。
+
+## 11. 会话与沙箱 N:N（定稿）
+
+早期实现里 session 对 workspace 一对一，sandbox 由 workspace 的 affinity 决定，一个会话同一时刻只有一个沙箱。这一节把关系定为 N:N，并且仍然守住两条原则：events 是唯一真相；sandbox 只是租约。
+
+### 11.1 模型
+
+```
+session ──1:N── session_environments(key, environment, workspace)
+                       │  key = "main" 是主环境（工具默认目标，capture 的主体）
+                       │  其余 key 是附加环境，如 "browser"、"gpu"
+                       ▼
+workspace ──N:1 sandbox lease（affinity = workspace.id，同一时刻至多一个活跃租约）
+```
+
+- **一个会话多个沙箱**：会话挂多个环境，每个环境各自租沙箱。内置工具增加可选参数 `env`，默认 `main`。事件 `sandbox.acquired` 带 `env`，`workspace.captured` 带 `workspace_id` 和 `env`，多个并存不需要新的事件模型。
+- **多个会话一个沙箱**：不变，同一 workspace 的会话靠 affinity 复用，活跃租约互斥。
+- **子会话**：`sessions.parent_id`。子会话拥有从父会话 fork 出来的 workspace（git 类型复制 base 加 patch，dir 类型复制目录），因此有自己的沙箱，和父会话并行互不踩文件。子会话结束时父会话收到 `agent.thread_message_received`，内容是报告加 patch；父会话决定是否 apply。事件名对齐 Managed Agents 的 multiagent。
+
+### 11.2 运行时
+
+- run-turn 持有 `Map<envKey, lease>`，懒租；结束时逐个 capture 和 release。
+- 插件的 `ctx.sandbox` 也接受 `env`；`ctx.agent.run(task, { isolated: true })` 创建子会话并等待其结束，而不是在同一沙箱里跑嵌套 loop。
+- runner 有并发度（`RUNNER_CONCURRENCY`），否则父会话等待子会话会死锁在单消费者上。
+
+### 11.3 明确不做的
+
+- 不在一个沙箱里跑多个会话的并发写：仍由 affinity 互斥保证。
+- 不做跨会话共享租约的"沙箱池"语义：沙箱复用只发生在同一 workspace 内。
+- 不支持一个 workspace 同时挂到两个环境，附加环境要么自带 workspace，要么 fork 主 workspace。

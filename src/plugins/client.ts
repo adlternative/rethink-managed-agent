@@ -14,13 +14,14 @@ import { SANDBOX_HOST_DIR, type HostBundle } from "./bundle.ts";
 import { Rpc, type RunnerMethods, type SessionInfo } from "./protocol.ts";
 
 export interface Capabilities {
-  sandboxExec(command: string, opts: { cwd?: string; timeoutMs?: number }): Promise<{ stdout: string; stderr: string; code: number }>;
-  sandboxRead(p: string): Promise<string>;
-  sandboxWrite(p: string, content: string): Promise<void>;
+  sandboxExec(command: string, opts: { cwd?: string; timeoutMs?: number; env?: string }): Promise<{ stdout: string; stderr: string; code: number }>;
+  sandboxRead(p: string, env?: string): Promise<string>;
+  sandboxWrite(p: string, content: string, env?: string): Promise<void>;
+  sandboxEnvs(): string[];
   storeGet(key: string, scope: "agent" | "workspace"): Promise<unknown>;
   storeSet(key: string, scope: "agent" | "workspace", value: unknown): Promise<void>;
   modelComplete(prompt: string, opts: { system?: string; maxTokens?: number }): Promise<string>;
-  agentRun(task: string, opts: { system?: string; maxTurns?: number; tools?: string[] }): Promise<string>;
+  agentRun(task: string, opts: { system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }): Promise<string | { report: string; patch?: string; sessionId: string }>;
   fetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
   log(args: unknown[]): void;
 }
@@ -137,13 +138,14 @@ export class PluginHost {
     const caps = this.sessions.get(params.session.sessionId);
     if (!caps) throw new Error(`no active session ${params.session.sessionId} for capability ${method}`);
     switch (method) {
-      case "sandbox.exec": { const p = params as RunnerMethods["sandbox.exec"]["params"]; return caps.sandboxExec(p.command, { cwd: p.cwd, timeoutMs: p.timeoutMs }); }
-      case "sandbox.readFile": return caps.sandboxRead((params as RunnerMethods["sandbox.readFile"]["params"]).path);
-      case "sandbox.writeFile": { const p = params as RunnerMethods["sandbox.writeFile"]["params"]; await caps.sandboxWrite(p.path, p.content); return null; }
+      case "sandbox.exec": { const p = params as RunnerMethods["sandbox.exec"]["params"]; return caps.sandboxExec(p.command, { cwd: p.cwd, timeoutMs: p.timeoutMs, env: p.env }); }
+      case "sandbox.readFile": { const p = params as RunnerMethods["sandbox.readFile"]["params"]; return caps.sandboxRead(p.path, p.env); }
+      case "sandbox.writeFile": { const p = params as RunnerMethods["sandbox.writeFile"]["params"]; await caps.sandboxWrite(p.path, p.content, p.env); return null; }
+      case "sandbox.envs": return caps.sandboxEnvs();
       case "store.get": { const p = params as RunnerMethods["store.get"]["params"]; return caps.storeGet(p.key, p.scope); }
       case "store.set": { const p = params as RunnerMethods["store.set"]["params"]; await caps.storeSet(p.key, p.scope, p.value); return null; }
       case "model.complete": { const p = params as RunnerMethods["model.complete"]["params"]; return caps.modelComplete(p.prompt, { system: p.system, maxTokens: p.maxTokens }); }
-      case "agent.run": { const p = params as RunnerMethods["agent.run"]["params"]; return caps.agentRun(p.task, { system: p.system, maxTurns: p.maxTurns, tools: p.tools }); }
+      case "agent.run": { const p = params as RunnerMethods["agent.run"]["params"]; return caps.agentRun(p.task, { system: p.system, maxTurns: p.maxTurns, tools: p.tools, isolated: p.isolated, env: p.env }); }
       case "fetch": { const p = params as RunnerMethods["fetch"]["params"]; return caps.fetch(p.url, { method: p.method, headers: p.headers, body: p.body }); }
       case "log": caps.log((params as RunnerMethods["log"]["params"]).args); return null;
       default: throw new Error(`unknown capability ${String(method)}`);

@@ -38,6 +38,8 @@ export const env = {
   PLUGIN_FETCH_ALLOW: process.env.PLUGIN_FETCH_ALLOW ?? "*",
   /** Experimental: host pi-coding-agent's AgentSession instead of the pma plugin host. */
   EXPERIMENTAL_PI_PACKAGES: process.env.EXPERIMENTAL_PI_PACKAGES === "1",
+  /** Runs a runner handles concurrently (sub-agent sessions need > 1). */
+  RUNNER_CONCURRENCY: Number(process.env.RUNNER_CONCURRENCY ?? 4),
   API_PORT: Number(process.env.API_PORT ?? 8080),
   MAX_TURNS: Number(process.env.MAX_TURNS ?? 50),
   /** Default and hard cap for a single bash tool call. */

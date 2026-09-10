@@ -4,7 +4,7 @@ import { resolveConfig, buildHeaders } from "./config.ts";
 export interface ContentBlock { type: "text"; text: string }
 export interface Agent { id: string; name: string; model: { provider: string; id: string }; system: string | null; tools: string[]; packages?: string[]; created_at: string }
 export interface Environment { id: string; name: string; provider: string; image: string | null; network?: "none" | "bridge"; plugin_host?: "runner" | "sandbox"; workspace: unknown; created_at: string }
-export interface Session { id: string; agent_id: string; environment_id: string; workspace_id: string; status: "idle" | "running" | "terminated"; agent: Omit<Agent, "created_at">; created_at: string; updated_at: string }
+export interface Session { id: string; agent_id: string; environment_id: string; workspace_id: string; environments?: { key: string; environment_id: string; workspace_id: string }[]; parent_id?: string | null; status: "idle" | "running" | "terminated"; agent: Omit<Agent, "created_at">; created_at: string; updated_at: string }
 export interface SessionEvent { id: string; session_id: string; seq: number; type: string; payload: any; created_at: string }
 export interface SandboxRow { id: string; provider: string; status: string; workspace_id: string | null; affinity: string | null; external_ref: string | null; last_used_at: string; created_at: string }
 export interface ModelInfo { provider: string; id: string; name: string; context_window: number }

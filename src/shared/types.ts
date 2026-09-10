@@ -160,11 +160,22 @@ export interface SandboxRow {
 // ---------- Session ----------
 export type SessionStatus = "idle" | "running" | "terminated";
 export type StopReason = "end_turn" | "interrupted" | "error" | "max_turns";
+/** One environment attached to a session. `main` is the primary (default tool target, capture subject). */
+export interface SessionEnvironment {
+  key: string;
+  environment_id: EnvironmentId;
+  workspace_id: WorkspaceId;
+}
 export interface SessionResource {
   id: SessionId;
   agent_id: AgentId;
+  /** primary environment / workspace (== environments[key="main"]) */
   environment_id: EnvironmentId;
   workspace_id: WorkspaceId;
+  /** all attached environments, main first */
+  environments: SessionEnvironment[];
+  /** set for sub-agent sessions spawned by another session */
+  parent_id: SessionId | null;
   status: SessionStatus;
   /** snapshot of agent config at creation (Managed-Agent style) */
   agent: Omit<AgentResource, "created_at">;
@@ -190,9 +201,13 @@ export type SessionEventPayload =
   | { type: "session.status_idle"; stop_reason: StopReason }
   | { type: "session.status_terminated"; reason?: string }
   | { type: "session.error"; error: { type: string; message: string } }
-  | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName }
-  | { type: "sandbox.released"; sandbox_id: SandboxId }
-  | { type: "workspace.captured"; ref: WorkspaceRef };
+  | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName; env?: string }
+  | { type: "sandbox.released"; sandbox_id: SandboxId; env?: string }
+  | { type: "workspace.captured"; ref: WorkspaceRef; workspace_id?: WorkspaceId; env?: string }
+  /** a sub-agent session was created for this session */
+  | { type: "session.thread_created"; child_session_id: SessionId; env: string; task: string }
+  /** a sub-agent session finished; its report (and patch, if any) for the parent */
+  | { type: "agent.thread_message_received"; child_session_id: SessionId; content: ContentBlock[]; stop_reason: StopReason; patch?: string };
 
 export interface SessionEvent {
   id: string; // "evt_xxx"

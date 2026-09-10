@@ -37,6 +37,7 @@ src/cli/        main.ts (thin client: create agent/env/session, send, stream)
 ## Invariants
 - events table is append-only; session state = fold(events). No "messages" column anywhere.
 - session row never references a sandbox. Sandboxes appear only as events + the sandboxes table (lease registry).
+- session ↔ environment is 1:N (`session_environments`, key "main" is primary); each environment leases its own sandbox; child sessions (`parent_id`) run on forked workspaces. DESIGN.md §11.
 - Tools never import a provider; they use `ToolContext.sandbox()`. The harness only sees `SandboxService` (acquire/capture) from `SandboxManager.bind(name)`.
 - Providers never touch the sandboxes table; only SandboxManager writes leases.
 - Secrets never enter events.

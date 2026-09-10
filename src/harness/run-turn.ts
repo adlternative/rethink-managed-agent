@@ -14,7 +14,9 @@ import type {
   ContentBlock,
   EnvironmentResource,
   SandboxLease,
+  SandboxProviderName,
   SandboxService,
+  SessionEnvironment,
   SessionEvent,
   SessionEventPayload,
   SessionId,
@@ -53,9 +55,19 @@ export interface AgentPlugins {
 }
 
 /** Everything runSession needs from the outside world; no DB/Redis code lives here. */
+/** A child session created for `ctx.agent.run({ isolated: true })`. */
+export interface ChildSpawn {
+  /** Fork the env's workspace, create the child session (parent_id set), post the task, enqueue it. */
+  spawn(parent: SessionResource, env: SessionEnvironment, task: string, system?: string): Promise<SessionResource>;
+  /** Resolve when the child is idle/terminated (polls); rejects on abort. */
+  wait(childId: SessionId, signal: AbortSignal): Promise<SessionResource>;
+}
+
 export interface RunDeps {
   models: Models;
-  sandboxes: SandboxService;
+  /** Sandbox service for a provider; a session's environments may span providers. */
+  sandboxFor(provider: SandboxProviderName): SandboxService;
+  children: ChildSpawn;
   /** Plugin host + content for this agent (cached by the runner). */
   pluginsFor(agent: SessionResource["agent"]): Promise<AgentPlugins>;
   pluginStore: { get(scope: string, owner: string, key: string): Promise<unknown>; set(scope: string, owner: string, key: string, value: unknown): Promise<void> };
@@ -146,10 +158,19 @@ function isAllowedUrl(url: string): boolean {
 export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<RunOutcome> {
   const session = await deps.getSession(sessionId);
   if (!session) throw new Error(`Session not found: ${sessionId}`);
-  const workspace = await deps.getWorkspace(session.workspace_id);
-  if (!workspace) throw new Error(`Workspace not found: ${session.workspace_id}`);
-  const environment = await deps.getEnvironment(session.environment_id);
-  if (!environment) throw new Error(`Environment not found: ${session.environment_id}`);
+  // Every attached environment (main first); each gets its own lazily leased sandbox.
+  const attached = session.environments?.length ? session.environments : [{ key: "main", environment_id: session.environment_id, workspace_id: session.workspace_id }];
+  const envs = new Map<string, { key: string; environment: EnvironmentResource; workspace: WorkspaceResource }>();
+  for (const e of attached) {
+    const workspace = await deps.getWorkspace(e.workspace_id);
+    if (!workspace) throw new Error(`Workspace not found: ${e.workspace_id}`);
+    const environment = await deps.getEnvironment(e.environment_id);
+    if (!environment) throw new Error(`Environment not found: ${e.environment_id}`);
+    envs.set(e.key, { key: e.key, environment, workspace });
+  }
+  const main = envs.get("main")!;
+  const workspace = main.workspace;
+  const environment = main.environment;
 
   const publishAll = async (events: SessionEvent[]) => {
     for (const event of events) await deps.publish({ type: "event", event });
@@ -173,25 +194,32 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   }
   await publishAll(claimed);
 
-  // Held in an object because the lease is set from inside a closure and read in `finally`.
-  const held: { lease: SandboxLease | null; acquiring: Promise<SandboxLease> | null } = { lease: null, acquiring: null };
+  // One lazily leased sandbox per attached environment; read in `finally` for capture + release.
+  const held = new Map<string, { lease: SandboxLease | null; acquiring: Promise<SandboxLease> | null }>();
   const ctx: ToolContext = {
     signal: abort.signal,
-    sandbox: async () => {
-      held.acquiring ??= deps.sandboxes
-        .acquire({ workspaceId: workspace.id, workspaceRef: workspace.ref, image: environment.image, network: environment.network, affinity: workspace.id })
+    envKeys: [...envs.keys()],
+    sandbox: async (key = "main") => {
+      const e = envs.get(key);
+      if (!e) throw new Error(`no environment ${JSON.stringify(key)} attached to this session (have: ${[...envs.keys()].join(", ")})`);
+      let h = held.get(key);
+      if (!h) { h = { lease: null, acquiring: null }; held.set(key, h); }
+      const slot = h;
+      slot.acquiring ??= deps
+        .sandboxFor(e.environment.provider)
+        .acquire({ workspaceId: e.workspace.id, workspaceRef: e.workspace.ref, image: e.environment.image, network: e.environment.network, affinity: e.workspace.id })
         .then(
           async (l) => {
-            held.lease = l;
-            await emit({ type: "sandbox.acquired", sandbox_id: l.sandbox.id, provider: l.sandbox.provider });
+            slot.lease = l;
+            await emit({ type: "sandbox.acquired", sandbox_id: l.sandbox.id, provider: l.sandbox.provider, env: key });
             return l;
           },
-          (e) => {
-            held.acquiring = null; // let a later tool call retry instead of replaying this rejection
-            throw e;
+          (err) => {
+            slot.acquiring = null; // let a later tool call retry instead of replaying this rejection
+            throw err;
           },
         );
-      return (await held.acquiring).sandbox;
+      return (await slot.acquiring).sandbox;
     },
   };
 
@@ -217,7 +245,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     if (plugins.manifests.length > 0) {
       if (environment.plugin_host === "sandbox" && environment.provider !== "local") {
         // Plugins live in the sandbox: lease it now (the host needs a process to run in).
-        const sb = await ctx.sandbox();
+        const sb = await ctx.sandbox("main");
         host = await PluginHost.startInSandbox(sb, await plugins.bundle(), { agentId: session.agent.id });
         ownHost = true;
         for (const w of host.warnings) console.warn(`[plugins ${sessionId}] ${w}`);
@@ -229,8 +257,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
 
     // ---- capabilities plugins may call back into (all scoped to this session) ----
     const caps: Capabilities = {
+      sandboxEnvs: () => [...envs.keys()],
       async sandboxExec(command, opts) {
-        const sb = await ctx.sandbox();
+        const sb = await ctx.sandbox(opts.env);
         let stdout = "", stderr = "", code = -1;
         for await (const c of sb.exec(command, { cwd: opts.cwd, timeoutMs: opts.timeoutMs ?? env.BASH_TIMEOUT_MS, signal: abort.signal })) {
           if (c.type === "stdout") stdout += c.data;
@@ -239,8 +268,8 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         }
         return { stdout: truncateOutput(stdout), stderr: truncateOutput(stderr), code };
       },
-      async sandboxRead(p) { return new TextDecoder().decode(await (await ctx.sandbox()).readFile(p)); },
-      async sandboxWrite(p, content) { await (await ctx.sandbox()).writeFile(p, new TextEncoder().encode(content)); },
+      async sandboxRead(p, envKey) { return new TextDecoder().decode(await (await ctx.sandbox(envKey)).readFile(p)); },
+      async sandboxWrite(p, content, envKey) { await (await ctx.sandbox(envKey)).writeFile(p, new TextEncoder().encode(content)); },
       storeGet: (key, scope) => deps.pluginStore.get(scope, scope === "agent" ? session.agent.id : workspace.id, key),
       storeSet: (key, scope, value) => deps.pluginStore.set(scope, scope === "agent" ? session.agent.id : workspace.id, key, value),
       async modelComplete(prompt, opts) {
@@ -250,6 +279,23 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         return blocksText(r.content);
       },
       async agentRun(task, opts) {
+        if (opts.isolated) {
+          // A real child session on a forked workspace with its own sandbox; runs on any runner slot.
+          const e = envs.get(opts.env ?? "main");
+          if (!e) throw new Error(`no environment ${opts.env} attached`);
+          const child = await deps.children.spawn(session, { key: e.key, environment_id: e.environment.id, workspace_id: e.workspace.id }, task, opts.system);
+          await emit({ type: "session.thread_created", child_session_id: child.id, env: e.key, task });
+          const done = await deps.children.wait(child.id, abort.signal);
+          const childEvents = await deps.listEvents(child.id);
+          const lastMsg = [...childEvents].reverse().find((ev) => ev.type === "agent.message");
+          const report = lastMsg && lastMsg.payload.type === "agent.message" ? blocksText(lastMsg.payload.content) : "(no report)";
+          const idle = [...childEvents].reverse().find((ev) => ev.type === "session.status_idle");
+          const stop: StopReason = idle && idle.payload.type === "session.status_idle" ? idle.payload.stop_reason : done.status === "terminated" ? "error" : "end_turn";
+          const childWs = await deps.getWorkspace(child.workspace_id);
+          const patch = childWs?.ref.kind === "git" ? childWs.ref.patch : undefined;
+          await emit({ type: "agent.thread_message_received", child_session_id: child.id, content: [{ type: "text", text: report }], stop_reason: stop, patch });
+          return { report, patch, sessionId: child.id };
+        }
         // A nested loop in the same sandbox with the builtin tools only (no plugin tools: no recursion).
         const allowed = opts.tools ? builtinTools.filter((t) => opts.tools!.includes(t.name)) : builtinTools;
         const sub: AgentContext = { systemPrompt: opts.system ?? DEFAULT_SYSTEM_PROMPT, messages: [], tools: allowed };
@@ -380,21 +426,24 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     if (stopReason === "error" && abort.signal.aborted) {
       await emit({ type: "session.error", error: { type: "run_timeout", message: `run exceeded RUN_TIMEOUT_MS (${env.RUN_TIMEOUT_MS})` } });
     }
-    // An acquire still in flight when the loop ended must be awaited so its lease gets released.
-    const lease = held.lease ?? (await held.acquiring?.catch(() => null)) ?? null;
-    if (lease) {
+    // Every environment that leased a sandbox: capture its workspace, then release. An acquire
+    // still in flight when the loop ended must be awaited so its lease gets released too.
+    for (const [key, slot] of held) {
+      const lease = slot.lease ?? (await slot.acquiring?.catch(() => null)) ?? null;
+      if (!lease) continue;
+      const e = envs.get(key)!;
       try {
-        const ref = await deps.sandboxes.capture(lease.sandbox, workspace.ref);
-        await emit({ type: "workspace.captured", ref: redactRef(ref) });
-        if (!(await deps.updateWorkspaceRef(workspace.id, ref, workspace.ref))) {
-          await emit({ type: "session.error", error: { type: "capture_conflict", message: "workspace ref changed during the run (another session captured first); this run's capture was not saved" } });
+        const ref = await deps.sandboxFor(e.environment.provider).capture(lease.sandbox, e.workspace.ref);
+        await emit({ type: "workspace.captured", ref: redactRef(ref), workspace_id: e.workspace.id, env: key });
+        if (!(await deps.updateWorkspaceRef(e.workspace.id, ref, e.workspace.ref))) {
+          await emit({ type: "session.error", error: { type: "capture_conflict", message: `workspace ${e.workspace.id} (${key}) changed during the run (another session captured first); this run's capture was not saved` } });
         }
       } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        await emit({ type: "session.error", error: { type: "capture_failed", message: e.message } });
+        const err2 = err instanceof Error ? err : new Error(String(err));
+        await emit({ type: "session.error", error: { type: "capture_failed", message: `${key}: ${err2.message}` } });
       } finally {
         await lease.release();
-        await emit({ type: "sandbox.released", sandbox_id: lease.sandbox.id });
+        await emit({ type: "sandbox.released", sandbox_id: lease.sandbox.id, env: key });
       }
     }
   }

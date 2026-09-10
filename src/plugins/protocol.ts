@@ -17,13 +17,14 @@ export interface HostMethods {
 }
 // host -> runner (capability calls). `session` identifies which run they belong to.
 export interface RunnerMethods {
-  "sandbox.exec": { params: { session: SessionInfo; command: string; cwd?: string; timeoutMs?: number }; result: { stdout: string; stderr: string; code: number } };
-  "sandbox.readFile": { params: { session: SessionInfo; path: string }; result: string };
-  "sandbox.writeFile": { params: { session: SessionInfo; path: string; content: string }; result: null };
+  "sandbox.exec": { params: { session: SessionInfo; command: string; cwd?: string; timeoutMs?: number; env?: string }; result: { stdout: string; stderr: string; code: number } };
+  "sandbox.readFile": { params: { session: SessionInfo; path: string; env?: string }; result: string };
+  "sandbox.writeFile": { params: { session: SessionInfo; path: string; content: string; env?: string }; result: null };
+  "sandbox.envs": { params: { session: SessionInfo }; result: string[] };
   "store.get": { params: { session: SessionInfo; key: string; scope: "agent" | "workspace" }; result: unknown };
   "store.set": { params: { session: SessionInfo; key: string; scope: "agent" | "workspace"; value: unknown }; result: null };
   "model.complete": { params: { session: SessionInfo; prompt: string; system?: string; maxTokens?: number }; result: string };
-  "agent.run": { params: { session: SessionInfo; task: string; system?: string; maxTurns?: number; tools?: string[] }; result: string };
+  "agent.run": { params: { session: SessionInfo; task: string; system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }; result: string | { report: string; patch?: string; sessionId: string } };
   fetch: { params: { session: SessionInfo; url: string; method?: string; headers?: Record<string, string>; body?: string }; result: { status: number; headers: Record<string, string>; body: string } };
   log: { params: { session: SessionInfo; args: unknown[] }; result: null };
 }
