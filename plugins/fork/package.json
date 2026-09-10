@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-fork", "version": "0.1.0", "type": "module", "description": "fork tool: delegate a self-contained subtask to a sub-agent running in the same sandbox.", "pma": { "plugins": ["./index.ts"] } }

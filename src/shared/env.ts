@@ -34,6 +34,10 @@ export const env = {
   E2B_SANDBOX_TIMEOUT_MS: Number(process.env.E2B_SANDBOX_TIMEOUT_MS ?? 1200000),
   /** Per-agent pi agentDir root: packages (extensions/skills/prompts) are installed under <root>/<agent_id>. */
   PI_AGENT_ROOT: process.env.PI_AGENT_ROOT ?? "./data/pi-agents",
+  /** Hostnames plugins may fetch through ctx.fetch ("*" = any). Empty denies all. */
+  PLUGIN_FETCH_ALLOW: process.env.PLUGIN_FETCH_ALLOW ?? "*",
+  /** Experimental: host pi-coding-agent's AgentSession instead of the pma plugin host. */
+  EXPERIMENTAL_PI_PACKAGES: process.env.EXPERIMENTAL_PI_PACKAGES === "1",
   API_PORT: Number(process.env.API_PORT ?? 8080),
   MAX_TURNS: Number(process.env.MAX_TURNS ?? 50),
   /** Default and hard cap for a single bash tool call. */

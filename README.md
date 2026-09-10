@@ -161,12 +161,18 @@ src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
 
-## pi packages (extensions / skills / prompts)
+## Plugins
 
-The harness *is* pi: the runner hosts `@earendil-works/pi-coding-agent`'s `AgentSession` headlessly, so
-pi packages load unchanged. Create an agent with `packages: ["npm:...", "git:...", "/path"]` and its
-extensions (registered tools, `tool_call` policy hooks, context hooks), skills and prompt templates are
-active in every session. UI-only and cwd-bound extensions do not apply; see [docs/PI_EXTENSIONS.md](docs/PI_EXTENSIONS.md).
+Agents are extended with **pma plugins**: tools, hooks (`tool_call` / `tool_result` / `context` / turn
+and session events), skills and prompt templates, packaged like pi packages (`npm:`, `git:`, or a path).
+Plugins run in a per-agent host process under Node's permission model and only reach the world through
+`ctx` — sandbox, store, model, sub-agent, allow-listed fetch — so a plugin cannot read or write outside
+the workspace no matter what it imports. Pure-tool / pure-hook pi packages load through a compat
+adapter. Samples in `plugins/`: goal, fork, safety-net, web-fetch. See [docs/PLUGINS.md](docs/PLUGINS.md).
+
+```bash
+pma agents create coder qoder/kmodel --packages /app/plugins/goal,/app/plugins/fork,/app/plugins/safety-net
+```
 
 ## CLI
 

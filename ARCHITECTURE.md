@@ -10,9 +10,11 @@ src/infra/      db.ts (pg pool + typed repos), events.ts (append/list/fold), pub
 src/sandbox/    manager.ts (SandboxManager: policy — leases, affinity reuse, conflict rejection, reap, list/get/destroy),
                 provider.ts (registry + process-wide manager), local.ts / docker.ts / e2b.ts (mechanism: create/connect/
                 destroy/capture only), workspace.ts (materialize/capture helpers), lease-store.ts (sandboxes table)
-src/harness/    pi-session.ts (headless pi AgentSession: packages/extensions/skills, see docs/PI_EXTENSIONS.md),
+src/plugins/    api.ts (plugin API + capabilities), host.ts (permission-restricted host process), client.ts
+                (runner side: spawn, tools, hooks, capability serving), protocol.ts, installer.ts, pi-compat.ts
+src/harness/    pi-session.ts (EXPERIMENTAL: pi-coding-agent AgentSession, see docs/PI_EXTENSIONS.md),
                 tools.ts (bash/read/write/edit AgentTools over ctx.sandbox()), fold.ts (events -> pi
-                AgentMessage[]), run-turn.ts (one session run: fold, pi session, persist events,
+                AgentMessage[]), run-turn.ts (one session run: fold, pi-agent-core loop + plugin hooks, persist events,
                 steering/interrupt, capture+release), models.ts (pi-ai registry for GET /v1/models)
 src/api/        main.ts (hono server), routes/*.ts (agents, environments, sessions, events, stream)
 src/runner/     main.ts (consume queue -> run-turn; reaper loop)

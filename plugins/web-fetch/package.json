@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-web-fetch", "version": "0.1.0", "type": "module", "description": "web_fetch tool via the runner's allow-listed fetch capability, plus a web-research skill.", "pma": { "plugins": ["./index.ts"], "skills": ["./skills"] } }

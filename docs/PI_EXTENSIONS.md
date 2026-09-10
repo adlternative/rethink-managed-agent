@@ -1,3 +1,6 @@
+> **Experimental / not the supported path.** The supported plugin system is [PLUGINS.md](PLUGINS.md).
+> This route runs pi extensions unsandboxed inside the runner; enable with `EXPERIMENTAL_PI_PACKAGES=1`.
+
 # pi packages (extensions / skills / prompts) in the runner
 
 The runner hosts pi's own harness (`@earendil-works/pi-coding-agent` `AgentSession`) headlessly, so

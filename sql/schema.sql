@@ -54,3 +54,12 @@ CREATE TABLE IF NOT EXISTS events (
   PRIMARY KEY (session_id, seq)
 );
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS packages JSONB NOT NULL DEFAULT '[]';
+-- plugin key/value store (scope = 'agent' | 'workspace'; owner = agent_id | workspace_id)
+CREATE TABLE IF NOT EXISTS plugin_store (
+  scope TEXT NOT NULL,
+  owner TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (scope, owner, key)
+);

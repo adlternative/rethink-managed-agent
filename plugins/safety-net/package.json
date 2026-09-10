@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-safety-net", "version": "0.1.0", "type": "module", "description": "tool_call hook that blocks destructive shell commands (rm -rf /, git push --force, DROP DATABASE, ...).", "pma": { "plugins": ["./index.ts"] } }

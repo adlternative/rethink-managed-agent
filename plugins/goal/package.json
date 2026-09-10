@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-goal", "version": "0.1.0", "type": "module", "description": "Persistent goal tracking: set_goal / goal_progress tools and a context hook that keeps the goal in front of the model.", "pma": { "plugins": ["./index.ts"] } }

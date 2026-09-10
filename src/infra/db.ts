@@ -129,3 +129,17 @@ export const repos = {
     },
   },
 };
+
+export const pluginStore = {
+  async get(scope: string, owner: string, key: string): Promise<unknown> {
+    const r = await pool.query<{ value: unknown }>(`SELECT value FROM plugin_store WHERE scope=$1 AND owner=$2 AND key=$3`, [scope, owner, key]);
+    return r.rows[0]?.value ?? null;
+  },
+  async set(scope: string, owner: string, key: string, value: unknown): Promise<void> {
+    await pool.query(
+      `INSERT INTO plugin_store (scope, owner, key, value) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (scope, owner, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [scope, owner, key, JSON.stringify(value)],
+    );
+  },
+};

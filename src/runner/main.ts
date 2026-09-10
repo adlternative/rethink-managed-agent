@@ -1,10 +1,15 @@
-import { pool, repos } from "../infra/db.ts";
+import { pluginStore, pool, repos } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, popSteer, publish, redis } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun } from "../infra/queue.ts";
 import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
-import { runSession, type RunDeps } from "../harness/run-turn.ts";
+import { runSession, type AgentPlugins, type RunDeps } from "../harness/run-turn.ts";
+import { createModelRegistry } from "../harness/models.ts";
+import { PluginHost } from "../plugins/client.ts";
+import { ensurePackages, loadContent } from "../plugins/installer.ts";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { sandboxManager } from "../sandbox/provider.ts";
 import { env } from "../shared/env.ts";
 import type { RunJob, SandboxProviderName } from "../shared/types.ts";
@@ -14,8 +19,39 @@ const REAP_INTERVAL_MS = 60_000;
 await migrate();
 
 /** Everything runSession needs, wired to infra + sandbox. Provider is chosen per session below. */
+const models = createModelRegistry();
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+/**
+ * One plugin host per (agent id, package list); hosts are long-lived and serve every session of
+ * that agent. Agents without packages get no host at all.
+ */
+const pluginCache = new Map<string, Promise<AgentPlugins>>();
+function pluginsFor(agent: Parameters<RunDeps["pluginsFor"]>[0]): Promise<AgentPlugins> {
+  const packages = agent.packages ?? [];
+  if (packages.length === 0) return Promise.resolve({ host: null, skills: [], prompts: [] });
+  const key = `${agent.id}:${JSON.stringify(packages)}`;
+  let p = pluginCache.get(key);
+  if (!p) {
+    p = (async () => {
+      const manifests = await ensurePackages(agent.id, packages);
+      const content = await loadContent(manifests);
+      const host = await PluginHost.start(manifests, { agentId: agent.id, repoRoot: REPO_ROOT, extraReadDirs: [env.PI_AGENT_ROOT] });
+      for (const w of host.warnings) console.warn(`[plugins] ${agent.id}: ${w}`);
+      console.log(`[plugins] ${agent.id}: tools=${host.tools.map((t) => t.name).join(",") || "-"} hooks=${[...host.hooks].join(",") || "-"} skills=${content.skills.map((s) => s.name).join(",") || "-"}`);
+      return { host, ...content };
+    })();
+    pluginCache.set(key, p);
+    p.catch(() => pluginCache.delete(key));
+  }
+  return p;
+}
+
 function makeDeps(provider: SandboxProviderName): RunDeps {
   return {
+    models,
+    pluginsFor,
+    pluginStore,
     sandboxes: sandboxManager.bind(provider),
     // runSession publishes each event itself (so deltas and events interleave in order).
     appendEvents: (id, payloads) => appendEvents(id, payloads, { publish: false }),
