@@ -28,14 +28,15 @@ import type {
   WorkspaceResource,
   Usage,
   ContextSize,
-  MemoryResource,
+  MemoryMount,
+  SkillRef,
 } from "../shared/types.ts";
 import type { PackageManifest, PromptTemplate, Skill } from "../plugins/api.ts";
 import { PluginHost, type Capabilities } from "../plugins/client.ts";
 import type { HostBundle } from "../plugins/bundle.ts";
 import type { SessionInfo } from "../plugins/protocol.ts";
 import { foldEvents, toContentBlocks, type FoldFiles } from "./fold.ts";
-import { mountMemories, syncMemoriesBack, writeAttachments } from "./mounts.ts";
+import { mountMemories, syncMemoriesBack, writeAttachments, type Mounted } from "./mounts.ts";
 import { compactMessages, contextTokens, needsCompaction, settingsFromEnv } from "./compaction.ts";
 import { resolveModel } from "./models.ts";
 import { createTools, truncateOutput, type ToolContext } from "./tools.ts";
@@ -103,10 +104,10 @@ export interface RunDeps {
   recordUsage(sessionId: SessionId, usage: Omit<Usage, "requests">, context: ContextSize): Promise<Usage>;
   /** Uploaded files (for image blocks and document attachments). */
   files: FoldFiles;
-  /** Skill resources referenced by the agent. */
-  getSkills(ids: string[]): Promise<Skill[]>;
-  /** Memory stores mounted into the session. */
-  getMemories(ids: string[]): Promise<MemoryResource[]>;
+  /** Skill resources referenced by the agent / session. */
+  getSkills(refs: SkillRef[]): Promise<Skill[]>;
+  /** Memory stores mounted into the session, resolved to store + mount path. */
+  getMemoryStores(mounts: MemoryMount[]): Promise<Mounted[]>;
   updateMemoryRef(id: string, ref: WorkspaceRef): Promise<void>;
   /** Spill store for oversized tool outputs. */
   toolOutputs: { put(sessionId: SessionId, toolUseId: string, toolName: string, content: string): Promise<void>; get(sessionId: SessionId, toolUseId: string): Promise<{ tool_name: string; content: string; bytes: number } | null> };
@@ -262,7 +263,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   const info: SessionInfo = { sessionId, agentId: session.agent.id, workspaceId: workspace.id };
   let detachPlugins: (() => void) | null = null;
   let turns = 0;
-  let memoryStores: MemoryResource[] = [];
+  let memoryStores: Mounted[] = [];
   let host: PluginHost | null = null;
   const hostRef: { current: PluginHost | null } = { current: null };
   let ownHost = false; // sandbox-hosted: started for this run, stopped with it
@@ -319,7 +320,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     // Skill resources (DB) join package skills; memories and document attachments need the main
     // sandbox, so they force an early lease when present.
     const dbSkills = await deps.getSkills(session.agent.skills ?? []);
-    memoryStores = await deps.getMemories(session.memories ?? []);
+    memoryStores = await deps.getMemoryStores(session.memory_stores ?? []);
     if (folded.attachments.length > 0 || memoryStores.length > 0) {
       const sb = await ctx.sandbox("main");
       if (folded.attachments.length > 0) await writeAttachments(sb, folded.attachments, deps.files);
@@ -403,7 +404,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     const st = skillTool(allSkills, plugins.prompts);
     if (st) tools.push(st);
     const memoryPrompt = memoryStores.length
-      ? `Persistent memory directories are mounted at ${memoryStores.map((m) => `.memory/${m.name}`).join(", ")}${memoryStores.some((m) => m.description) ? ` (${memoryStores.filter((m) => m.description).map((m) => `${m.name}: ${m.description}`).join("; ")})` : ""}. They survive this session: read them for prior notes and write durable notes there (e.g. .memory/<name>/notes.md) for future sessions.`
+      ? `Persistent memory directories are mounted at ${memoryStores.map((m) => m.mount_path).join(", ")}${memoryStores.some((m) => m.store.description) ? ` (${memoryStores.filter((m) => m.store.description).map((m) => `${m.mount_path}: ${m.store.description}`).join("; ")})` : ""}. They survive this session: read them for prior notes and write durable notes there (e.g. <mount>/notes.md) for future sessions.`
       : "";
     const baseSystemPrompt = [session.agent.system ?? DEFAULT_SYSTEM_PROMPT, skillsPrompt(allSkills, plugins.prompts), memoryPrompt].filter(Boolean).join("\n\n");
 

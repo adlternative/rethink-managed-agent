@@ -44,8 +44,8 @@ export async function cmdSession(args: string[]): Promise<void> {
       const blocks: any[] = text ? [{ type: "text", text }] : [];
       for (const f of (filesArg ?? "").split(",").filter(Boolean)) {
         const up = await uploadFile(f);
-        blocks.push({ type: mimeOf(f).startsWith("image/") ? "image" : "document", file_id: up.id });
-        process.stderr.write(`uploaded ${up.name} -> ${up.id}\n`);
+        blocks.push({ type: mimeOf(f).startsWith("image/") ? "image" : "document", source: { type: "file", file_id: up.id } });
+        process.stderr.write(`uploaded ${up.filename} -> ${up.id}\n`);
       }
       const { events } = (await apiPost(`/sessions/${id}/events`, { events: [{ type: "user.message", content: blocks }] })) as { events: SessionEvent[] };
       if (!flags.wait) return printJson(events);

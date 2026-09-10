@@ -30,8 +30,8 @@ export interface AgentResource {
    * "npm:<pkg>", "git:<url>", or a local path readable by the runner. See docs/PI_EXTENSIONS.md.
    */
   packages: string[];
-  /** skill resources (ids) available in addition to package skills */
-  skills: string[];
+  /** skill resources available in addition to package skills */
+  skills: SkillRef[];
   created_at: string;
 }
 
@@ -106,6 +106,7 @@ export type WorkspaceRef =
   | { kind: "git"; remote: string; base: string; patch?: string } // base = commit sha, patch = git diff text (may be large)
   | { kind: "local"; path: string }
   | { kind: "dir"; path: string } // provider-managed persistent dir (local provider default)
+  | { kind: "blob"; key: string; bytes: number } // tarball in the blob store (memory stores; portable across runners)
   | { kind: "byoc"; worker: string; path: string }; // lives on a BYOC worker's disk; only that worker can materialize it
 
 export interface WorkspaceResource {
@@ -252,8 +253,8 @@ export interface SessionResource {
   environments: SessionEnvironment[];
   /** set for sub-agent sessions spawned by another session */
   parent_id: SessionId | null;
-  /** memory resources mounted into this session's main sandbox at .memory/<name> */
-  memories: string[];
+  /** memory stores mounted into this session's main sandbox (mount_path is relative to the workspace root) */
+  memory_stores: MemoryMount[];
   status: SessionStatus;
   /** snapshot of agent config at creation (Managed-Agent style) */
   agent: Omit<AgentResource, "created_at">;
@@ -264,36 +265,50 @@ export interface SessionResource {
 // ---------- Events (the single source of truth) ----------
 /** Text, or a reference to an uploaded file: images go to the model as image blocks, documents are
  *  materialized into the workspace under .attachments/ and referenced by path. */
+/** Content blocks follow Claude Managed Agents: text, or a file source for images / documents. */
+export type FileSource = { type: "file"; file_id: string };
 export type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; file_id: string }
-  | { type: "document"; file_id: string };
+  | { type: "image"; source: FileSource }
+  | { type: "document"; source: FileSource };
 
+/** Files API shape (uploads; bytes live in the blob store, or Postgres when no store is configured). */
 export interface FileResource {
   id: string; // "file_xxx"
-  name: string;
-  mime: string;
-  bytes: number;
+  type: "file";
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
   sha256: string;
+  downloadable: true;
   created_at: string;
 }
+/** Skills API shape: a custom skill is a SKILL.md (frontmatter name/description) plus optional support files. */
 export interface SkillResource {
   id: string; // "skill_xxx"
+  type: "skill";
+  source: "custom";
+  display_title: string;
+  /** frontmatter name (what the model calls it) */
   name: string;
   description: string;
   body: string;
+  latest_version: string;
   created_at: string;
   updated_at: string;
 }
-/** A persistent directory mounted into sessions at .memory/<name>; survives sessions and is shareable across agents. */
-export interface MemoryResource {
+export type SkillRef = { type: "custom"; skill_id: string; version?: string };
+/** Memory store: a persistent directory mounted into sessions at a mount path; shared across sessions and agents. */
+export interface MemoryStoreResource {
   id: string; // "mem_xxx"
+  type: "memory_store";
   name: string;
   description: string;
   ref: WorkspaceRef;
   created_at: string;
   updated_at: string;
 }
+export interface MemoryMount { memory_store_id: string; mount_path: string }
 
 export type UserEventInput =
   | { type: "user.message"; content: ContentBlock[] }
@@ -319,6 +334,8 @@ export type SessionEventPayload =
   | { type: "workspace.captured"; ref: WorkspaceRef; workspace_id?: WorkspaceId; env?: string }
   /** context was compacted: message events with seq < first_kept_seq are replaced by `summary` when folding */
   | { type: "agent.thread_context_compacted"; summary: string; first_kept_seq: number; tokens_before: number; tokens_after: number }
+  /** session configuration changed (mounts / skills); carries only the changed fields, applies from the next turn */
+  | { type: "session.updated"; changes: Record<string, unknown> }
   /** a note written by a plugin for the user (not part of the model context) */
   | { type: "plugin.message"; plugin: string; content: ContentBlock[] }
   /** a sub-agent session was created for this session */

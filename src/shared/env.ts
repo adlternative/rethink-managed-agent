@@ -48,6 +48,12 @@ export const env = {
   COMPACTION_KEEP_RECENT_TOKENS: Number(process.env.COMPACTION_KEEP_RECENT_TOKENS ?? 20000),
   /** 32-byte key (base64/hex) that encrypts user-supplied provider credentials at rest (BYOK). */
   PMA_SECRET_KEY: process.env.PMA_SECRET_KEY ?? "",
+  /** S3-compatible blob store for files and memory snapshots (MinIO in compose). Unset = keep bytes in Postgres. */
+  BLOB_ENDPOINT: process.env.BLOB_ENDPOINT ?? "",
+  BLOB_BUCKET: process.env.BLOB_BUCKET ?? "pma",
+  BLOB_REGION: process.env.BLOB_REGION ?? "us-east-1",
+  BLOB_ACCESS_KEY: process.env.BLOB_ACCESS_KEY ?? "",
+  BLOB_SECRET_KEY: process.env.BLOB_SECRET_KEY ?? "",
   API_PORT: Number(process.env.API_PORT ?? 8080),
   MAX_TURNS: Number(process.env.MAX_TURNS ?? 50),
   /** Default and hard cap for a single bash tool call. */

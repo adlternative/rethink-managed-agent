@@ -34,7 +34,7 @@ export function foldEvents(events: SessionEvent[], files?: FoldFiles): Folded | 
 async function foldEventsAsync(events: SessionEvent[], files: FoldFiles): Promise<Folded & { attachments: Attachment[] }> {
   // Resolve every referenced file once, up front; then fold synchronously.
   const ids = new Set<string>();
-  for (const ev of events) if (ev.payload.type === "user.message") for (const b of ev.payload.content) if (b.type !== "text") ids.add(b.file_id);
+  for (const ev of events) if (ev.payload.type === "user.message") for (const b of ev.payload.content) if (b.type !== "text") ids.add(b.source.file_id);
   const resolved = new Map<string, { name: string; mime: string; data: Uint8Array } | null>();
   for (const id of ids) resolved.set(id, await files.get(id));
   const attachments: Attachment[] = [];
@@ -65,14 +65,15 @@ function foldSync(events: SessionEvent[], resolved: Map<string, { name: string; 
       const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [];
       for (const b of p.content) {
         if (b.type === "text") { content.push({ type: "text", text: b.text }); continue; }
-        const f = resolved?.get(b.file_id);
-        if (!f) { content.push({ type: "text", text: `[attachment ${b.file_id} unavailable]` }); continue; }
+        const fileId = b.source.file_id;
+        const f = resolved?.get(fileId);
+        if (!f) { content.push({ type: "text", text: `[attachment ${fileId} unavailable]` }); continue; }
         if (b.type === "image" && f.mime.startsWith("image/")) {
           content.push({ type: "image", data: Buffer.from(f.data).toString("base64"), mimeType: f.mime });
         } else {
           // documents live in the workspace; the model reads them with its tools
-          const path = `.attachments/${b.file_id}-${f.name}`;
-          attachments.push({ file_id: b.file_id, path });
+          const path = `.attachments/${fileId}-${f.name}`;
+          attachments.push({ file_id: fileId, path });
           content.push({ type: "text", text: `[attached file: ${path} (${f.mime}, ${f.data.length} bytes)]` });
         }
       }

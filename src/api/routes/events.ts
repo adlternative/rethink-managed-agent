@@ -11,9 +11,18 @@ export function validateUserEvents(events: unknown): UserEventInput[] {
   if (!Array.isArray(events) || events.length === 0) throw invalid("events must be a non-empty array");
   for (const e of events) {
     if (e?.type === "user.interrupt") continue;
-    const okBlock = (b: any) => (b?.type === "text" && typeof b.text === "string") || ((b?.type === "image" || b?.type === "document") && typeof b.file_id === "string" && /^file_[A-Za-z0-9_-]+$/.test(b.file_id));
-    if (e?.type === "user.message" && Array.isArray(e.content) && e.content.length > 0 && e.content.every(okBlock)) continue;
-    throw invalid("each event must be {type:'user.message',content:[{type:'text',text}|{type:'image'|'document',file_id}]} or {type:'user.interrupt'}");
+    if (e?.type === "user.message" && Array.isArray(e.content) && e.content.length > 0) {
+      e.content = e.content.map((b: any) => {
+        if (b?.type === "text" && typeof b.text === "string") return b;
+        if (b?.type === "image" || b?.type === "document") {
+          const id = b.source?.type === "file" ? b.source.file_id : b.file_id; // MA form, or the short form
+          if (typeof id === "string" && /^file_[A-Za-z0-9_-]+$/.test(id)) return { type: b.type, source: { type: "file", file_id: id } };
+        }
+        throw invalid("content blocks must be {type:'text',text} or {type:'image'|'document', source:{type:'file', file_id}}");
+      });
+      continue;
+    }
+    throw invalid("each event must be {type:'user.message', content:[...]} or {type:'user.interrupt'}");
   }
   return events as UserEventInput[];
 }

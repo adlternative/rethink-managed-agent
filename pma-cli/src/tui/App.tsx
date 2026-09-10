@@ -269,6 +269,7 @@ function App({ opts }: { opts: TuiOptions }) {
       case "session.error": sys(`✗ ${p.error.type}: ${p.error.message}`); break;
       case "agent.thread_context_compacted": sys(`⇣ context compacted: ${p.tokens_before} → ${p.tokens_after} tokens`); break;
       case "plugin.message": sys(`⚑ ${p.plugin}: ${textOf(p.content)}`); break;
+      case "session.updated": sys(`⚙ session updated: ${Object.keys(p.changes).join(", ")} (applies next turn)`); break;
       case "user.message": {
         const text = textOf(p.content);
         setMessages((prev) => {

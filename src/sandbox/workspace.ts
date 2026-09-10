@@ -31,6 +31,7 @@ export async function materialize(ws: WorkspaceSpec | WorkspaceRef, targetHostDi
     return targetHostDir;
   }
   if (ws.kind === "byoc") throw new Error(`workspace lives on BYOC worker ${ws.worker}; only a byoc environment can materialize it`);
+  if (ws.kind === "blob") throw new Error("blob refs are memory-store snapshots; workspaces do not use them");
   // git spec or ref
   await git(targetHostDir, "clone", "--quiet", "--", assertGitArg("remote", ws.remote), ".");
   const base = "base" in ws ? ws.base : ws.ref;

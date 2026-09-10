@@ -5,13 +5,15 @@ import { die, fmtTime, parseArgs, printJson, str, table } from "../lib/args.ts";
 const USAGE = `sessions subcommand:
   list [--status idle|running|terminated]
   get <id>
-  create [--agent <id>] [--env <id>] [--workspace-id <id>] [--model provider/id] [--message <text>] [--memories mem_a,mem_b]
+  create [--agent <id>] [--env <id>] [--workspace-id <id>] [--model provider/id] [--message <text>] [--memory-stores mem_a[:mount],mem_b]
          [--environments main=<env_id>,<key>=<env_id>[:fork],...]   (attach several sandboxes; ":fork" forks main's workspace)
   attach <id> <key>=<env_id>[:fork]
+  mount <id> <mem_id>[:mount_path]      /  unmount <id> <mem_id>        (memory stores; next turn)
+  skill <id> add <skill_id>             /  skill <id> remove <skill_id>
   archive <id>
   delete <id>`;
 
-export async function createSession(opts: { agent?: string; env?: string; workspaceId?: string; model?: string; message?: string; environments?: string; memories?: string }): Promise<Session> {
+export async function createSession(opts: { agent?: string; env?: string; workspaceId?: string; model?: string; message?: string; environments?: string; memoryStores?: string }): Promise<Session> {
   const cfg = loadConfig();
   const agentId = opts.agent ?? cfg.default_agent_id;
   const envId = opts.env ?? cfg.default_env_id;
@@ -24,7 +26,7 @@ export async function createSession(opts: { agent?: string; env?: string; worksp
   const body: Record<string, unknown> = { agent, environment_id: envId };
   if (opts.workspaceId) body.workspace_id = opts.workspaceId;
   if (opts.environments) body.environments = parseEnvList(opts.environments);
-  if (opts.memories) body.memories = opts.memories.split(",");
+  if (opts.memoryStores) body.memory_stores = opts.memoryStores.split(",").map((x) => { const [id, mp] = x.split(":"); return mp ? { memory_store_id: id, mount_path: mp } : id; });
   if (opts.message) body.initial_events = [{ type: "user.message", content: [{ type: "text", text: opts.message }] }];
   return apiPost("/sessions", body);
 }
@@ -53,11 +55,24 @@ export async function cmdSessions(args: string[]): Promise<void> {
       if (!a) die("usage: pma sessions get <id>");
       return printJson(await apiGet(`/sessions/${a}`));
     case "create":
-      return printJson(await createSession({ agent: str(flags, "agent"), env: str(flags, "env"), workspaceId: str(flags, "workspace-id"), model: str(flags, "model"), message: str(flags, "message"), environments: str(flags, "environments"), memories: str(flags, "memories") }));
+      return printJson(await createSession({ agent: str(flags, "agent"), env: str(flags, "env"), workspaceId: str(flags, "workspace-id"), model: str(flags, "model"), message: str(flags, "message"), environments: str(flags, "environments"), memoryStores: str(flags, "memory-stores") }));
     case "attach": {
       const spec = positional[2];
       if (!a || !spec) die("usage: pma sessions attach <id> <key>=<env_id>[:fork]");
       return printJson(await apiPost(`/sessions/${a}/environments`, parseEnvList(spec)[0]));
+    }
+    case "mount": {
+      const [mid, mp] = (positional[2] ?? "").split(":");
+      if (!a || !mid) die("usage: pma sessions mount <session> <mem_id>[:mount_path]");
+      return printJson(await apiPost(`/sessions/${a}/memory_stores`, mp ? { memory_store_id: mid, mount_path: mp } : { memory_store_id: mid }));
+    }
+    case "unmount":
+      if (!a || !positional[2]) die("usage: pma sessions unmount <session> <mem_id>");
+      return printJson(await apiDelete(`/sessions/${a}/memory_stores/${positional[2]}`));
+    case "skill": {
+      const [, , op, sid] = positional;
+      if (!a || !sid || (op !== "add" && op !== "remove")) die("usage: pma sessions skill <session> add|remove <skill_id>");
+      return printJson(op === "add" ? await apiPost(`/sessions/${a}/skills`, { type: "custom", skill_id: sid }) : await apiDelete(`/sessions/${a}/skills/${sid}`));
     }
     case "archive":
       if (!a) die("usage: pma sessions archive <id>");

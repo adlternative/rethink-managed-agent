@@ -1,40 +1,68 @@
 import { Hono } from "hono";
 import { skills } from "../../infra/db.ts";
+import type { SkillRef } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
-/** Parse a SKILL.md (frontmatter name/description + body) or explicit fields. */
-function parse(body: { name?: string; description?: string; body?: string; markdown?: string }) {
-  let { name, description, body: text } = body;
-  if (body.markdown) {
-    const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(body.markdown);
-    if (m) {
-      for (const line of m[1]!.split("\n")) { const i = line.indexOf(":"); if (i > 0) { const k = line.slice(0, i).trim(); const v = line.slice(i + 1).trim().replace(/^["']|["']$/g, ""); if (k === "name") name ??= v; if (k === "description") description ??= v; } }
-      text ??= m[2]!.trim();
-    } else text ??= body.markdown.trim();
+/** SKILL.md: frontmatter name/description + body. */
+export function parseSkillMarkdown(markdown: string): { name?: string; description?: string; body: string } {
+  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(markdown);
+  if (!m) return { body: markdown.trim() };
+  const meta: Record<string, string> = {};
+  for (const line of m[1]!.split("\n")) { const i = line.indexOf(":"); if (i > 0) meta[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, ""); }
+  return { name: meta.name, description: meta.description, body: m[2]!.trim() };
+}
+
+/** Accepts `skills: ["skill_x", {type:"custom", skill_id, version?}]` and normalizes to refs. */
+export function validateSkillRefs(v: unknown): SkillRef[] {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v)) throw invalid("skills must be an array");
+  return v.map((x) => {
+    if (typeof x === "string" && x.startsWith("skill_")) return { type: "custom" as const, skill_id: x };
+    if (x && typeof x === "object" && (x as { type?: string }).type === "custom" && typeof (x as { skill_id?: unknown }).skill_id === "string") return { type: "custom" as const, skill_id: (x as { skill_id: string }).skill_id, ...(typeof (x as { version?: unknown }).version === "string" ? { version: (x as { version: string }).version } : {}) };
+    throw invalid("each skill must be a skill_ id or {type:'custom', skill_id, version?}");
+  });
+}
+
+async function fromRequest(c: { req: { header(n: string): string | undefined; formData(): Promise<FormData>; json(): Promise<any> } }, existing?: { name: string; description: string; body: string; display_title: string }) {
+  const ct = c.req.header("content-type") ?? "";
+  let display_title: string | undefined; let markdown: string | undefined; let fields: Record<string, string> = {};
+  if (ct.startsWith("multipart/form-data")) {
+    // Claude Skills API style: files[] with a SKILL.md, plus display_title
+    const form = await c.req.formData();
+    display_title = (form.get("display_title") as string | null) ?? undefined;
+    for (const [, v] of form.entries()) if (v instanceof File && /(^|\/)SKILL\.md$/i.test(v.name)) markdown = await v.text();
+    if (!markdown) throw invalid("multipart upload must include a SKILL.md");
+  } else {
+    const body = await c.req.json().catch(() => { throw invalid("body must be JSON or multipart"); });
+    display_title = body.display_title; markdown = body.markdown; fields = body;
   }
-  if (!name || !NAME_RE.test(name)) throw invalid(`name must match ${NAME_RE}`);
-  if (!description) throw invalid("description is required (tells the model when to load the skill)");
-  if (!text) throw invalid("body (or markdown) is required");
-  return { name, description, body: text };
+  const parsed = markdown ? parseSkillMarkdown(markdown) : { body: fields.body };
+  const name = fields.name ?? parsed.name ?? existing?.name;
+  const description = fields.description ?? parsed.description ?? existing?.description;
+  const text = parsed.body || existing?.body;
+  if (!name || !NAME_RE.test(name)) throw invalid(`skill name must match ${NAME_RE} (frontmatter 'name')`);
+  if (!description) throw invalid("description is required (frontmatter 'description' tells the model when to use it)");
+  if (!text) throw invalid("SKILL.md body is required");
+  return { display_title: display_title ?? existing?.display_title ?? name, name, description, body: text };
 }
 
 export const skillsRoute = new Hono()
-  .post("/", async (c) => c.json(await skills.upsert(parse(await readJson(c))), 201))
-  .get("/", async (c) => c.json({ data: await skills.list() }))
+  .post("/", async (c) => c.json(await skills.upsert(await fromRequest(c)), 201))
+  .get("/", async (c) => { const data = await skills.list(); return c.json({ data, has_more: false }); })
   .get("/:id", async (c) => {
     const s = await skills.get(c.req.param("id"));
     if (!s) throw notFound("skill", c.req.param("id"));
     return c.json(s);
   })
-  .patch("/:id", async (c) => {
+  .post("/:id/versions", async (c) => {
+    // a new version replaces the content; latest_version increments
     const existing = await skills.get(c.req.param("id"));
     if (!existing) throw notFound("skill", c.req.param("id"));
-    const body = await readJson<{ name?: string; description?: string; body?: string; markdown?: string }>(c);
-    return c.json(await skills.upsert({ id: existing.id, ...parse({ name: body.name ?? existing.name, description: body.description ?? existing.description, body: body.body ?? existing.body, markdown: body.markdown }) }));
+    return c.json(await skills.upsert({ id: existing.id, ...(await fromRequest(c, existing)) }), 201);
   })
   .delete("/:id", async (c) => {
     if (!(await skills.delete(c.req.param("id")))) throw notFound("skill", c.req.param("id"));
-    return c.json({ id: c.req.param("id"), deleted: true });
+    return c.json({ id: c.req.param("id"), type: "skill_deleted" });
   });

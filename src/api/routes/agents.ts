@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { repos } from "../../infra/db.ts";
 import type { BuiltinToolName, ModelRef } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
+import { validateSkillRefs } from "./skills.ts";
 
 const TOOLS: BuiltinToolName[] = ["bash", "read", "write", "edit"];
 
@@ -41,7 +42,7 @@ export const agents = new Hono()
       system: body.system ?? null,
       tools: validateTools(body.tools),
       packages: validatePackages(body.packages),
-      skills: validateIds(body.skills, "skill"),
+      skills: validateSkillRefs(body.skills),
     });
     return c.json(agent, 201);
   })

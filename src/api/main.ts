@@ -11,7 +11,8 @@ import { models } from "./routes/models.ts";
 import { providers, seedProviders } from "./routes/providers.ts";
 import { filesRoute } from "./routes/files.ts";
 import { skillsRoute } from "./routes/skills.ts";
-import { memoriesRoute } from "./routes/memories.ts";
+import { memoryStoresRoute } from "./routes/memories.ts";
+import { ensureBucket } from "../infra/blobs.ts";
 
 export const app = new Hono()
   .onError((err, c) => errorResponse(c, err))
@@ -25,8 +26,9 @@ export const app = new Hono()
   .route("/v1/providers", providers)
   .route("/v1/files", filesRoute)
   .route("/v1/skills", skillsRoute)
-  .route("/v1/memories", memoriesRoute);
+  .route("/v1/memory_stores", memoryStoresRoute);
 
 await migrate();
+await ensureBucket();
 await seedProviders();
 serve({ fetch: app.fetch, port: env.API_PORT }, (info) => console.log(`api listening on :${info.port}`));

@@ -7,7 +7,7 @@ import { die, parseArgs, printJson, table } from "../lib/args.ts";
 const MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf", ".md": "text/markdown", ".txt": "text/plain", ".json": "application/json", ".csv": "text/csv", ".ts": "text/plain", ".js": "text/plain", ".py": "text/plain" };
 export const mimeOf = (p: string) => MIME[path.extname(p).toLowerCase()] ?? "application/octet-stream";
 
-export async function uploadFile(p: string): Promise<{ id: string; name: string; mime: string; bytes: number }> {
+export async function uploadFile(p: string): Promise<{ id: string; filename: string; mime_type: string; size_bytes: number }> {
   const cfg = resolveConfig();
   const data = await readFile(p);
   const r = await fetch(`${cfg.host}/v1/files`, { method: "POST", headers: { ...buildHeaders(cfg), "content-type": mimeOf(p), "x-file-name": path.basename(p) }, body: data });
@@ -25,7 +25,7 @@ export async function cmdFiles(args: string[]): Promise<void> {
       return printJson(await uploadFile(a));
     case "list": case "ls": {
       const { data } = (await apiGet("/files")) as { data: any[] };
-      table([["ID", "NAME", "MIME", "BYTES"], ...data.map((f) => [f.id, f.name, f.mime, String(f.bytes)])]);
+      table([["ID", "FILENAME", "MIME", "BYTES"], ...data.map((f) => [f.id, f.filename, f.mime_type, String(f.size_bytes)])]);
       return;
     }
     case "get":

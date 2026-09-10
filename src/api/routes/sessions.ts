@@ -3,7 +3,10 @@ import { repos, toolOutputs } from "../../infra/db.ts";
 import { appendEvents } from "../../infra/events.ts";
 import type { AgentResource, SessionEnvironment, SessionResource, WorkspaceRef, WorkspaceResource, WorkspaceSpec } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
-import { validateIds, validateModel, validatePackages, validateTools } from "./agents.ts";
+import { validateModel, validatePackages, validateTools } from "./agents.ts";
+import { validateSkillRefs } from "./skills.ts";
+import { validateMounts } from "./memories.ts";
+import { sessionConfig } from "../../infra/db.ts";
 import { validateWorkspaceSpec } from "./environments.ts";
 import { events, sendUserEvents, validateUserEvents } from "./events.ts";
 
@@ -28,7 +31,7 @@ async function resolveAgent(input: AgentInput | undefined): Promise<SessionResou
     system: input.system !== undefined ? input.system : snap.system,
     tools: input.tools !== undefined ? validateTools(input.tools) : snap.tools,
     packages: input.packages !== undefined ? validatePackages(input.packages) : (snap.packages ?? []),
-    skills: input.skills !== undefined ? validateIds(input.skills, "skill") : (snap.skills ?? []),
+    skills: input.skills !== undefined ? validateSkillRefs(input.skills) : (snap.skills ?? []),
   };
 }
 
@@ -64,9 +67,16 @@ async function resolveEnvironment(input: EnvInput, existing: SessionEnvironment[
   return { key, environment_id: environment.id, workspace_id: workspace.id };
 }
 
+async function getLive(id: string): Promise<SessionResource> {
+  const s = await repos.sessions.get(id);
+  if (!s) throw notFound("session", id);
+  if (s.status === "terminated") throw invalid("session is terminated");
+  return s;
+}
+
 export const sessions = new Hono()
   .post("/", async (c) => {
-    const body = await readJson<{ agent?: AgentInput; environment_id?: string; workspace?: unknown; workspace_id?: string; environments?: EnvInput[]; parent_id?: string; memories?: unknown; initial_events?: unknown }>(c);
+    const body = await readJson<{ agent?: AgentInput; environment_id?: string; workspace?: unknown; workspace_id?: string; environments?: EnvInput[]; parent_id?: string; memory_stores?: unknown; initial_events?: unknown }>(c);
     const agent = await resolveAgent(body.agent);
     // Either the classic single-environment shape, or an explicit list whose first entry is "main".
     const inputs: EnvInput[] = Array.isArray(body.environments) && body.environments.length > 0
@@ -83,12 +93,49 @@ export const sessions = new Hono()
       agent,
       environments: envs,
       parent_id: body.parent_id ?? null,
-      memories: validateIds(body.memories, "mem"),
+      memory_stores: await validateMounts(body.memory_stores),
     });
     if (Array.isArray(body.initial_events) && body.initial_events.length > 0) {
       await sendUserEvents(session, validateUserEvents(body.initial_events));
     }
     return c.json(session, 201);
+  })
+  /** Mid-session changes: mount / unmount memory stores and add / remove skills. Applied from the next turn. */
+  .post("/:id/memory_stores", async (c) => {
+    const s = await getLive(c.req.param("id"));
+    const [mount] = await validateMounts([await readJson(c)]);
+    if (s.memory_stores.some((m) => m.memory_store_id === mount!.memory_store_id || m.mount_path === mount!.mount_path)) throw invalid("already mounted (same store or mount_path)");
+    const next = [...s.memory_stores, mount!];
+    await sessionConfig.setMemoryStores(s.id, next);
+    await appendEvents(s.id, [{ type: "session.updated", changes: { memory_stores: next } }]);
+    return c.json({ ...s, memory_stores: next }, 201);
+  })
+  .delete("/:id/memory_stores/:storeId", async (c) => {
+    const s = await getLive(c.req.param("id"));
+    const next = s.memory_stores.filter((m) => m.memory_store_id !== c.req.param("storeId"));
+    if (next.length === s.memory_stores.length) throw notFound("mounted memory_store", c.req.param("storeId"));
+    await sessionConfig.setMemoryStores(s.id, next);
+    await appendEvents(s.id, [{ type: "session.updated", changes: { memory_stores: next } }]);
+    return c.json({ ...s, memory_stores: next });
+  })
+  .post("/:id/skills", async (c) => {
+    const s = await getLive(c.req.param("id"));
+    const [ref] = validateSkillRefs([await readJson(c)]);
+    const cur = s.agent.skills ?? [];
+    if (cur.some((r) => r.skill_id === ref!.skill_id)) throw invalid("skill already attached");
+    const next = [...cur, ref!];
+    await sessionConfig.setSkills(s.id, next);
+    await appendEvents(s.id, [{ type: "session.updated", changes: { skills: next } }]);
+    return c.json({ ...s, agent: { ...s.agent, skills: next } }, 201);
+  })
+  .delete("/:id/skills/:skillId", async (c) => {
+    const s = await getLive(c.req.param("id"));
+    const cur = s.agent.skills ?? [];
+    const next = cur.filter((r) => r.skill_id !== c.req.param("skillId"));
+    if (next.length === cur.length) throw notFound("attached skill", c.req.param("skillId"));
+    await sessionConfig.setSkills(s.id, next);
+    await appendEvents(s.id, [{ type: "session.updated", changes: { skills: next } }]);
+    return c.json({ ...s, agent: { ...s.agent, skills: next } });
   })
   /** Attach another environment (own sandbox) to an existing session; takes effect on the next turn. */
   .post("/:id/environments", async (c) => {

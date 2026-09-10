@@ -1,4 +1,4 @@
-import { files, memories, pluginStore, pool, repos, skills, toolOutputs } from "../infra/db.ts";
+import { files, memoryStores, pluginStore, pool, repos, skills, toolOutputs } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, redis } from "../infra/pubsub.ts";
@@ -96,7 +96,7 @@ const children: ChildSpawn = {
       agent: system ? { ...parent.agent, system } : parent.agent,
       environments: [{ key: "main", environment_id: envRow.environment_id, workspace_id: ws.id }],
       parent_id: parent.id,
-      memories: parent.memories ?? [],
+      memory_stores: parent.memory_stores ?? [],
     });
     const [ev] = await appendEvents(child.id, [{ type: "user.message", content: [{ type: "text", text: task }] }]);
     await enqueueRun({ session_id: child.id, trigger_seq: ev!.seq });
@@ -144,10 +144,13 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     finishRun,
     recordUsage,
     toolOutputs,
-    files: { get: async (id) => { const f = await files.content(id); return f ? { name: f.meta.name, mime: f.meta.mime, data: new Uint8Array(f.data) } : null; } },
-    getSkills: async (ids) => (await skills.getMany(ids)).map((s) => ({ name: s.name, description: s.description, body: s.body, source: `skill:${s.id}` })),
-    getMemories: (ids) => memories.getMany(ids),
-    updateMemoryRef: (id, ref) => memories.updateRef(id, ref),
+    files: { get: async (id) => { const f = await files.content(id); return f ? { name: f.meta.filename, mime: f.meta.mime_type, data: new Uint8Array(f.data) } : null; } },
+    getSkills: async (refs) => (await skills.getMany(refs.map((r) => r.skill_id))).map((s) => ({ name: s.name, description: s.description, body: s.body, source: `skill:${s.id}` })),
+    getMemoryStores: async (mounts) => {
+      const stores = await memoryStores.getMany(mounts.map((m) => m.memory_store_id));
+      return mounts.flatMap((m) => { const st = stores.find((x) => x.id === m.memory_store_id); return st ? [{ store: st, mount_path: m.mount_path }] : []; });
+    },
+    updateMemoryRef: (id, ref) => memoryStores.updateRef(id, ref),
   };
 }
 

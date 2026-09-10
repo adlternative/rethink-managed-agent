@@ -89,22 +89,25 @@ CREATE TABLE IF NOT EXISTS tool_outputs (
 );
 CREATE TABLE IF NOT EXISTS files (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  mime TEXT NOT NULL,
-  bytes INTEGER NOT NULL,
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
   sha256 TEXT NOT NULL,
-  data BYTEA NOT NULL,
+  blob_key TEXT,           -- set when bytes live in the blob store
+  data BYTEA,              -- set when no blob store is configured
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS skills (
   id TEXT PRIMARY KEY,
+  display_title TEXT NOT NULL,
   name TEXT NOT NULL UNIQUE,
   description TEXT NOT NULL,
   body TEXT NOT NULL,
+  latest_version TEXT NOT NULL DEFAULT '1',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS memories (
+CREATE TABLE IF NOT EXISTS memory_stores (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   description TEXT NOT NULL DEFAULT '',
@@ -130,4 +133,4 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS usage JSONB NOT NULL DEFAULT '{"in
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context JSONB;
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS worker_key TEXT;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]';
-ALTER TABLE sessions ADD COLUMN IF NOT EXISTS memories JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS memory_stores JSONB NOT NULL DEFAULT '[]';

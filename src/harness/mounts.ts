@@ -1,8 +1,9 @@
 /**
  * Things that must exist inside the main sandbox before the model runs: uploaded document
  * attachments and memory stores. Both use only exec/readFile/writeFile, so they work on every
- * provider (local, docker, e2b, byoc). Memory stores round-trip as tarballs kept under
- * WORKSPACE_ROOT/memories/<id> on the runner; their ref is a `dir` ref like workspaces.
+ * provider (local, docker, e2b, byoc). Memory stores round-trip as tarballs: in the blob store
+ * (`blob` refs, portable across runners) when one is configured, else under
+ * WORKSPACE_ROOT/memories/<id> on this runner (`dir` refs).
  */
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile, stat } from "node:fs/promises";
@@ -10,7 +11,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { workspaceRoot } from "../sandbox/workspace.ts";
-import type { MemoryResource, Sandbox, WorkspaceRef } from "../shared/types.ts";
+import type { MemoryStoreResource, Sandbox, WorkspaceRef } from "../shared/types.ts";
+import { blobsConfigured, getBlob, putBlob } from "../infra/blobs.ts";
 import type { Attachment, FoldFiles } from "./fold.ts";
 
 const run = promisify(execFile);
@@ -39,48 +41,61 @@ export async function writeAttachments(sb: Sandbox, attachments: Attachment[], f
   }
 }
 
+export interface Mounted { store: MemoryStoreResource; mount_path: string }
 const memoryDir = (id: string) => path.join(workspaceRoot(), "memories", id);
 
-/** Copy each memory store into .memory/<name> in the sandbox (tar over writeFile + exec). */
-export async function mountMemories(sb: Sandbox, stores: MemoryResource[]): Promise<void> {
-  for (const m of stores) {
-    const dir = m.ref.kind === "dir" ? m.ref.path : memoryDir(m.id);
-    const target = `.memory/${m.name}`;
-    if (!(await stat(dir).catch(() => null))) { await sh(sb, `mkdir -p ${q(target)}`); continue; }
-    const tmp = await mkdtemp(path.join(tmpdir(), "mem-"));
-    try {
-      const tgz = path.join(tmp, "m.tgz");
-      await run("tar", ["czf", tgz, "-C", dir, "."]);
-      await sb.writeFile(`${target}.tgz`, new Uint8Array(await readFile(tgz)));
-      await sh(sb, `mkdir -p ${q(target)} && tar xzf ${q(target + ".tgz")} -C ${q(target)} && rm -f ${q(target + ".tgz")}`);
-    } finally {
-      await rm(tmp, { recursive: true, force: true });
-    }
+/** The store's current snapshot as a tarball (null when empty). */
+async function snapshot(m: MemoryStoreResource): Promise<Buffer | null> {
+  if (m.ref.kind === "blob") return getBlob(m.ref.key);
+  const dir = m.ref.kind === "dir" ? m.ref.path : memoryDir(m.id);
+  if (!(await stat(dir).catch(() => null))) return null;
+  const tmp = await mkdtemp(path.join(tmpdir(), "mem-"));
+  try {
+    const tgz = path.join(tmp, "m.tgz");
+    await run("tar", ["czf", tgz, "-C", dir, "."]);
+    return await readFile(tgz);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
   }
 }
 
-/** Pull .memory/<name> back out of the sandbox into the runner-side store dir; returns updated refs. */
-export async function syncMemoriesBack(sb: Sandbox, stores: MemoryResource[]): Promise<{ id: string; ref: WorkspaceRef }[]> {
+/** Copy each memory store into its mount path in the sandbox (tar over writeFile + exec). */
+export async function mountMemories(sb: Sandbox, mounts: Mounted[]): Promise<void> {
+  for (const { store, mount_path } of mounts) {
+    const tgz = await snapshot(store);
+    if (!tgz) { await sh(sb, `mkdir -p ${q(mount_path)}`); continue; }
+    await sb.writeFile(`${mount_path}.tgz`, new Uint8Array(tgz));
+    await sh(sb, `mkdir -p ${q(mount_path)} && tar xzf ${q(mount_path + ".tgz")} -C ${q(mount_path)} && rm -f ${q(mount_path + ".tgz")}`);
+  }
+}
+
+/** Pull each mount back out of the sandbox into the store (blob or runner dir); returns updated refs. */
+export async function syncMemoriesBack(sb: Sandbox, mounts: Mounted[]): Promise<{ id: string; ref: WorkspaceRef }[]> {
   const out: { id: string; ref: WorkspaceRef }[] = [];
-  for (const m of stores) {
-    const target = `.memory/${m.name}`;
-    const exists = (await sh(sb, `test -d ${q(target)} && echo yes || echo no`)).trim() === "yes";
+  for (const { store: m, mount_path } of mounts) {
+    const exists = (await sh(sb, `test -d ${q(mount_path)} && echo yes || echo no`)).trim() === "yes";
     if (!exists) continue;
-    const size = Number((await sh(sb, `du -sk ${q(target)} | cut -f1`)).trim()) * 1024;
+    const size = Number((await sh(sb, `du -sk ${q(mount_path)} | cut -f1`)).trim()) * 1024;
     if (size > MEMORY_MAX_BYTES) throw new Error(`memory ${m.name} is ${size} bytes; limit ${MEMORY_MAX_BYTES}`);
-    await sh(sb, `tar czf ${q(target + ".tgz")} -C ${q(target)} .`);
-    const bytes = await sb.readFile(`${target}.tgz`);
-    await sh(sb, `rm -f ${q(target + ".tgz")}`);
+    await sh(sb, `tar czf ${q(mount_path + ".tgz")} -C ${q(mount_path)} .`);
+    const bytes = Buffer.from(await sb.readFile(`${mount_path}.tgz`));
+    await sh(sb, `rm -f ${q(mount_path + ".tgz")}`);
+    if (blobsConfigured()) {
+      const key = `memories/${m.id}/${Date.now().toString(36)}.tgz`;
+      await putBlob(key, bytes, "application/gzip");
+      out.push({ id: m.id, ref: { kind: "blob", key, bytes: bytes.length } });
+      continue;
+    }
     const dest = memoryDir(m.id);
     const tmp = `${dest}.tmp-${process.pid}`;
     await rm(tmp, { recursive: true, force: true });
     await mkdir(tmp, { recursive: true });
     const tgz = path.join(path.dirname(tmp), `${m.id}.tgz`);
+    await mkdir(path.dirname(tgz), { recursive: true });
     await writeFile(tgz, bytes);
     await run("tar", ["xzf", tgz, "-C", tmp]);
     await rm(tgz, { force: true });
     await rm(dest, { recursive: true, force: true });
-    await mkdir(path.dirname(dest), { recursive: true });
     await run("mv", [tmp, dest]);
     out.push({ id: m.id, ref: { kind: "dir", path: dest } });
   }

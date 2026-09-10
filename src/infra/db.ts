@@ -3,7 +3,9 @@ import { env } from "../shared/env.ts";
 import { newId } from "../shared/ids.ts";
 import type {
   FileResource,
-  MemoryResource,
+  MemoryMount,
+  MemoryStoreResource,
+  SkillRef,
   SkillResource,
   ProviderResource,
   SessionEnvironment,
@@ -141,7 +143,7 @@ export const repos = {
       agent: SessionResource["agent"];
       environments?: SessionEnvironment[];
       parent_id?: string | null;
-      memories?: string[];
+      memory_stores?: MemoryMount[];
     }): Promise<SessionResource> {
       const envs: SessionEnvironment[] = input.environments?.length
         ? input.environments
@@ -151,8 +153,8 @@ export const repos = {
       return tx(async (c) => {
         const row = await one<SessionResource>(
           c,
-          `INSERT INTO sessions (id, agent_id, environment_id, workspace_id, agent, parent_id, memories) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-          [newId("sess"), input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memories ?? [])],
+          `INSERT INTO sessions (id, agent_id, environment_id, workspace_id, agent, parent_id, memory_stores) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+          [newId("sess"), input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memory_stores ?? [])],
         );
         for (const e of envs) {
           await c.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4)`, [row!.id, e.key, e.environment_id, e.workspace_id]);
@@ -214,59 +216,91 @@ export const toolOutputs = {
 };
 
 export const files = {
-  async create(input: { name: string; mime: string; data: Buffer }): Promise<FileResource> {
+  /** Store bytes in the blob store when configured (key files/<id>), else inline in Postgres. */
+  async create(input: { filename: string; mime_type: string; data: Buffer }): Promise<FileResource> {
     const { createHash } = await import("node:crypto");
+    const { blobsConfigured, putBlob } = await import("./blobs.ts");
+    const id = newId("file");
     const sha256 = createHash("sha256").update(input.data).digest("hex");
-    const row = await one<FileResource>(pool, `INSERT INTO files (id, name, mime, bytes, sha256, data) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name, mime, bytes, sha256, created_at`, [newId("file"), input.name, input.mime, input.data.length, sha256, input.data]);
-    return iso(row)!;
+    let blobKey: string | null = null;
+    if (blobsConfigured()) { blobKey = `files/${id}`; await putBlob(blobKey, input.data, input.mime_type); }
+    const row = await one<FileResource>(
+      pool,
+      `INSERT INTO files (id, filename, mime_type, size_bytes, sha256, blob_key, data) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, filename, mime_type, size_bytes, sha256, created_at`,
+      [id, input.filename, input.mime_type, input.data.length, sha256, blobKey, blobKey ? null : input.data],
+    );
+    return files.shape(row!);
+  },
+  shape(r: Partial<FileResource> & { id: string }): FileResource {
+    return { ...(iso(r) as FileResource), type: "file", downloadable: true };
   },
   async get(id: string): Promise<FileResource | null> {
-    return iso(await one<FileResource>(pool, `SELECT id, name, mime, bytes, sha256, created_at FROM files WHERE id=$1`, [id]));
+    const r = await one<FileResource>(pool, `SELECT id, filename, mime_type, size_bytes, sha256, created_at FROM files WHERE id=$1`, [id]);
+    return r ? files.shape(r) : null;
   },
   async content(id: string): Promise<{ meta: FileResource; data: Buffer } | null> {
-    const r = await one<FileResource & { data: Buffer }>(pool, `SELECT * FROM files WHERE id=$1`, [id]);
+    const r = await one<FileResource & { data: Buffer | null; blob_key: string | null }>(pool, `SELECT * FROM files WHERE id=$1`, [id]);
     if (!r) return null;
-    const { data, ...meta } = r;
-    return { meta: iso(meta)!, data };
+    const { data, blob_key, ...meta } = r;
+    let bytes = data;
+    if (blob_key) { const { getBlob } = await import("./blobs.ts"); bytes = await getBlob(blob_key); }
+    if (!bytes) return null;
+    return { meta: files.shape(meta), data: Buffer.from(bytes) };
   },
   async list(): Promise<FileResource[]> {
-    return isoAll(await many<FileResource>(pool, `SELECT id, name, mime, bytes, sha256, created_at FROM files ORDER BY created_at DESC`));
+    return (await many<FileResource>(pool, `SELECT id, filename, mime_type, size_bytes, sha256, created_at FROM files ORDER BY created_at DESC`)).map((r) => files.shape(r));
   },
   async delete(id: string): Promise<boolean> {
-    return ((await pool.query(`DELETE FROM files WHERE id=$1`, [id])).rowCount ?? 0) > 0;
+    const r = await one<{ blob_key: string | null }>(pool, `DELETE FROM files WHERE id=$1 RETURNING blob_key`, [id]);
+    if (!r) return false;
+    if (r.blob_key) { const { deleteBlob } = await import("./blobs.ts"); await deleteBlob(r.blob_key).catch(() => {}); }
+    return true;
   },
 };
 
 export const skills = {
-  async upsert(input: { id?: string; name: string; description: string; body: string }): Promise<SkillResource> {
+  async upsert(input: { id?: string; display_title?: string; name: string; description: string; body: string }): Promise<SkillResource> {
     const row = await one<SkillResource>(
       pool,
-      `INSERT INTO skills (id, name, description, body) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, body=EXCLUDED.body, updated_at=now() RETURNING *`,
-      [input.id ?? newId("skill"), input.name, input.description, input.body],
+      `INSERT INTO skills (id, display_title, name, description, body) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (id) DO UPDATE SET display_title=EXCLUDED.display_title, name=EXCLUDED.name, description=EXCLUDED.description, body=EXCLUDED.body,
+         latest_version=(skills.latest_version::int + 1)::text, updated_at=now() RETURNING *`,
+      [input.id ?? newId("skill"), input.display_title ?? input.name, input.name, input.description, input.body],
     );
-    return iso(row)!;
+    return skills.shape(row!);
   },
-  async get(id: string): Promise<SkillResource | null> { return iso(await one<SkillResource>(pool, `SELECT * FROM skills WHERE id=$1`, [id])); },
+  shape(r: SkillResource): SkillResource { return { ...(iso(r) as SkillResource), type: "skill", source: "custom" }; },
+  async get(id: string): Promise<SkillResource | null> { const r = await one<SkillResource>(pool, `SELECT * FROM skills WHERE id=$1`, [id]); return r ? skills.shape(r) : null; },
   async getMany(ids: string[]): Promise<SkillResource[]> {
     if (ids.length === 0) return [];
-    return isoAll(await many<SkillResource>(pool, `SELECT * FROM skills WHERE id = ANY($1::text[])`, [ids]));
+    return (await many<SkillResource>(pool, `SELECT * FROM skills WHERE id = ANY($1::text[])`, [ids])).map((r) => skills.shape(r));
   },
-  async list(): Promise<SkillResource[]> { return isoAll(await many<SkillResource>(pool, `SELECT * FROM skills ORDER BY name`)); },
+  async list(): Promise<SkillResource[]> { return (await many<SkillResource>(pool, `SELECT * FROM skills ORDER BY display_title`)).map((r) => skills.shape(r)); },
   async delete(id: string): Promise<boolean> { return ((await pool.query(`DELETE FROM skills WHERE id=$1`, [id])).rowCount ?? 0) > 0; },
 };
 
-export const memories = {
-  async create(input: { name: string; description?: string }): Promise<MemoryResource> {
-    const row = await one<MemoryResource>(pool, `INSERT INTO memories (id, name, description) VALUES ($1,$2,$3) RETURNING *`, [newId("mem"), input.name, input.description ?? ""]);
-    return iso(row)!;
+export const memoryStores = {
+  async create(input: { name: string; description?: string }): Promise<MemoryStoreResource> {
+    const row = await one<MemoryStoreResource>(pool, `INSERT INTO memory_stores (id, name, description) VALUES ($1,$2,$3) RETURNING *`, [newId("mem"), input.name, input.description ?? ""]);
+    return memoryStores.shape(row!);
   },
-  async get(id: string): Promise<MemoryResource | null> { return iso(await one<MemoryResource>(pool, `SELECT * FROM memories WHERE id=$1`, [id])); },
-  async getMany(ids: string[]): Promise<MemoryResource[]> {
+  shape(r: MemoryStoreResource): MemoryStoreResource { return { ...(iso(r) as MemoryStoreResource), type: "memory_store" }; },
+  async get(id: string): Promise<MemoryStoreResource | null> { const r = await one<MemoryStoreResource>(pool, `SELECT * FROM memory_stores WHERE id=$1`, [id]); return r ? memoryStores.shape(r) : null; },
+  async getMany(ids: string[]): Promise<MemoryStoreResource[]> {
     if (ids.length === 0) return [];
-    return isoAll(await many<MemoryResource>(pool, `SELECT * FROM memories WHERE id = ANY($1::text[])`, [ids]));
+    return (await many<MemoryStoreResource>(pool, `SELECT * FROM memory_stores WHERE id = ANY($1::text[])`, [ids])).map((r) => memoryStores.shape(r));
   },
-  async list(): Promise<MemoryResource[]> { return isoAll(await many<MemoryResource>(pool, `SELECT * FROM memories ORDER BY name`)); },
-  async updateRef(id: string, ref: WorkspaceRef): Promise<void> { await pool.query(`UPDATE memories SET ref=$2, updated_at=now() WHERE id=$1`, [id, JSON.stringify(ref)]); },
-  async delete(id: string): Promise<boolean> { return ((await pool.query(`DELETE FROM memories WHERE id=$1`, [id])).rowCount ?? 0) > 0; },
+  async list(): Promise<MemoryStoreResource[]> { return (await many<MemoryStoreResource>(pool, `SELECT * FROM memory_stores ORDER BY name`)).map((r) => memoryStores.shape(r)); },
+  async updateRef(id: string, ref: WorkspaceRef): Promise<void> { await pool.query(`UPDATE memory_stores SET ref=$2, updated_at=now() WHERE id=$1`, [id, JSON.stringify(ref)]); },
+  async delete(id: string): Promise<boolean> { return ((await pool.query(`DELETE FROM memory_stores WHERE id=$1`, [id])).rowCount ?? 0) > 0; },
+};
+
+/** Mid-session configuration changes (mounts / skills). Applied by the runner from the next run. */
+export const sessionConfig = {
+  async setMemoryStores(id: string, mounts: MemoryMount[]): Promise<void> {
+    await pool.query(`UPDATE sessions SET memory_stores=$2, updated_at=now() WHERE id=$1`, [id, JSON.stringify(mounts)]);
+  },
+  async setSkills(id: string, refs: SkillRef[]): Promise<void> {
+    await pool.query(`UPDATE sessions SET agent = jsonb_set(agent, '{skills}', $2::jsonb), updated_at=now() WHERE id=$1`, [id, JSON.stringify(refs)]);
+  },
 };
