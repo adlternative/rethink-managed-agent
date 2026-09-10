@@ -122,6 +122,9 @@ export class DockerProvider implements SandboxProvider {
     return captureDir(hostDir, prev, path.posix.basename(workdir));
   }
 
-  async pause(containerRef: string): Promise<void> { await docker("docker", ["stop", "-t", "5", containerRef]); }
-  async resume(containerRef: string): Promise<void> { await docker("docker", ["start", containerRef]); }
+  // `docker pause` freezes the container's processes (freezer cgroup) and keeps them in memory, so a
+  // resume restores the exact running state — matching e2b's snapshot pause. `stop` would free RAM
+  // but kill every process; that is the destroy tier's job.
+  async pause(containerRef: string): Promise<void> { await docker("docker", ["pause", containerRef]); }
+  async resume(containerRef: string): Promise<void> { await docker("docker", ["unpause", containerRef]).catch(() => {}); }
 }

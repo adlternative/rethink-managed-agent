@@ -290,7 +290,7 @@ busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paus
 ```
 
 - **ready**：容器还在跑，命中同一 workspace 的会话秒级接上（`origin: reused`）。
-- **paused**：docker 用 `stop`，释放 CPU 和内存，文件系统层保留（已装依赖、缓存都在）；e2b 用 SDK 的 `pause` 快照，连内存态都保留。下次 acquire 时 manager 先 `resume` 再 `connect`（`origin: resumed`）。没有 pause 能力的 provider（local）直接销毁。
+- **paused**：docker 用 `pause`(freezer cgroup 冻结进程,内存态保留、CPU 释放),下次 `unpause` 原地恢复,连后台进程都还活着;e2b 用 SDK 的 `pause` 快照,同样保留内存态。语义统一:pause 这一层保状态(文件+进程),destroy 才真正回收。下次 acquire 时 manager 先 `resume` 再 `connect`(`origin: resumed`)。没有 pause 能力的 provider(local)直接销毁。
 - **destroyed**：之后再来就是从 workspace ref 重建（`origin: created`）。
 
 运维入口：`POST /v1/sandboxes/:id/pause` 和 `DELETE`，都由 runner 的 reaper 在下一轮执行，API 进程不直接碰容器。`sandbox.acquired` 事件带 `origin` 字段，能看出每次是新建、复用还是恢复。

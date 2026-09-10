@@ -1,4 +1,4 @@
-.PHONY: help up down logs e2e test typecheck cli-build install uninstall diagram
+.PHONY: help up down logs e2e test typecheck cli-build install uninstall diagram demo
 
 help:
 	@echo "make up          start postgres/redis/api/runner (docker compose up --build -d)"
@@ -9,6 +9,7 @@ help:
 	@echo "make install     build pma-cli and install 'pma' into ~/.local/bin"
 	@echo "make uninstall   remove ~/.local/bin/pma"
 	@echo "make diagram     render docs/architecture.html from the archify spec"
+	@echo "make demo         run the architecture demos (no stack needed; docker optional)"
 
 up:
 	docker compose up --build -d
@@ -47,3 +48,6 @@ uninstall:
 
 diagram:
 	bash scripts/diagram.sh
+
+demo:
+	bash demos/run.sh
