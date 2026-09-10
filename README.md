@@ -163,6 +163,35 @@ src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
 
+## Files, skills, memory stores (Managed Agents-shaped)
+
+Binary content lives in an S3-compatible **blob store** (MinIO in compose; `BLOB_ENDPOINT` / `BLOB_BUCKET` /
+`BLOB_ACCESS_KEY` / `BLOB_SECRET_KEY`); without one, bytes fall back to Postgres.
+
+| resource | API | in a session |
+|---|---|---|
+| **File** | `POST /v1/files` (multipart `file` or raw + `x-file-name`) → `{id, type:"file", filename, mime_type, size_bytes, downloadable}`; `GET /v1/files[/:id[/content]]`, `DELETE` | `user.message` blocks `{type:"image"\|"document", source:{type:"file", file_id}}`: images go to the model inline, documents are written to `.attachments/<id>-<filename>` in the main sandbox. `pma session send <id> "…" --file a.pdf,b.png` |
+| **Skill** | `POST /v1/skills` (multipart `files` incl. `SKILL.md` + `display_title`, or JSON `{markdown}`) → `{id, type:"skill", source:"custom", display_title, name, latest_version}`; `POST /v1/skills/:id/versions` | `agents.skills: [{type:"custom", skill_id, version?}]` (bare ids accepted); listed in the system prompt, loaded on demand with the builtin `skill` tool. `pma skills create --file SKILL.md`, `pma agents create x p/m --skills skill_a` |
+| **Memory store** | `POST /v1/memory_stores {name, description}` → `{id, type:"memory_store", …}` | `sessions.memory_stores: [{memory_store_id, mount_path}]` (default `memories/<name>`, relative to the workspace root): mounted before a run (tar over exec/writeFile, works on every provider) and snapshotted back to the blob store after (`{kind:"blob"}` refs, portable across runners). Inherited by child sessions. `pma sessions create --memory-stores mem_a:memories/notes` |
+
+**Mid-session changes** (take effect on the next turn, recorded as `session.updated {changes}`):
+`POST/DELETE /v1/sessions/:id/memory_stores[/:storeId]` and `POST/DELETE /v1/sessions/:id/skills[/:skillId]`;
+`pma sessions mount|unmount <id> <mem_id>[:path]`, `pma sessions skill <id> add|remove <skill_id>`.
+
+## Big tool outputs (spill-to-store)
+
+Tool results over 30k chars are truncated head+tail for the model, but the full text is kept in
+`tool_outputs` (Postgres) under the tool call id. The truncation note tells the model to call the builtin
+`tool_output {tool_use_id, grep | offset/limit}` to search or page through it, and
+`GET /v1/sessions/:id/tool-outputs/:toolUseId` serves the raw text.
+
+## Streams and ids
+
+Every assistant message has a `stream_id`; its `agent.message_delta` / `agent.thinking_delta` /
+`agent.tool_use_*` previews and the persisted `agent.message` share it, so a client that reconnects mid-stream
+can attach late deltas and finalize the right message. The final reasoning text is persisted on
+`agent.message.thinking`, so a resumed TUI shows past thinking blocks.
+
 ## Usage and context size
 
 Every model request appends `span.model_request_end {model, usage:{input, output, cache_read, cache_write,
