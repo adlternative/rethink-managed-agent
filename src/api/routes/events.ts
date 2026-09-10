@@ -97,8 +97,8 @@ export const events = new Hono()
 
       unsub = await subscribe(session.id, (delta) => {
         if (done) return;
-        if (delta.type === "agent.message_delta") {
-          void send("agent.message_delta", delta);
+        if (delta.type !== "event") {
+          void send(delta.type, delta);
           return;
         }
         enqueue(async () => {

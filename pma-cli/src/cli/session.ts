@@ -33,7 +33,7 @@ export async function cmdSession(args: string[]): Promise<void> {
       return;
     }
     case "stream":
-      await streamEvents(id, since, (item) => { if (item.type === "agent.message_delta") process.stdout.write(item.text); else printEvent(item.event); });
+      await streamEvents(id, since, (item) => { if (item.type === "agent.message_delta") process.stdout.write(item.text); else if (item.type === "event") printEvent(item.event); });
       return;
     case "send": {
       const text = rest.join(" ");
@@ -41,7 +41,13 @@ export async function cmdSession(args: string[]): Promise<void> {
       const { events } = await sendMessage(id, text);
       if (!flags.wait) return printJson(events);
       let streamingText = false;
+      let thinking = false;
+      const dim = (t: string) => `\x1b[2m${t}\x1b[0m`;
       await streamEvents(id, events[events.length - 1]!.seq, (item) => {
+        if (item.type === "agent.thinking_delta") { if (!thinking) { process.stdout.write(dim("\n[thinking] ")); thinking = true; } process.stdout.write(dim(item.text.replace(/\n/g, " "))); return; }
+        if (thinking) { process.stdout.write("\n"); thinking = false; }
+        if (item.type === "agent.tool_use_start") { process.stdout.write(dim(`\n▪ ${item.name}(…preparing)`)); return; }
+        if (item.type === "agent.tool_use_delta") return;
         if (item.type === "agent.message_delta") { process.stdout.write(item.text); streamingText = true; return; }
         if (item.event.type === "agent.message") { if (streamingText) { console.log(); streamingText = false; } return; }
         printEvent(item.event);

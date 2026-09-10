@@ -261,7 +261,12 @@ export interface SessionEvent {
 // ---------- Streaming deltas (not persisted; pub/sub only) ----------
 export type StreamDelta =
   | { type: "event"; event: SessionEvent }
-  | { type: "agent.message_delta"; session_id: SessionId; text: string };
+  | { type: "agent.message_delta"; session_id: SessionId; text: string }
+  /** reasoning tokens as they stream; never persisted */
+  | { type: "agent.thinking_delta"; session_id: SessionId; text: string }
+  /** a tool call is being generated: name known at start, JSON argument fragments follow; the persisted agent.tool_use carries the final input */
+  | { type: "agent.tool_use_start"; session_id: SessionId; index: number; name: string }
+  | { type: "agent.tool_use_delta"; session_id: SessionId; index: number; text: string };
 
 // ---------- Queue (MQ) ----------
 export interface RunJob {

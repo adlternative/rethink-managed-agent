@@ -55,7 +55,9 @@ Keys: `Esc` clears suggestions → clears input → interrupts the running turn 
 How it follows a session: on open it lists persisted events and folds them into messages (tool results hang
 under their `agent.tool_use`), then attaches to `GET /v1/sessions/:id/events/stream?since=<last seq>`.
 `agent.message_delta` items stream into a cursor-terminated message; the persisted `agent.message` that
-follows replaces it as the authoritative copy. The stream reconnects from the last seq on network errors.
+follows replaces it as the authoritative copy. `agent.thinking_delta` renders as a dim `∴ thinking` block
+(last two lines, Ctrl+O expands); `agent.tool_use_start` / `agent.tool_use_delta` show `▪ name(…)` with the
+argument fragments until the persisted `agent.tool_use` replaces it. The stream reconnects from the last seq on network errors.
 
 ## Layout
 

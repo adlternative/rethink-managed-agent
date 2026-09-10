@@ -373,11 +373,17 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
 
     const sink = async (ev: AgentEvent) => {
       switch (ev.type) {
-        case "message_update":
-          if (ev.assistantMessageEvent.type === "text_delta") {
-            await deps.publish({ type: "agent.message_delta", session_id: sessionId, text: ev.assistantMessageEvent.delta });
-          }
+        case "message_update": {
+          const e = ev.assistantMessageEvent;
+          // Stream-only previews (never persisted): text, reasoning, and tool-call argument fragments.
+          if (e.type === "text_delta") await deps.publish({ type: "agent.message_delta", session_id: sessionId, text: e.delta });
+          else if (e.type === "thinking_delta") await deps.publish({ type: "agent.thinking_delta", session_id: sessionId, text: e.delta });
+          else if (e.type === "toolcall_start") {
+            const block = e.partial.content[e.contentIndex];
+            await deps.publish({ type: "agent.tool_use_start", session_id: sessionId, index: e.contentIndex, name: block?.type === "toolCall" ? block.name : "tool" });
+          } else if (e.type === "toolcall_delta") await deps.publish({ type: "agent.tool_use_delta", session_id: sessionId, index: e.contentIndex, text: e.delta });
           break;
+        }
         case "tool_execution_start":
           await emit({ type: "agent.tool_use", tool_use_id: ev.toolCallId, name: ev.toolName, input: ev.args });
           break;

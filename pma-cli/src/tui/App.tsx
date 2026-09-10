@@ -9,11 +9,14 @@ import { Selector, type SelectorItem } from "./Selector.tsx";
 // ─── Message model (same shape as qca: tool results hang under their tool_use) ───
 interface Message {
   id: number;
-  role: "user" | "agent" | "tool" | "system";
+  role: "user" | "agent" | "tool" | "system" | "thinking";
   content: string;
   toolName?: string;
   toolUseId?: string;
-  toolStatus?: "running" | "success" | "error";
+  toolStatus?: "preparing" | "running" | "success" | "error";
+  /** streaming tool-call argument fragments (before the persisted agent.tool_use arrives) */
+  argsPreview?: string;
+  streamIndex?: number;
   result?: string;
   streaming?: boolean;
   /** Optimistically shown user message not yet confirmed by its persisted event. */
@@ -80,13 +83,24 @@ function MessageView({ m, expanded }: { m: Message; expanded: boolean }) {
       return <Box marginTop={1}><Text>{m.content}{m.streaming ? <Text color="cyan">▌</Text> : null}</Text></Box>;
     case "system":
       return <Box marginTop={1}><Text dimColor italic>{m.content}</Text></Box>;
-    case "tool": {
-      const color = m.toolStatus === "error" ? "red" : m.toolStatus === "running" ? "yellow" : "green";
-      const lines = (m.result ?? "").split("\n");
-      const shown = expanded ? lines : lines.slice(0, 3);
+    case "thinking": {
+      const lines = m.content.split("\n").filter((l) => l.trim());
+      const shown = expanded ? lines : lines.slice(-2);
       return (
         <Box flexDirection="column" marginTop={1}>
-          <Text><Text color={color}>▪</Text> <Text bold>{m.content}</Text>{m.toolStatus === "running" ? <Text dimColor> …</Text> : null}</Text>
+          <Text dimColor italic>∴ thinking{m.streaming ? "…" : ""}{!expanded && lines.length > 2 ? ` (${lines.length} lines, ctrl+o)` : ""}</Text>
+          {shown.map((l, i) => <Text key={i} dimColor italic>  {l}</Text>)}
+        </Box>
+      );
+    }
+    case "tool": {
+      const color = m.toolStatus === "error" ? "red" : m.toolStatus === "running" || m.toolStatus === "preparing" ? "yellow" : "green";
+      const lines = (m.result ?? "").split("\n");
+      const shown = expanded ? lines : lines.slice(0, 3);
+      const preview = m.toolStatus === "preparing" ? (m.argsPreview ?? "").replace(/\s+/g, " ").slice(-70) : "";
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text><Text color={color}>▪</Text> <Text bold>{m.content}</Text>{m.toolStatus === "running" ? <Text dimColor> …</Text> : m.toolStatus === "preparing" ? <Text dimColor> {preview || "…"}</Text> : null}</Text>
           {m.result !== undefined && shown.map((l, i) => <Text key={i} dimColor>  {i === 0 ? "└ " : "  "}{l}</Text>)}
           {m.result !== undefined && lines.length > shown.length && <Text dimColor>    … {lines.length - shown.length} more lines (ctrl+o)</Text>}
         </Box>
@@ -116,6 +130,8 @@ function App({ opts }: { opts: TuiOptions }) {
   const lastSeq = useRef(0);
   const streamAbort = useRef<AbortController | null>(null);
   const streamingMsg = useRef<Message | null>(null);
+  const thinkingMsg = useRef<Message | null>(null);
+  const preparingTools = useRef(new Map<number, Message>());
   const suggestions = value.startsWith("/") && !value.includes(" ") ? COMMANDS.filter((c) => c.name.startsWith(value)) : [];
   const [sugIdx, setSugIdx] = useState(0);
 
@@ -130,7 +146,41 @@ function App({ opts }: { opts: TuiOptions }) {
 
   // ── stream handling ──
   const handleItem = useCallback((item: Parameters<Parameters<typeof streamEvents>[2]>[0]) => {
+    if (item.type === "agent.thinking_delta") {
+      setMessages((prev) => {
+        const cur = thinkingMsg.current;
+        if (cur && prev.includes(cur)) {
+          const upd = { ...cur, content: cur.content + item.text };
+          thinkingMsg.current = upd;
+          return prev.map((m) => (m === cur ? upd : m));
+        }
+        const m = msg({ role: "thinking", content: item.text, streaming: true });
+        thinkingMsg.current = m;
+        return [...prev, m];
+      });
+      return;
+    }
+    if (item.type === "agent.tool_use_start") {
+      finishThinking();
+      setMessages((prev) => {
+        const m = msg({ role: "tool", content: `${item.name}(…)`, toolName: item.name, toolStatus: "preparing", argsPreview: "", streamIndex: item.index });
+        preparingTools.current.set(item.index, m);
+        return [...prev, m];
+      });
+      return;
+    }
+    if (item.type === "agent.tool_use_delta") {
+      setMessages((prev) => {
+        const cur = preparingTools.current.get(item.index);
+        if (!cur || !prev.includes(cur)) return prev;
+        const upd = { ...cur, argsPreview: (cur.argsPreview ?? "") + item.text };
+        preparingTools.current.set(item.index, upd);
+        return prev.map((m) => (m === cur ? upd : m));
+      });
+      return;
+    }
     if (item.type === "agent.message_delta") {
+      finishThinking();
       setMessages((prev) => {
         const cur = streamingMsg.current;
         if (cur && prev.includes(cur)) {
@@ -153,6 +203,8 @@ function App({ opts }: { opts: TuiOptions }) {
       case "session.status_idle":
         setGenerating(false);
         finishStream();
+        finishThinking();
+        preparingTools.current.clear();
         if (p.stop_reason !== "end_turn") sys(`stopped: ${p.stop_reason}`);
         break;
       case "session.status_terminated": setGenerating(false); finishStream(); sys("session terminated"); break;
@@ -177,10 +229,21 @@ function App({ opts }: { opts: TuiOptions }) {
         });
         break;
       }
-      case "agent.tool_use":
+      case "agent.tool_use": {
         finishStream();
-        setMessages((prev) => [...prev, msg({ role: "tool", content: formatToolDesc(p.name, p.input), toolName: p.name, toolUseId: p.tool_use_id, toolStatus: "running" })]);
+        finishThinking();
+        // Replace the streaming "preparing" placeholder (oldest pending one of this name) with the real call.
+        const pending = [...preparingTools.current.entries()].find(([, m]) => m.toolName === p.name);
+        setMessages((prev) => {
+          const real = { role: "tool" as const, content: formatToolDesc(p.name, p.input), toolName: p.name, toolUseId: p.tool_use_id, toolStatus: "running" as const };
+          if (pending && prev.includes(pending[1])) {
+            preparingTools.current.delete(pending[0]);
+            return prev.map((m) => (m === pending[1] ? { ...m, ...real, argsPreview: undefined } : m));
+          }
+          return [...prev, msg(real)];
+        });
         break;
+      }
       case "agent.tool_result":
         setMessages((prev) => prev.map((m) => (m.role === "tool" && m.toolUseId === p.tool_use_id ? { ...m, result: textOf(p.content), toolStatus: p.is_error ? "error" : "success" } : m)));
         break;
@@ -188,6 +251,13 @@ function App({ opts }: { opts: TuiOptions }) {
       case "sandbox.released": setSandboxInfo(""); break;
     }
   }, [sys]);
+
+  function finishThinking() {
+    const cur = thinkingMsg.current;
+    if (!cur) return;
+    thinkingMsg.current = null;
+    setMessages((prev) => prev.map((m) => (m === cur ? { ...m, streaming: false } : m)));
+  }
 
   function finishStream() {
     const cur = streamingMsg.current;

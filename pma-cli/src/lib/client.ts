@@ -38,7 +38,12 @@ export function interrupt(sessionId: string): Promise<unknown> {
   return apiPost(`/sessions/${sessionId}/events`, { events: [{ type: "user.interrupt" }] });
 }
 
-export type StreamItem = { type: "agent.message_delta"; text: string } | { type: "event"; event: SessionEvent };
+export type StreamItem =
+  | { type: "agent.message_delta"; text: string }
+  | { type: "agent.thinking_delta"; text: string }
+  | { type: "agent.tool_use_start"; index: number; name: string }
+  | { type: "agent.tool_use_delta"; index: number; text: string }
+  | { type: "event"; event: SessionEvent };
 
 /**
  * Follow a session's SSE stream from `since` (exclusive seq). Reconnects on network errors until
@@ -78,7 +83,10 @@ export async function streamEvents(
           }
           if (!data) continue;
           const parsed = JSON.parse(data);
-          const item: StreamItem = type === "agent.message_delta" ? { type, text: parsed.text } : { type: "event", event: parsed };
+          const item: StreamItem = type === "agent.message_delta" || type === "agent.thinking_delta" ? { type, text: parsed.text }
+            : type === "agent.tool_use_start" ? { type, index: parsed.index, name: parsed.name }
+            : type === "agent.tool_use_delta" ? { type, index: parsed.index, text: parsed.text }
+            : { type: "event", event: parsed };
           if (item.type === "event") last = Math.max(last, item.event.seq);
           if (onItem(item)) { await reader.cancel().catch(() => {}); return last; }
         }
