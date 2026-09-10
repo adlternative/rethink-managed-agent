@@ -1,9 +1,10 @@
-import { apiGet, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, type SessionEvent } from "../lib/client.ts";
+import { apiGet, apiPost, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, type SessionEvent } from "../lib/client.ts";
+import { mimeOf, uploadFile } from "./files.ts";
 import { die, parseArgs, printJson, str, table } from "../lib/args.ts";
 
 const USAGE = `session subcommand:
   events <id> [--since <seq>] [--json]
-  send <id> <text...> [--wait]        append a user message; --wait streams until the turn ends
+  send <id> <text...> [--wait] [--file a.png,b.pdf]   append a user message (+ attachments); --wait streams until the turn ends
   stream <id> [--since <seq>]         follow the event stream
   interrupt <id>
   export <id> [--json] > file`;
@@ -37,8 +38,16 @@ export async function cmdSession(args: string[]): Promise<void> {
       return;
     case "send": {
       const text = rest.join(" ");
-      if (!text) die("usage: pma session send <id> <text...> [--wait]");
-      const { events } = await sendMessage(id, text);
+      const filesArg = str(flags, "file");
+      if (!text && !filesArg) die("usage: pma session send <id> <text...> [--wait] [--file a.png,b.pdf]");
+      // Attachments: images become image blocks, everything else a document the agent reads from .attachments/
+      const blocks: any[] = text ? [{ type: "text", text }] : [];
+      for (const f of (filesArg ?? "").split(",").filter(Boolean)) {
+        const up = await uploadFile(f);
+        blocks.push({ type: mimeOf(f).startsWith("image/") ? "image" : "document", file_id: up.id });
+        process.stderr.write(`uploaded ${up.name} -> ${up.id}\n`);
+      }
+      const { events } = (await apiPost(`/sessions/${id}/events`, { events: [{ type: "user.message", content: blocks }] })) as { events: SessionEvent[] };
       if (!flags.wait) return printJson(events);
       let streamingText = false;
       let thinking = false;

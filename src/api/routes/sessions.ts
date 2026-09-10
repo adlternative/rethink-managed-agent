@@ -3,11 +3,11 @@ import { repos, toolOutputs } from "../../infra/db.ts";
 import { appendEvents } from "../../infra/events.ts";
 import type { AgentResource, SessionEnvironment, SessionResource, WorkspaceRef, WorkspaceResource, WorkspaceSpec } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
-import { validateModel, validatePackages, validateTools } from "./agents.ts";
+import { validateIds, validateModel, validatePackages, validateTools } from "./agents.ts";
 import { validateWorkspaceSpec } from "./environments.ts";
 import { events, sendUserEvents, validateUserEvents } from "./events.ts";
 
-type AgentInput = string | { type: "agent_with_overrides"; id: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown };
+type AgentInput = string | { type: "agent_with_overrides"; id: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown };
 
 export function initialRef(spec: WorkspaceSpec): WorkspaceRef {
   if (spec.kind === "git") return { kind: "git", remote: spec.remote, base: spec.ref ?? "HEAD" };
@@ -28,6 +28,7 @@ async function resolveAgent(input: AgentInput | undefined): Promise<SessionResou
     system: input.system !== undefined ? input.system : snap.system,
     tools: input.tools !== undefined ? validateTools(input.tools) : snap.tools,
     packages: input.packages !== undefined ? validatePackages(input.packages) : (snap.packages ?? []),
+    skills: input.skills !== undefined ? validateIds(input.skills, "skill") : (snap.skills ?? []),
   };
 }
 
@@ -65,7 +66,7 @@ async function resolveEnvironment(input: EnvInput, existing: SessionEnvironment[
 
 export const sessions = new Hono()
   .post("/", async (c) => {
-    const body = await readJson<{ agent?: AgentInput; environment_id?: string; workspace?: unknown; workspace_id?: string; environments?: EnvInput[]; parent_id?: string; initial_events?: unknown }>(c);
+    const body = await readJson<{ agent?: AgentInput; environment_id?: string; workspace?: unknown; workspace_id?: string; environments?: EnvInput[]; parent_id?: string; memories?: unknown; initial_events?: unknown }>(c);
     const agent = await resolveAgent(body.agent);
     // Either the classic single-environment shape, or an explicit list whose first entry is "main".
     const inputs: EnvInput[] = Array.isArray(body.environments) && body.environments.length > 0
@@ -82,6 +83,7 @@ export const sessions = new Hono()
       agent,
       environments: envs,
       parent_id: body.parent_id ?? null,
+      memories: validateIds(body.memories, "mem"),
     });
     if (Array.isArray(body.initial_events) && body.initial_events.length > 0) {
       await sendUserEvents(session, validateUserEvents(body.initial_events));

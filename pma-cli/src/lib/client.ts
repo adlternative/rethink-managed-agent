@@ -1,7 +1,7 @@
 import { resolveConfig, buildHeaders } from "./config.ts";
 
 // ---- API resource shapes (mirror src/shared/types.ts on the server) ----
-export interface ContentBlock { type: "text"; text: string }
+export type ContentBlock = { type: "text"; text: string } | { type: "image"; file_id: string } | { type: "document"; file_id: string };
 export interface Agent { id: string; name: string; model: { provider: string; id: string }; system: string | null; tools: string[]; packages?: string[]; created_at: string }
 export interface Environment { id: string; name: string; provider: string; image: string | null; worker_key?: string | null; worker_key_set?: boolean; network?: "none" | "bridge"; plugin_host?: "runner" | "sandbox"; workspace: unknown; created_at: string }
 export interface Usage { input: number; output: number; cache_read: number; cache_write: number; total_tokens: number; requests: number }
@@ -31,7 +31,7 @@ export const apiGet = (p: string) => apiRequest("GET", p);
 export const apiPost = (p: string, b?: unknown) => apiRequest("POST", p, b);
 export const apiDelete = (p: string) => apiRequest("DELETE", p);
 
-export const textOf = (content: ContentBlock[] | undefined) => (content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
+export const textOf = (content: ContentBlock[] | undefined) => (content ?? []).map((b) => (b.type === "text" ? b.text : `[${b.type} ${b.file_id}]`)).join(" ");
 
 export function sendMessage(sessionId: string, text: string): Promise<{ events: SessionEvent[] }> {
   return apiPost(`/sessions/${sessionId}/events`, { events: [{ type: "user.message", content: [{ type: "text", text }] }] });

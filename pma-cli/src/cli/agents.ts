@@ -4,7 +4,7 @@ import { die, parseArgs, printJson, str, table } from "../lib/args.ts";
 const USAGE = `agents subcommand:
   list
   get <id>
-  create <name> <provider/model> [--system <prompt>] [--tools bash,read,write,edit] [--packages npm:x,git:y,/path]
+  create <name> <provider/model> [--system <prompt>] [--tools bash,read,write,edit] [--packages npm:x,git:y,/path] [--skills skill_a,skill_b]
 example:
   pma agents create coder qoder/ultimate --system "You are a careful engineer"`;
 
@@ -27,6 +27,7 @@ export async function cmdAgents(args: string[]): Promise<void> {
       if (str(flags, "system")) body.system = str(flags, "system");
       if (str(flags, "tools")) body.tools = str(flags, "tools")!.split(",");
       if (str(flags, "packages")) body.packages = str(flags, "packages")!.split(",");
+      if (str(flags, "skills")) body.skills = str(flags, "skills")!.split(",");
       return printJson(await apiPost("/agents", body));
     }
     default:

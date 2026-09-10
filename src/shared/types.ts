@@ -30,6 +30,8 @@ export interface AgentResource {
    * "npm:<pkg>", "git:<url>", or a local path readable by the runner. See docs/PI_EXTENSIONS.md.
    */
   packages: string[];
+  /** skill resources (ids) available in addition to package skills */
+  skills: string[];
   created_at: string;
 }
 
@@ -250,6 +252,8 @@ export interface SessionResource {
   environments: SessionEnvironment[];
   /** set for sub-agent sessions spawned by another session */
   parent_id: SessionId | null;
+  /** memory resources mounted into this session's main sandbox at .memory/<name> */
+  memories: string[];
   status: SessionStatus;
   /** snapshot of agent config at creation (Managed-Agent style) */
   agent: Omit<AgentResource, "created_at">;
@@ -258,7 +262,38 @@ export interface SessionResource {
 }
 
 // ---------- Events (the single source of truth) ----------
-export type ContentBlock = { type: "text"; text: string };
+/** Text, or a reference to an uploaded file: images go to the model as image blocks, documents are
+ *  materialized into the workspace under .attachments/ and referenced by path. */
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; file_id: string }
+  | { type: "document"; file_id: string };
+
+export interface FileResource {
+  id: string; // "file_xxx"
+  name: string;
+  mime: string;
+  bytes: number;
+  sha256: string;
+  created_at: string;
+}
+export interface SkillResource {
+  id: string; // "skill_xxx"
+  name: string;
+  description: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+/** A persistent directory mounted into sessions at .memory/<name>; survives sessions and is shareable across agents. */
+export interface MemoryResource {
+  id: string; // "mem_xxx"
+  name: string;
+  description: string;
+  ref: WorkspaceRef;
+  created_at: string;
+  updated_at: string;
+}
 
 export type UserEventInput =
   | { type: "user.message"; content: ContentBlock[] }

@@ -28,12 +28,14 @@ import type {
   WorkspaceResource,
   Usage,
   ContextSize,
+  MemoryResource,
 } from "../shared/types.ts";
 import type { PackageManifest, PromptTemplate, Skill } from "../plugins/api.ts";
 import { PluginHost, type Capabilities } from "../plugins/client.ts";
 import type { HostBundle } from "../plugins/bundle.ts";
 import type { SessionInfo } from "../plugins/protocol.ts";
-import { foldEvents, toContentBlocks } from "./fold.ts";
+import { foldEvents, toContentBlocks, type FoldFiles } from "./fold.ts";
+import { mountMemories, syncMemoriesBack, writeAttachments } from "./mounts.ts";
 import { compactMessages, contextTokens, needsCompaction, settingsFromEnv } from "./compaction.ts";
 import { resolveModel } from "./models.ts";
 import { createTools, truncateOutput, type ToolContext } from "./tools.ts";
@@ -99,6 +101,13 @@ export interface RunDeps {
   finishRun(sessionId: SessionId, stopReason: StopReason, consumedSeq: number): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }>;
   /** Accumulate one model request's usage on the session row. */
   recordUsage(sessionId: SessionId, usage: Omit<Usage, "requests">, context: ContextSize): Promise<Usage>;
+  /** Uploaded files (for image blocks and document attachments). */
+  files: FoldFiles;
+  /** Skill resources referenced by the agent. */
+  getSkills(ids: string[]): Promise<Skill[]>;
+  /** Memory stores mounted into the session. */
+  getMemories(ids: string[]): Promise<MemoryResource[]>;
+  updateMemoryRef(id: string, ref: WorkspaceRef): Promise<void>;
   /** Spill store for oversized tool outputs. */
   toolOutputs: { put(sessionId: SessionId, toolUseId: string, toolName: string, content: string): Promise<void>; get(sessionId: SessionId, toolUseId: string): Promise<{ tool_name: string; content: string; bytes: number } | null> };
 }
@@ -111,7 +120,7 @@ const DEFAULT_SYSTEM_PROMPT =
 const LLM_ROLES = new Set(["user", "assistant", "toolResult"]);
 const convertToLlm = (messages: AgentMessage[]): Message[] => messages.filter((m): m is Message => LLM_ROLES.has(m.role));
 
-function textBlocks(content: { type: string; text?: string }[]): ContentBlock[] {
+function textBlocks(content: { type: string; text?: string }[]): Extract<ContentBlock, { type: "text" }>[] {
   return content.flatMap((c) => (c.type === "text" && c.text !== undefined ? [{ type: "text" as const, text: c.text }] : []));
 }
 const blocksText = (content: { type: string; text?: string }[]) => textBlocks(content).map((b) => b.text).join("");
@@ -253,12 +262,13 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   const info: SessionInfo = { sessionId, agentId: session.agent.id, workspaceId: workspace.id };
   let detachPlugins: (() => void) | null = null;
   let turns = 0;
+  let memoryStores: MemoryResource[] = [];
   let host: PluginHost | null = null;
   const hostRef: { current: PluginHost | null } = { current: null };
   let ownHost = false; // sandbox-hosted: started for this run, stopped with it
 
   try {
-    const folded = foldEvents(await deps.listEvents(sessionId));
+    const folded = await foldEvents(await deps.listEvents(sessionId), deps.files);
     const { seqOf } = folded;
     let messages = folded.messages;
     let lastSummary = folded.summary;
@@ -305,6 +315,16 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       }
     }
     hostRef.current = host;
+
+    // Skill resources (DB) join package skills; memories and document attachments need the main
+    // sandbox, so they force an early lease when present.
+    const dbSkills = await deps.getSkills(session.agent.skills ?? []);
+    memoryStores = await deps.getMemories(session.memories ?? []);
+    if (folded.attachments.length > 0 || memoryStores.length > 0) {
+      const sb = await ctx.sandbox("main");
+      if (folded.attachments.length > 0) await writeAttachments(sb, folded.attachments, deps.files);
+      if (memoryStores.length > 0) await mountMemories(sb, memoryStores);
+    }
 
     // ---- capabilities plugins may call back into (all scoped to this session) ----
     const caps: Capabilities = {
@@ -379,9 +399,13 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     detachPlugins = host?.attach(info, caps) ?? null;
 
     const tools: AgentTool[] = [...builtinTools, ...(host?.agentTools(info) ?? [])];
-    const st = skillTool(plugins.skills, plugins.prompts);
+    const allSkills = [...plugins.skills, ...dbSkills];
+    const st = skillTool(allSkills, plugins.prompts);
     if (st) tools.push(st);
-    const baseSystemPrompt = [session.agent.system ?? DEFAULT_SYSTEM_PROMPT, skillsPrompt(plugins.skills, plugins.prompts)].filter(Boolean).join("\n\n");
+    const memoryPrompt = memoryStores.length
+      ? `Persistent memory directories are mounted at ${memoryStores.map((m) => `.memory/${m.name}`).join(", ")}${memoryStores.some((m) => m.description) ? ` (${memoryStores.filter((m) => m.description).map((m) => `${m.name}: ${m.description}`).join("; ")})` : ""}. They survive this session: read them for prior notes and write durable notes there (e.g. .memory/<name>/notes.md) for future sessions.`
+      : "";
+    const baseSystemPrompt = [session.agent.system ?? DEFAULT_SYSTEM_PROMPT, skillsPrompt(allSkills, plugins.prompts), memoryPrompt].filter(Boolean).join("\n\n");
 
     let runSystemPrompt = baseSystemPrompt;
     const systemPromptFor = async (msgs: AgentMessage[]): Promise<string> => {
@@ -575,6 +599,13 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       const lease = slot.lease ?? (await slot.acquiring?.catch(() => null)) ?? null;
       if (!lease) continue;
       const e = envs.get(key)!;
+      if (key === "main" && memoryStores.length > 0) {
+        try {
+          for (const { id, ref } of await syncMemoriesBack(lease.sandbox, memoryStores)) await deps.updateMemoryRef(id, ref);
+        } catch (err) {
+          await emit({ type: "session.error", error: { type: "memory_sync_failed", message: err instanceof Error ? err.message : String(err) } });
+        }
+      }
       try {
         const ref = await deps.sandboxFor(e.environment.provider).capture(lease.sandbox, e.workspace.ref);
         await emit({ type: "workspace.captured", ref: redactRef(ref), workspace_id: e.workspace.id, env: key });

@@ -31,7 +31,11 @@ pma -r sess_xxx                                  # resume a specific one
 | `envs list \| get <id> \| create <name> --provider local\|docker\|e2b [--image I] [--git URL --ref R]` | `--image` is a docker image or an e2b template |
 | `sessions list [--status s] \| get \| create [--agent --env --workspace-id --model p/id --message T] \| archive \| delete` | `--workspace-id` shares another session's workspace (and sandbox) |
 | `session events <id> [--json] \| send <id> <text> [--wait] \| stream <id> \| interrupt <id> \| export <id> [--json]` | `--wait` streams the turn to stdout |
-| `sandboxes list [--all] \| get <id> \| delete <id>` | `delete` retires a ready sandbox via the runner's reaper |
+| `sandboxes list [--all] \| get <id> \| pause <id> \| delete <id>` | via the runner's reaper |
+| `files upload <path> \| list \| get <id> \| delete <id>` | attachments for `session send --file` |
+| `skills list \| get \| create --file SKILL.md \| update \| delete` | skill resources for `agents create --skills` |
+| `memories list \| get \| create <name> \| delete` | memory stores for `sessions create --memories` |
+| `providers …` / `worker …` | model providers (BYOK with `--key`) / BYOC sandbox worker |
 
 Env overrides: `PMA_HOST`, `PMA_TOKEN`, `PMA_HEADERS` (JSON object), `PMA_CONFIG` (config path).
 

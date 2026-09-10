@@ -9,6 +9,9 @@ import { sessions } from "./routes/sessions.ts";
 import { sandboxes } from "./routes/sandboxes.ts";
 import { models } from "./routes/models.ts";
 import { providers, seedProviders } from "./routes/providers.ts";
+import { filesRoute } from "./routes/files.ts";
+import { skillsRoute } from "./routes/skills.ts";
+import { memoriesRoute } from "./routes/memories.ts";
 
 export const app = new Hono()
   .onError((err, c) => errorResponse(c, err))
@@ -19,7 +22,10 @@ export const app = new Hono()
   .route("/v1/sessions", sessions)
   .route("/v1/sandboxes", sandboxes)
   .route("/v1/models", models)
-  .route("/v1/providers", providers);
+  .route("/v1/providers", providers)
+  .route("/v1/files", filesRoute)
+  .route("/v1/skills", skillsRoute)
+  .route("/v1/memories", memoriesRoute);
 
 await migrate();
 await seedProviders();

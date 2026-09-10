@@ -17,7 +17,32 @@ export interface Folded {
   summary?: string;
 }
 
-export function foldEvents(events: SessionEvent[]): Folded {
+/** Uploaded-file access for folding (images inline to the model; documents referenced by path). */
+export interface FoldFiles {
+  get(id: string): Promise<{ name: string; mime: string; data: Uint8Array } | null>;
+}
+/** Documents referenced by the transcript that must exist in the workspace under .attachments/. */
+export interface Attachment { file_id: string; path: string }
+
+export function foldEvents(events: SessionEvent[], files?: FoldFiles): Promise<Folded & { attachments: Attachment[] }>;
+export function foldEvents(events: SessionEvent[]): Folded;
+export function foldEvents(events: SessionEvent[], files?: FoldFiles): Folded | Promise<Folded & { attachments: Attachment[] }> {
+  if (files) return foldEventsAsync(events, files);
+  return foldSync(events, undefined, []);
+}
+
+async function foldEventsAsync(events: SessionEvent[], files: FoldFiles): Promise<Folded & { attachments: Attachment[] }> {
+  // Resolve every referenced file once, up front; then fold synchronously.
+  const ids = new Set<string>();
+  for (const ev of events) if (ev.payload.type === "user.message") for (const b of ev.payload.content) if (b.type !== "text") ids.add(b.file_id);
+  const resolved = new Map<string, { name: string; mime: string; data: Uint8Array } | null>();
+  for (const id of ids) resolved.set(id, await files.get(id));
+  const attachments: Attachment[] = [];
+  const folded = foldSync(events, resolved, attachments);
+  return { ...folded, attachments };
+}
+
+function foldSync(events: SessionEvent[], resolved: Map<string, { name: string; mime: string; data: Uint8Array } | null> | undefined, attachments: Attachment[]): Folded {
   // Latest compaction wins: everything older than its cut is represented by the summary.
   let compaction: { summary: string; firstKeptSeq: number; at: SessionEvent } | null = null;
   for (const ev of events) {
@@ -37,7 +62,21 @@ export function foldEvents(events: SessionEvent[]): Folded {
     const p = ev.payload;
     let m: AgentMessage | null = null;
     if (p.type === "user.message") {
-      m = { role: "user", content: p.content.map((b) => ({ type: "text", text: b.text })), timestamp: Date.parse(ev.created_at) || Date.now() };
+      const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [];
+      for (const b of p.content) {
+        if (b.type === "text") { content.push({ type: "text", text: b.text }); continue; }
+        const f = resolved?.get(b.file_id);
+        if (!f) { content.push({ type: "text", text: `[attachment ${b.file_id} unavailable]` }); continue; }
+        if (b.type === "image" && f.mime.startsWith("image/")) {
+          content.push({ type: "image", data: Buffer.from(f.data).toString("base64"), mimeType: f.mime });
+        } else {
+          // documents live in the workspace; the model reads them with its tools
+          const path = `.attachments/${b.file_id}-${f.name}`;
+          attachments.push({ file_id: b.file_id, path });
+          content.push({ type: "text", text: `[attached file: ${path} (${f.mime}, ${f.data.length} bytes)]` });
+        }
+      }
+      m = { role: "user", content, timestamp: Date.parse(ev.created_at) || Date.now() };
     } else if (p.type === "agent.message" || p.type === "agent.tool_result") {
       m = p.pi;
     }

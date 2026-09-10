@@ -87,6 +87,31 @@ CREATE TABLE IF NOT EXISTS tool_outputs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (session_id, tool_use_id)
 );
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  data BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  ref JSONB NOT NULL DEFAULT '{"kind":"empty"}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- plugin key/value store (scope = 'agent' | 'workspace'; owner = agent_id | workspace_id)
 CREATE TABLE IF NOT EXISTS plugin_store (
   scope TEXT NOT NULL,
@@ -104,3 +129,5 @@ INSERT INTO session_environments (session_id, key, environment_id, workspace_id)
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS usage JSONB NOT NULL DEFAULT '{"input":0,"output":0,"cache_read":0,"cache_write":0,"total_tokens":0,"requests":0}';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context JSONB;
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS worker_key TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS memories JSONB NOT NULL DEFAULT '[]';

@@ -25,9 +25,15 @@ export function validatePackages(packages: unknown): string[] {
   return packages as string[];
 }
 
+export function validateIds(v: unknown, prefix: string): string[] {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v) || !v.every((x) => typeof x === "string" && x.startsWith(prefix + "_"))) throw invalid(`${prefix}s must be an array of ${prefix}_ ids`);
+  return v as string[];
+}
+
 export const agents = new Hono()
   .post("/", async (c) => {
-    const body = await readJson<{ name?: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown }>(c);
+    const body = await readJson<{ name?: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown }>(c);
     if (!body.name) throw invalid("name is required");
     const agent = await repos.agents.create({
       name: body.name,
@@ -35,6 +41,7 @@ export const agents = new Hono()
       system: body.system ?? null,
       tools: validateTools(body.tools),
       packages: validatePackages(body.packages),
+      skills: validateIds(body.skills, "skill"),
     });
     return c.json(agent, 201);
   })
