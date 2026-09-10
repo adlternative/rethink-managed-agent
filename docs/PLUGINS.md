@@ -49,10 +49,16 @@ Skills and prompt templates are listed in the system prompt and loaded on demand
 
 Plugins load in a **plugin host** process per agent (`src/plugins/host.ts`), started by the runner
 with Node's permission model (`--permission --allow-fs-read=<package dirs, repo>`): no fs writes, no
-child processes, no workers, no access to the runner's env or DB. The host and the runner talk over
+child processes, no workers, no access to the runner's env or DB. Node 22's permission model does not
+cover sockets, so the host additionally locks the network down before the first plugin import
+(`src/plugins/lockdown.ts`): the synchronous module hooks refuse to resolve `net`, `tls`, `http`,
+`https`, `http2`, `dgram`, `dns` (and `child_process`, `worker_threads`, `vm`, ...) for both ESM and
+CJS, and the global `fetch` / `WebSocket` / `EventSource` are replaced with throwing stubs and
+frozen. A plugin that statically imports one of those modules fails to load and is reported in the
+runner log; the only network path left is `ctx.fetch`, served by the runner under `PLUGIN_FETCH_ALLOW`. The host and the runner talk over
 stdio JSON-RPC (`src/plugins/protocol.ts`); tool calls go runner → host, capability calls go host →
 runner. `test/plugin-host.test.ts` loads a hostile plugin (`test/fixtures/pma-escape`) and asserts
-that its write and spawn attempts fail with `ERR_ACCESS_DENIED`.
+that its write attempt fails with `ERR_ACCESS_DENIED` and that `child_process`, `http`, `net` and the global `fetch` are all unavailable.
 
 Hooks and tools are wired into the pi-agent-core loop in `src/harness/run-turn.ts`:
 `tool_call` → `beforeToolCall`, `tool_result` → `afterToolCall`, `context` → per-turn system prompt.

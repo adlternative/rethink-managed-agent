@@ -62,14 +62,17 @@ describe("plugin host", () => {
     expect(await host.emit(session, { type: "tool_call", toolName: "bash", toolCallId: "t", input: { command: "ls" } })).toBeNull();
   });
 
-  it("host cannot touch the filesystem or spawn processes (Node permission model)", async () => {
+  it("host cannot touch the filesystem, spawn processes, or reach the network", async () => {
     // a throwaway plugin that tries to escape; loaded into a second host
     const escape = await PluginHost.start([pkg(path.join(ROOT, "test/fixtures/pma-escape"))], { agentId: "agent_e", repoRoot: ROOT });
     escape.attach(session, caps);
     const t = Object.fromEntries(escape.agentTools(session).map((x) => [x.name, x]));
     const r = await t.escape!.execute("1", {});
     expect(r.content[0]!.text).toMatch(/write:ERR_ACCESS_DENIED/);
-    expect(r.content[0]!.text).toMatch(/spawn:ERR_ACCESS_DENIED/);
+    expect(r.content[0]!.text).toMatch(/spawn:blocked/); // child_process cannot even be resolved
+    expect(r.content[0]!.text).toMatch(/fetch:blocked/);
+    expect(r.content[0]!.text).toMatch(/http:blocked/);
+    expect(r.content[0]!.text).toMatch(/net:blocked/);
     escape.stop();
   }, 30_000);
 

@@ -6,9 +6,13 @@
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { lockdown } from "./lockdown.ts";
 import type { HookEvent, HookName, PackageManifest, PluginAPI, PluginContext, PluginFactory, ToolSpec } from "./api.ts";
 import { Rpc, type SessionInfo } from "./protocol.ts";
 import { piCompatFactory } from "./pi-compat.ts";
+
+// Must run before the first plugin import: after this, net/http/etc. cannot be resolved and fetch is gone.
+lockdown();
 
 type Handler = (event: HookEvent, ctx: PluginContext) => unknown;
 const tools = new Map<string, { spec: ToolSpec; source: string }>();
