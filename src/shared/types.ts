@@ -33,6 +33,35 @@ export interface AgentResource {
   created_at: string;
 }
 
+// ---------- Model provider (DB-configured; pi-ai createProvider under the hood) ----------
+export type ProviderApi = "openai-completions" | "openai-responses" | "anthropic-messages";
+/** Credentials never live in the DB in clear text: an env-var reference, or none for keyless proxies. */
+export type ProviderAuth = { type: "none" } | { type: "env"; name: string };
+export interface ProviderModel {
+  id: string;
+  name?: string;
+  context_window: number;
+  max_tokens?: number;
+  reasoning?: boolean;
+  input?: ("text" | "image")[];
+  cost?: { input: number; output: number; cache_read?: number; cache_write?: number };
+  /** pi-ai compat flags, e.g. { supportsDeveloperRole: false } */
+  compat?: Record<string, unknown>;
+}
+export interface ProviderResource {
+  /** stable id used in agent.model.provider, e.g. "qoder", "anthropic", "my-gateway" */
+  id: string;
+  name: string;
+  api: ProviderApi;
+  base_url: string;
+  headers: Record<string, string>;
+  auth: ProviderAuth;
+  models: ProviderModel[];
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 // ---------- Environment ----------
 export type SandboxProviderName = "local" | "docker" | "e2b";
 export interface EnvironmentResource {

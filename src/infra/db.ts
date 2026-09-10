@@ -2,6 +2,7 @@ import pg from "pg";
 import { env } from "../shared/env.ts";
 import { newId } from "../shared/ids.ts";
 import type {
+  ProviderResource,
   SessionEnvironment,
   AgentResource,
   EnvironmentResource,
@@ -52,6 +53,29 @@ function iso<T>(row: T | null): T | null {
 const isoAll = <T>(rows: T[]) => rows.map((r) => iso(r) as T);
 
 export const repos = {
+  providers: {
+    async upsert(p: Omit<ProviderResource, "created_at" | "updated_at">): Promise<ProviderResource> {
+      const row = await one<ProviderResource>(
+        pool,
+        `INSERT INTO providers (id, name, api, base_url, headers, auth, models, enabled) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, api=EXCLUDED.api, base_url=EXCLUDED.base_url, headers=EXCLUDED.headers,
+           auth=EXCLUDED.auth, models=EXCLUDED.models, enabled=EXCLUDED.enabled, updated_at=now()
+         RETURNING *`,
+        [p.id, p.name, p.api, p.base_url, JSON.stringify(p.headers), JSON.stringify(p.auth), JSON.stringify(p.models), p.enabled],
+      );
+      return iso(row)!;
+    },
+    async get(id: string): Promise<ProviderResource | null> {
+      return iso(await one<ProviderResource>(pool, `SELECT * FROM providers WHERE id=$1`, [id]));
+    },
+    async list(): Promise<ProviderResource[]> {
+      return isoAll(await many<ProviderResource>(pool, `SELECT * FROM providers ORDER BY created_at`));
+    },
+    async delete(id: string): Promise<boolean> {
+      const r = await pool.query(`DELETE FROM providers WHERE id=$1`, [id]);
+      return (r.rowCount ?? 0) > 0;
+    },
+  },
   agents: {
     async create(input: Omit<AgentResource, "id" | "created_at">): Promise<AgentResource> {
       const row = await one<AgentResource>(

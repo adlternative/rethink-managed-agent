@@ -55,3 +55,11 @@ export async function popSteer(sessionId: string): Promise<Steer[]> {
   const items = (res?.[0]?.[1] as string[] | undefined) ?? [];
   return items.map((s) => JSON.parse(s) as Steer);
 }
+
+const PROVIDERS_CHANNEL = "providers:changed";
+export async function publishProvidersChanged(): Promise<void> {
+  await redis.publish(PROVIDERS_CHANNEL, String(Date.now()));
+}
+export function onProvidersChanged(cb: () => void): Promise<() => void> {
+  return subscriber(PROVIDERS_CHANNEL, () => cb());
+}

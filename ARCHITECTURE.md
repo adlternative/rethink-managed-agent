@@ -15,8 +15,8 @@ src/plugins/    api.ts (plugin API + capabilities), host.ts (permission-restrict
 src/harness/    pi-session.ts (EXPERIMENTAL: pi-coding-agent AgentSession, see docs/PI_EXTENSIONS.md),
                 tools.ts (bash/read/write/edit AgentTools over ctx.sandbox()), fold.ts (events -> pi
                 AgentMessage[]), run-turn.ts (one session run: fold, pi-agent-core loop + plugin hooks, persist events,
-                steering/interrupt, capture+release), models.ts (pi-ai registry for GET /v1/models)
-src/api/        main.ts (hono server), routes/*.ts (agents, environments, sessions, events, stream)
+                steering/interrupt, capture+release), models.ts (pi-ai registry built from the providers table; runner reloads on providers:changed)
+src/api/        main.ts (hono server), routes/*.ts (providers, agents, environments, sessions, events, stream, sandboxes, models)
 src/runner/     main.ts (consume queue -> run-turn; reaper loop)
 src/cli/        main.ts (thin client: create agent/env/session, send, stream)
 ```

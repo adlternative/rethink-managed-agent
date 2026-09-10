@@ -14,7 +14,7 @@ Read `DESIGN.md` for the rationale and `ARCHITECTURE.md` for the module contract
    ```sh
    cd ~/qoder-openai-provider && npm start   # serves http://127.0.0.1:4141/v1
    ```
-   To use Anthropic directly instead, set `ANTHROPIC_API_KEY` and reference `{provider:"anthropic", id:"claude-sonnet-4-6"}` when creating an agent.
+   Providers live in the DB (`pma providers list`); the Qoder proxy is seeded on first start. To add Anthropic: set `ANTHROPIC_API_KEY` on the runner and `pma providers create anthropic --api anthropic-messages --base-url https://api.anthropic.com --auth-env ANTHROPIC_API_KEY --models claude-sonnet-4-6:200000`, then reference `{provider:"anthropic", id:"claude-sonnet-4-6"}` on an agent.
 2. Configure and start the stack (postgres, redis, api, runner):
    ```sh
    cp .env.example .env
@@ -52,7 +52,8 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | DELETE | `/v1/sessions/:id` | | Cascades to events |
 | POST | `/v1/sessions/:id/archive` | | Appends `session.status_terminated` |
 | POST | `/v1/sessions/:id/environments` | `{key, environment_id, workspace?\|workspace_id?\|fork_from?}` | attach another sandbox to a session (tools take `env`) |
-| GET | `/v1/models` | | models the runner can resolve |
+| GET/POST/PATCH/DELETE | `/v1/providers` | `{id, api, base_url, auth:{type:"env",name}\|{type:"none"}, models:[{id, context_window, ...}], headers?, enabled?}` | model providers are data; keys stay in runner env vars. Seeded with the Qoder proxy on first start; runners reload on change |
+| GET | `/v1/models` | | flat model list across enabled providers |
 | GET | `/v1/sandboxes` | | lease registry view; `POST /v1/sandboxes/:id/pause` (docker stop / e2b snapshot) and `DELETE /v1/sandboxes/:id` act via the reaper |
 | POST | `/v1/sessions/:id/events` | `{events:[{type:"user.message", content:[{type:"text", text}]} \| {type:"user.interrupt"}]}` | Idle session: enqueues a run. Running session: message is steered into the live loop. Interrupt: aborts the loop |
 | GET | `/v1/sessions/:id/events` | `?since=<seq>&limit=<n>` | `{data, has_more}`; `seq` is per-session and monotonic |

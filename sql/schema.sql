@@ -7,6 +7,18 @@ CREATE TABLE IF NOT EXISTS agents (
   packages JSONB NOT NULL DEFAULT '[]',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS providers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  api TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  headers JSONB NOT NULL DEFAULT '{}',
+  auth JSONB NOT NULL DEFAULT '{"type":"none"}',
+  models JSONB NOT NULL DEFAULT '[]',
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS environments (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

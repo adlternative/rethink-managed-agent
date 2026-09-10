@@ -17,6 +17,7 @@ subcommands:
   config [--host U] [--agent ID] [--env ID] [--header k:v]   set / show defaults
   logout
   models
+  providers  list | get <id> | create <id> --api A --base-url U [--auth-env E] [--models id:ctx,...] | update <id> | delete <id>
   agents     list | get <id> | create <name> <provider/model> [--system S] [--tools t,t] [--packages p,p]
   envs       list | get <id> | create <name> --provider local|docker|e2b [--image I] [--network bridge] [--plugin-host sandbox] [--git URL]
   sessions   list | get <id> | create [--environments main=e1,k=e2[:fork]] | attach <id> k=e[:fork] | archive | delete
@@ -28,7 +29,7 @@ env: PMA_HOST, PMA_TOKEN, PMA_HEADERS (JSON), PMA_CONFIG (config path; default ~
 process.on("unhandledRejection", (e: any) => die(`Error: ${e?.message ?? e}`));
 
 const argv = process.argv.slice(2);
-const SUBCOMMANDS = new Set(["config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "help"]);
+const SUBCOMMANDS = new Set(["providers", "config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "help"]);
 
 if (argv[0] && SUBCOMMANDS.has(argv[0])) {
   const sub = argv.slice(1);
@@ -37,6 +38,7 @@ if (argv[0] && SUBCOMMANDS.has(argv[0])) {
       case "config": (await import("./cli/config.ts")).cmdConfig(sub); break;
       case "login": (await import("./cli/login.ts")).cmdLogin(sub); break;
       case "logout": (await import("./cli/login.ts")).cmdLogout(); break;
+      case "providers": await (await import("./cli/providers.ts")).cmdProviders(sub); break;
       case "models": await (await import("./cli/models.ts")).cmdModels(); break;
       case "agents": await (await import("./cli/agents.ts")).cmdAgents(sub); break;
       case "envs": case "environments": await (await import("./cli/envs.ts")).cmdEnvs(sub); break;

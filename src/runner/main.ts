@@ -1,7 +1,7 @@
 import { pluginStore, pool, repos } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
-import { onInterrupt, popSteer, publish, redis } from "../infra/pubsub.ts";
+import { onInterrupt, onProvidersChanged, popSteer, publish, redis } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun } from "../infra/queue.ts";
 import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
 import { runSession, type AgentPlugins, type ChildSpawn, type RunDeps } from "../harness/run-turn.ts";
@@ -9,7 +9,7 @@ import { workspaceRoot } from "../sandbox/workspace.ts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir } from "node:fs/promises";
-import { createModelRegistry } from "../harness/models.ts";
+import { buildModelRegistry, createModelRegistry } from "../harness/models.ts";
 import { PluginHost } from "../plugins/client.ts";
 import { buildHostBundle } from "../plugins/bundle.ts";
 import { ensurePackages, loadContent } from "../plugins/installer.ts";
@@ -24,7 +24,16 @@ const REAP_INTERVAL_MS = 60_000;
 await migrate();
 
 /** Everything runSession needs, wired to infra + sandbox. Provider is chosen per session below. */
-const models = createModelRegistry();
+/** Model registry from the providers table; rebuilt when the API publishes providers:changed. */
+let models = createModelRegistry();
+async function reloadModels(): Promise<void> {
+  const rows = await repos.providers.list();
+  if (rows.length === 0) return; // not seeded yet: keep the built-in defaults
+  models = buildModelRegistry(rows);
+  console.log(`[models] ${rows.filter((r) => r.enabled).map((r) => `${r.id}(${r.models.length})`).join(", ")}`);
+}
+await reloadModels();
+const stopProvidersWatch = await onProvidersChanged(() => void reloadModels().catch((e) => console.error("[models] reload failed", e)));
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 /**
@@ -110,7 +119,7 @@ const children: ChildSpawn = {
 
 function makeDeps(_provider: SandboxProviderName): RunDeps {
   return {
-    models,
+    get models() { return models; },
     pluginsFor,
     pluginStore,
     sandboxFor: (name) => sandboxManager.bind(name),
@@ -186,6 +195,7 @@ try {
   await consumeRuns(handleJob, { signal: stopping.signal, concurrency: env.RUNNER_CONCURRENCY });
 } finally {
   clearInterval(reaper);
+  await stopProvidersWatch();
   await Promise.allSettled([pool.end(), redis.quit()]);
   console.log("[runner] stopped");
 }
