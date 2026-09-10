@@ -13,8 +13,8 @@ src/sandbox/    manager.ts (SandboxManager: policy — leases, affinity reuse, c
 src/plugins/    api.ts (plugin API + capabilities), host.ts (permission-restricted host process), client.ts
                 (runner side: spawn, tools, hooks, capability serving), protocol.ts, installer.ts, pi-compat.ts
 src/harness/    pi-session.ts (EXPERIMENTAL: pi-coding-agent AgentSession, see docs/PI_EXTENSIONS.md),
-                tools.ts (bash/read/write/edit AgentTools over ctx.sandbox()), fold.ts (events -> pi
-                AgentMessage[]), run-turn.ts (one session run: fold, pi-agent-core loop + plugin hooks, persist events,
+                tools.ts (bash/read/write/edit AgentTools over ctx.sandbox()), compaction.ts (pi summarizer + our cut point;
+                persisted as agent.thread_context_compacted), fold.ts (events -> pi AgentMessage[], compaction-aware), run-turn.ts (one session run: fold, pi-agent-core loop + plugin hooks, persist events,
                 steering/interrupt, capture+release), models.ts (pi-ai registry built from the providers table; runner reloads on providers:changed)
 src/api/        main.ts (hono server), routes/*.ts (providers, agents, environments, sessions, events, stream, sandboxes, models)
 src/runner/     main.ts (consume queue -> run-turn; reaper loop)

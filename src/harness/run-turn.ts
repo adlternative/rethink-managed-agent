@@ -32,6 +32,7 @@ import { PluginHost, type Capabilities } from "../plugins/client.ts";
 import type { HostBundle } from "../plugins/bundle.ts";
 import type { SessionInfo } from "../plugins/protocol.ts";
 import { foldEvents, toContentBlocks } from "./fold.ts";
+import { compactMessages, contextTokens, needsCompaction, settingsFromEnv } from "./compaction.ts";
 import { resolveModel } from "./models.ts";
 import { createTools, truncateOutput, type ToolContext } from "./tools.ts";
 
@@ -237,9 +238,35 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   let ownHost = false; // sandbox-hosted: started for this run, stopped with it
 
   try {
-    const { messages, lastSeq } = foldEvents(await deps.listEvents(sessionId));
-    consumedSeq = lastSeq;
+    const folded = foldEvents(await deps.listEvents(sessionId));
+    const { seqOf } = folded;
+    let messages = folded.messages;
+    let lastSummary = folded.summary;
+    consumedSeq = folded.lastSeq;
     const model = resolveModel(deps.models, session.agent.model);
+    const compaction = settingsFromEnv();
+
+    /** Compact `msgs` if over budget; persists the event and returns the new message list (or the same one). */
+    const maybeCompact = async (msgs: AgentMessage[]): Promise<AgentMessage[]> => {
+      if (!needsCompaction(msgs, model, compaction)) return msgs;
+      console.log(`[compaction ${sessionId}] ${contextTokens(msgs)} tokens > ${model.contextWindow} - ${compaction.reserveTokens}; compacting ${msgs.length} messages`);
+      const r = await compactMessages({ messages: msgs, model, streamFn: deps.models.streamSimple.bind(deps.models), settings: compaction, previousSummary: lastSummary, signal: abort.signal }).catch((e) => {
+        console.warn(`[compaction ${sessionId}] failed: ${e instanceof Error ? e.message : e}`);
+        return null;
+      });
+      if (!r) return msgs;
+      const firstKept = msgs[r.firstKeptIndex]!;
+      const firstKeptSeq = seqOf.get(firstKept);
+      if (firstKeptSeq === undefined) { console.warn(`[compaction ${sessionId}] first kept message has no seq; skipping`); return msgs; }
+      const [ev] = await deps.appendEvents(sessionId, [{ type: "agent.thread_context_compacted", summary: r.summary, first_kept_seq: firstKeptSeq, tokens_before: r.tokensBefore, tokens_after: r.tokensAfter }]);
+      await deps.publish({ type: "event", event: ev! });
+      seqOf.set(r.messages[0]!, ev!.seq);
+      lastSummary = r.summary;
+      console.log(`[compaction ${sessionId}] ${r.tokensBefore} -> ${r.tokensAfter} tokens, kept from seq ${firstKeptSeq}`);
+      return r.messages;
+    };
+    // History may already be over budget (long session resumed): compact before the first request.
+    messages = await maybeCompact(messages);
     const plugins = await deps.pluginsFor(session.agent);
     const builtinTools = createTools(session.agent.tools, ctx);
     if (plugins.manifests.length > 0) {
@@ -347,7 +374,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
           .filter((s) => s.seq > consumedSeq) // already in the folded log (stale entry from an earlier run)
           .map((s): UserMessage => {
             consumedSeq = Math.max(consumedSeq, s.seq);
-            return { role: "user", content: textBlocks(s.content), timestamp: Date.now() };
+            const m: UserMessage = { role: "user", content: textBlocks(s.content), timestamp: Date.now() };
+            seqOf.set(m, s.seq);
+            return m;
           }),
       beforeToolCall: async ({ toolCall, args }) => {
         const r = await host?.emit(info, { type: "tool_call", toolName: toolCall.name, toolCallId: toolCall.id, input: args });
@@ -358,7 +387,11 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         if (!r || (r.content === undefined && r.isError === undefined)) return undefined;
         return { content: r.content !== undefined ? [{ type: "text", text: r.content }] : undefined, isError: r.isError };
       },
-      prepareNextTurn: async ({ context: c }) => (host?.hooks.has("context") ? { context: { ...c, systemPrompt: await systemPromptFor(c.messages.length) } } : undefined),
+      prepareNextTurn: async ({ context: c }) => {
+        const compacted = await maybeCompact(c.messages);
+        const systemPrompt = host?.hooks.has("context") ? await systemPromptFor(compacted.length) : c.systemPrompt;
+        return compacted !== c.messages || systemPrompt !== c.systemPrompt ? { context: { ...c, messages: compacted, systemPrompt } } : undefined;
+      },
       shouldStopAfterTurn: async ({ toolResults }) => {
         turns++;
         await host?.emit(info, { type: "turn_end", turn: turns });
@@ -390,7 +423,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         case "message_end": {
           const m = ev.message;
           if (m.role === "assistant") {
-            await emit({ type: "agent.message", content: toContentBlocks(m), pi: m });
+            const [ev2] = await deps.appendEvents(sessionId, [{ type: "agent.message", content: toContentBlocks(m), pi: m }]);
+            seqOf.set(m, ev2!.seq);
+            await publishAll([ev2!]);
             // pi-ai reports "error" (not "aborted") when the signal was already aborted before the
             // request started — e.g. an interrupt that landed during the previous tool call.
             if (m.stopReason === "aborted" || (m.stopReason === "error" && abort.signal.aborted)) {
@@ -400,7 +435,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
               await emit({ type: "session.error", error: { type: "model_error", message: m.errorMessage ?? "unknown model error" } });
             }
           } else if (m.role === "toolResult") {
-            await emit({ type: "agent.tool_result", tool_use_id: m.toolCallId, content: textBlocks(m.content), is_error: m.isError, pi: m });
+            const [ev2] = await deps.appendEvents(sessionId, [{ type: "agent.tool_result", tool_use_id: m.toolCallId, content: textBlocks(m.content), is_error: m.isError, pi: m }]);
+            seqOf.set(m, ev2!.seq);
+            await publishAll([ev2!]);
           }
           break;
         }

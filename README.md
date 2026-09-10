@@ -163,6 +163,22 @@ src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
 
+## Context compaction
+
+Before every model request the runner estimates the context (last reported usage plus an estimate of
+what followed, pi's heuristics). Over `contextWindow - COMPACTION_RESERVE_TOKENS` it summarizes everything
+older than the last ~`COMPACTION_KEEP_RECENT_TOKENS` (pi's summarizer, chaining the previous summary), cutting
+only at turn or tool-step boundaries, and persists `agent.thread_context_compacted {summary, first_kept_seq}`.
+Folding honours it: older message events are replaced by the summary, so any runner resuming the session sees
+the compacted context. Defaults match pi (16384 / 20000); `COMPACTION_ENABLED=0` turns it off.
+
+## Reliability notes
+
+- **enqueue-after-commit**: the API commits `user.message` first and only then XADDs the run job. If it dies
+  in between (or Redis loses the entry), the runner's reconciler (every 60s) finds idle sessions whose newest
+  `user.message` is newer than their newest status event and older than 30s, and re-enqueues them. Messages
+  arriving while a run is active are covered by `finishRun`'s unconsumed-seq check.
+
 ## Sessions ↔ sandboxes (N:N)
 
 A session attaches one or more environments (`environments: [{key:"main", ...}, {key:"browser", ...}]`,

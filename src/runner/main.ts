@@ -3,7 +3,7 @@ import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, onProvidersChanged, popSteer, publish, redis } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun } from "../infra/queue.ts";
-import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
+import { claimRun, findStrandedSessions, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
 import { runSession, type AgentPlugins, type ChildSpawn, type RunDeps } from "../harness/run-turn.ts";
 import { workspaceRoot } from "../sandbox/workspace.ts";
 import { execFile } from "node:child_process";
@@ -178,8 +178,21 @@ async function reap(): Promise<void> {
   }
 }
 
+/** Reconcile the enqueue-after-commit gap: re-enqueue idle sessions whose newest user.message never got a run. */
+async function reconcile(): Promise<void> {
+  try {
+    for (const job of await findStrandedSessions(30_000)) {
+      console.warn(`[reconcile] ${job.session_id}: user.message seq=${job.trigger_seq} has no run; enqueueing`);
+      await enqueueRun(job);
+    }
+  } catch (e) {
+    console.error("[reconcile] failed", e);
+  }
+}
+
 const stopping = new AbortController();
-const reaper = setInterval(() => void reap(), REAP_INTERVAL_MS);
+const reaper = setInterval(() => { void reap(); void reconcile(); }, REAP_INTERVAL_MS);
+void reconcile();
 
 const shutdown = (sig: string) => {
   if (stopping.signal.aborted) return;

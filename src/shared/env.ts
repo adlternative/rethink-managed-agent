@@ -42,6 +42,10 @@ export const env = {
   EXPERIMENTAL_PI_PACKAGES: process.env.EXPERIMENTAL_PI_PACKAGES === "1",
   /** Runs a runner handles concurrently (sub-agent sessions need > 1). */
   RUNNER_CONCURRENCY: Number(process.env.RUNNER_CONCURRENCY ?? 4),
+  /** Context compaction (pi heuristics): compact when tokens > contextWindow - reserve; keep ~keepRecent tokens of recent turns. */
+  COMPACTION_ENABLED: process.env.COMPACTION_ENABLED !== "0",
+  COMPACTION_RESERVE_TOKENS: Number(process.env.COMPACTION_RESERVE_TOKENS ?? 16384),
+  COMPACTION_KEEP_RECENT_TOKENS: Number(process.env.COMPACTION_KEEP_RECENT_TOKENS ?? 20000),
   API_PORT: Number(process.env.API_PORT ?? 8080),
   MAX_TURNS: Number(process.env.MAX_TURNS ?? 50),
   /** Default and hard cap for a single bash tool call. */

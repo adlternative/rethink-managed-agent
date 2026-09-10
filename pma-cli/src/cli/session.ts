@@ -81,6 +81,7 @@ function summarize(e: SessionEvent): string {
     : e.type === "session.status_idle" ? p.stop_reason
     : e.type === "sandbox.acquired" ? `${p.provider} ${p.sandbox_id}${p.env ? ` [${p.env}]` : ""}${p.origin ? ` (${p.origin})` : ""}`
     : e.type === "workspace.captured" ? `${p.workspace_id ?? ""}${p.env ? ` [${p.env}]` : ""}`
+    : e.type === "agent.thread_context_compacted" ? `${p.tokens_before} -> ${p.tokens_after} tokens, kept from seq ${p.first_kept_seq}`
     : e.type === "session.thread_created" ? `${p.child_session_id} [${p.env}] ${p.task}`
     : e.type === "agent.thread_message_received" ? `${p.child_session_id} (${p.stop_reason}) ${textOf(p.content)}`
     : e.type === "session.error" ? `${p.error.type}: ${p.error.message}` : "";

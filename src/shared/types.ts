@@ -244,6 +244,8 @@ export type SessionEventPayload =
   | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName; env?: string; origin?: "created" | "reused" | "resumed" }
   | { type: "sandbox.released"; sandbox_id: SandboxId; env?: string }
   | { type: "workspace.captured"; ref: WorkspaceRef; workspace_id?: WorkspaceId; env?: string }
+  /** context was compacted: message events with seq < first_kept_seq are replaced by `summary` when folding */
+  | { type: "agent.thread_context_compacted"; summary: string; first_kept_seq: number; tokens_before: number; tokens_after: number }
   /** a sub-agent session was created for this session */
   | { type: "session.thread_created"; child_session_id: SessionId; env: string; task: string }
   /** a sub-agent session finished; its report (and patch, if any) for the parent */

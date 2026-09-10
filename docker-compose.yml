@@ -39,6 +39,8 @@ services:
       # (the host daemon resolves bind mounts, so container paths would silently mount nothing).
       SANDBOX_HOST_ROOT: ${SANDBOX_HOST_ROOT:-${PWD}/data/sandboxes}
       SANDBOX_IDLE_TTL_MS: "600000"
+      COMPACTION_RESERVE_TOKENS: ${COMPACTION_RESERVE_TOKENS:-16384}
+      COMPACTION_KEEP_RECENT_TOKENS: ${COMPACTION_KEEP_RECENT_TOKENS:-20000}
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ${SANDBOX_HOST_ROOT:-./data/sandboxes}:/data/sandboxes   # host bind (not a named volume) so sibling containers can mount workspaces

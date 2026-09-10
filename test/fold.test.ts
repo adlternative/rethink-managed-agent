@@ -74,7 +74,7 @@ describe("foldEvents", () => {
   });
 
   it("returns lastSeq 0 for an empty log", () => {
-    expect(foldEvents([])).toEqual({ messages: [], lastSeq: 0 });
+    expect(foldEvents([])).toMatchObject({ messages: [], lastSeq: 0, summary: undefined });
   });
 });
 
@@ -90,5 +90,27 @@ describe("toContentBlocks", () => {
       { type: "text", text: "a" },
       { type: "text", text: "b" },
     ]);
+  });
+});
+
+describe("foldEvents with compaction", () => {
+  it("replaces everything before first_kept_seq with the summary and keeps the tail", async () => {
+    const { foldEvents } = await import("../src/harness/fold.ts");
+    const t = "2026-01-01T00:00:00Z";
+    const user = (seq: number, text: string) => ({ id: `e${seq}`, session_id: "s", seq, type: "user.message", payload: { type: "user.message", content: [{ type: "text", text }] }, created_at: t }) as any;
+    const agent = (seq: number, text: string) => ({ id: `e${seq}`, session_id: "s", seq, type: "agent.message", payload: { type: "agent.message", content: [{ type: "text", text }], pi: { role: "assistant", content: [{ type: "text", text }], timestamp: 1, stopReason: "stop" } }, created_at: t }) as any;
+    const events = [
+      user(1, "first question"), agent(2, "first answer"),
+      user(3, "second question"), agent(4, "second answer"),
+      { id: "e5", session_id: "s", seq: 5, type: "agent.thread_context_compacted", payload: { type: "agent.thread_context_compacted", summary: "SUMMARY OF 1-2", first_kept_seq: 3, tokens_before: 100, tokens_after: 40 }, created_at: t },
+      user(6, "third question"), agent(7, "third answer"),
+    ];
+    const { messages, summary, seqOf } = foldEvents(events);
+    expect(summary).toBe("SUMMARY OF 1-2");
+    const texts = messages.map((m: any) => (typeof m.content === "string" ? m.content : m.content[0].text));
+    expect(texts[0]).toContain("SUMMARY OF 1-2");
+    expect(texts.slice(1)).toEqual(["second question", "second answer", "third question", "third answer"]);
+    expect(seqOf.get(messages[0]!)).toBe(5);
+    expect(seqOf.get(messages[1]!)).toBe(3);
   });
 });

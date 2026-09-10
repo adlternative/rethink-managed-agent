@@ -47,3 +47,21 @@ export async function finishRun(
 export async function heartbeat(sessionId: string): Promise<void> {
   await pool.query(`UPDATE sessions SET updated_at=now() WHERE id=$1 AND status='running'`, [sessionId]);
 }
+
+/**
+ * Enqueue-after-commit gap: the API persists user.message in a tx and only then XADDs the run job.
+ * If it dies in between (or Redis drops the entry), the session sits idle with an unanswered
+ * message. Find such sessions: idle, newest user.message newer than the newest status event, and
+ * older than `graceMs` so an in-flight enqueue is not double-fired.
+ */
+export async function findStrandedSessions(graceMs: number): Promise<{ session_id: string; trigger_seq: number }[]> {
+  const r = await pool.query<{ session_id: string; trigger_seq: string }>(
+    `SELECT s.id AS session_id, u.seq AS trigger_seq
+     FROM sessions s
+     JOIN LATERAL (SELECT seq, created_at FROM events WHERE session_id = s.id AND type = 'user.message' ORDER BY seq DESC LIMIT 1) u ON true
+     LEFT JOIN LATERAL (SELECT seq FROM events WHERE session_id = s.id AND type IN ('session.status_running','session.status_idle','session.status_terminated') ORDER BY seq DESC LIMIT 1) st ON true
+     WHERE s.status = 'idle' AND (st.seq IS NULL OR u.seq > st.seq) AND u.created_at < now() - ($1::bigint * interval '1 millisecond')`,
+    [graceMs],
+  );
+  return r.rows.map((x) => ({ session_id: x.session_id, trigger_seq: Number(x.trigger_seq) }));
+}
