@@ -48,7 +48,7 @@ Skills and prompt templates are listed in the system prompt and loaded on demand
 ## Isolation
 
 Plugins load in a **plugin host** process per agent (`src/plugins/host.ts`), started by the runner
-with Node's permission model (`--permission --allow-fs-read=<package dirs, repo>`): no fs writes, no
+with Node's permission model (`--permission --allow-fs-read=` only `src/plugins`, `node_modules/typebox` and the package dirs — never the repo root, so `.env` and the rest of `src/` are invisible): no fs writes, no
 child processes, no workers, no access to the runner's env or DB. Node 22's permission model does not
 cover sockets, so the host additionally locks the network down before the first plugin import
 (`src/plugins/lockdown.ts`): the synchronous module hooks refuse to resolve `net`, `tls`, `http`,

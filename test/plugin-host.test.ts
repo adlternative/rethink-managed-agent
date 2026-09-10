@@ -73,6 +73,7 @@ describe("plugin host", () => {
     expect(r.content[0]!.text).toMatch(/fetch:blocked/);
     expect(r.content[0]!.text).toMatch(/http:blocked/);
     expect(r.content[0]!.text).toMatch(/net:blocked/);
+    expect(r.content[0]!.text).toMatch(/readrepo:ERR_ACCESS_DENIED/); // repo root is not readable, only src/plugins + typebox + package dirs
     escape.stop();
   }, 30_000);
 

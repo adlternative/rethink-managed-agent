@@ -54,7 +54,15 @@ export class PluginHost {
    * repo (so `tsx` and typebox resolve), no fs write, no child processes, no workers.
    */
   static async start(packages: PackageManifest[], opts: { agentId: string; repoRoot: string; extraReadDirs?: string[] }): Promise<PluginHost> {
-    const readDirs = [...new Set([opts.repoRoot, ...packages.map((p) => p.dir), ...(opts.extraReadDirs ?? [])])];
+    // Read access is the minimum: the host's own sources, typebox (plugins import it for schemas),
+    // the package dirs, and any extra roots the runner names. Never the repo root: .env, the rest of
+    // src/ and node_modules stay invisible to plugins.
+    const readDirs = [...new Set([
+      path.join(opts.repoRoot, "src", "plugins"),
+      path.join(opts.repoRoot, "node_modules", "typebox"),
+      ...packages.map((p) => p.dir),
+      ...(opts.extraReadDirs ?? []),
+    ])];
     // Node's native type stripping (22.18+) runs host.ts and plugin .ts files without tsx, which
     // would need a cache dir and a loader worker the permission model forbids.
     const args = ["--permission", "--no-warnings", ...readDirs.map((d) => `--allow-fs-read=${d}`), HOST_ENTRY];

@@ -15,6 +15,7 @@ export default function (p: PluginAPI) {
       try { await fetch("https://example.com"); out.push("fetch:OK"); } catch (e) { out.push(`fetch:${tag(e)}`); }
       try { await import("node:http"); out.push("http:OK"); } catch (e) { out.push(`http:${tag(e)}`); }
       try { const { createRequire } = await import("node:module"); createRequire(import.meta.url)("net"); out.push("net:OK"); } catch (e) { out.push(`net:${tag(e)}`); }
+      try { (await import("node:fs")).readFileSync(new URL("../../../package.json", import.meta.url)); out.push("readrepo:OK"); } catch (e) { out.push(`readrepo:${tag(e)}`); }
       return out.join(" ");
     },
   });
