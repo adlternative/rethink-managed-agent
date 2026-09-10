@@ -22,6 +22,14 @@ const caps: Capabilities = {
   fetch: async (url) => ({ status: 200, headers: {}, body: `<html><body><h1>Hello ${url}</h1><script>x()</script></body></html>` }),
   log: (args) => calls.push(`log:${args.join(" ")}`),
   sessionNote: async (plugin, text) => { calls.push(`note:${plugin}:${text}`); },
+  agentsSpawn: async (task, o) => { calls.push(`spawn:${o.role ?? "-"}:${task.slice(0, 20)}`); return { sessionId: `sess_c${calls.length}`, role: o.role as string | undefined }; },
+  agentsWait: async (child) => ({ sessionId: child, status: "idle", finished: true, stopReason: "end_turn", lastReport: `report from ${child}`, updates: [] }),
+  agentsStatus: async (child) => ({ sessionId: child, status: "idle", finished: true, updates: [] }),
+  agentsSteer: async (child, text) => { calls.push(`steer:${child}:${text}`); },
+  agentsReply: async () => {},
+  agentsStop: async () => {},
+  agentsList: async () => [],
+  agentsPatch: async () => null,
   sessionSend: async (text) => { calls.push(`send:${text}`); },
   sessionInterrupt: async () => { calls.push("interrupt"); },
 };
@@ -33,6 +41,8 @@ beforeAll(async () => {
       pkg(path.join(ROOT, "plugins/fork")),
       pkg(path.join(ROOT, "plugins/safety-net")),
       pkg(path.join(ROOT, "plugins/web-fetch"), { skills: ["skills"] }),
+      pkg(path.join(ROOT, "plugins/team")),
+      pkg(path.join(ROOT, "plugins/workflow")),
       pkg(path.join(ROOT, "test/fixtures/pi-ext-demo"), { kind: "pi" }),
     ],
     { agentId: "agent_t", repoRoot: ROOT },
@@ -43,8 +53,8 @@ afterAll(() => host?.stop());
 
 describe("plugin host", () => {
   it("loads pma and pi packages and reports tools/commands/hooks", () => {
-    expect(host.tools.map((t) => t.name).sort()).toEqual(["demo_secret", "fork", "goal_progress", "set_goal", "web_fetch"]);
-    expect(host.commands.map((c) => c.name)).toEqual(["goal"]);
+    expect(host.tools.map((t) => t.name).sort()).toEqual(["agent_patch", "demo_secret", "fork", "goal_progress", "list_agents", "message_agent", "run_workflow", "set_goal", "spawn_agent", "wait_agents", "web_fetch"]);
+    expect(host.commands.map((c) => c.name).sort()).toEqual(["goal", "team"]);
     expect([...host.hooks].sort()).toEqual(["before_agent_start", "context", "session_end", "tool_call"]);
     expect(host.warnings).toEqual([]);
   });
@@ -79,6 +89,21 @@ describe("plugin host", () => {
     expect(await host.emit(session, { type: "tool_call", toolName: "bash", toolCallId: "t", input: { command: "rm -rf / --no-preserve-root" } })).toMatchObject({ block: true });
     expect(await host.emit(session, { type: "tool_call", toolName: "bash", toolCallId: "t", input: { command: "echo BLOCKME" } })).toMatchObject({ block: true });
     expect(await host.emit(session, { type: "tool_call", toolName: "bash", toolCallId: "t", input: { command: "ls" } })).toBeNull();
+  });
+
+  it("team + workflow plugins orchestrate children through ctx.agents", async () => {
+    const tools = Object.fromEntries(host.agentTools(session).map((t) => [t.name, t]));
+    expect((await tools.spawn_agent!.execute("1", { role: "explorer", task: "look around" })).content[0]!.text).toMatch(/spawned explorer sess_c/);
+    expect(calls.some((c) => c.startsWith("spawn:explorer:"))).toBe(true);
+    const wf = await tools.run_workflow!.execute("2", { script: `export const meta = { name: "t" }
+      phase("Review")
+      const r = await parallel([() => agent("a", { role: "reviewer" }), () => agent("b", { role: "reviewer" })])
+      log("two done")
+      return r.map((x) => String(x).slice(0, 11))` });
+    expect(wf.content[0]!.text).toContain("report from");
+    expect(wf.content[0]!.text).toContain("── Review ──");
+    expect(wf.content[0]!.text).toContain("two done");
+    await expect(tools.run_workflow!.execute("3", { script: `return Date.now()` })).rejects.toThrow(/Date.now\(\) is not allowed/);
   });
 
   it("host cannot touch the filesystem, spawn processes, or reach the network", async () => {

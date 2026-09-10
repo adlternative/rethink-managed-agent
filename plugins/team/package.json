@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-team", "version": "0.1.0", "type": "module", "description": "Agent teams: named roles (system prompt, model, tools) and tools to spawn, steer, reply to and join child agents in parallel.", "pma": { "plugins": ["./index.ts"] } }

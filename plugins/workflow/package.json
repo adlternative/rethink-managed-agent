@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-workflow", "version": "0.1.0", "type": "module", "description": "Deterministic multi-agent orchestration: run a JS script with agent(), parallel(), pipeline(), phase(), log() over child sessions (same shape as pi-subagents / Claude Code Workflow scripts).", "pma": { "plugins": ["./index.ts"] } }

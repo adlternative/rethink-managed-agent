@@ -87,34 +87,62 @@ async function forkWorkspace(parentWorkspaceId: string) {
 }
 
 const children: ChildSpawn = {
-  async spawn(parent, envRow, task, system) {
-    const ws = await forkWorkspace(envRow.workspace_id);
+  async spawn(parent, envRow, task, opts = {}) {
+    const ws = opts.shareWorkspace ? await repos.workspaces.get(envRow.workspace_id) : await forkWorkspace(envRow.workspace_id);
+    if (!ws) throw new Error(`workspace ${envRow.workspace_id} not found`);
+    const agent = { ...parent.agent };
+    if (opts.system) agent.system = opts.system;
+    if (opts.model) agent.model = opts.model;
+    if (opts.tools) agent.tools = agent.tools.filter((t) => opts.tools!.includes(t));
     const child = await repos.sessions.create({
       agent_id: parent.agent_id,
       environment_id: envRow.environment_id,
       workspace_id: ws.id,
-      agent: system ? { ...parent.agent, system } : parent.agent,
+      agent,
       environments: [{ key: "main", environment_id: envRow.environment_id, workspace_id: ws.id }],
       parent_id: parent.id,
       memory_stores: parent.memory_stores ?? [],
     });
-    const [ev] = await appendEvents(child.id, [{ type: "user.message", content: [{ type: "text", text: task }] }]);
+    const brief = [opts.role ? `You are the "${opts.role}" agent${opts.name ? ` (${opts.name})` : ""} working for a parent agent.` : "You are a sub-agent working for a parent agent.", "Use report_to_parent for progress, questions, and your final report.", "", task].join("\n");
+    const [ev] = await appendEvents(child.id, [{ type: "user.message", content: [{ type: "text", text: brief }] }]);
     await enqueueRun({ session_id: child.id, trigger_seq: ev!.seq });
     return child;
   },
-  async wait(childId, signal) {
+  async wait(childId, signal, opts = {}) {
+    const deadline = opts.timeoutMs ? Date.now() + opts.timeoutMs : Infinity;
     for (;;) {
       if (signal.aborted) throw new Error("parent run aborted while waiting for child session");
+      if (Date.now() > deadline) throw new Error(`timed out waiting for child ${childId}`);
       const s = await repos.sessions.get(childId);
       if (!s) throw new Error(`child session ${childId} disappeared`);
-      // idle *after* having run: the child starts idle before its job is claimed, so wait for status_running first
       if (s.status === "terminated") return s;
       if (s.status === "idle") {
+        // idle *after* having run (a child starts idle before its job is claimed)
         const evs = await listAllEvents(childId);
         if (evs.some((e) => e.type === "session.status_idle")) return s;
       }
+      if (opts.untilQuestion) {
+        const evs = await listAllEvents(childId);
+        const q = [...evs].reverse().find((e) => e.type === "agent.thread_message_sent" && e.payload.type === "agent.thread_message_sent" && e.payload.kind === "question");
+        if (q && !evs.some((e) => e.seq > q.seq && e.type === "user.message")) return s;
+      }
       await new Promise((r) => setTimeout(r, 2000));
     }
+  },
+  async list(parentId) {
+    return (await repos.sessions.list()).filter((s) => s.parent_id === parentId);
+  },
+  async message(childId, text) {
+    const s = await repos.sessions.get(childId);
+    if (!s) throw new Error(`child session ${childId} not found`);
+    const [ev] = await appendEvents(childId, [{ type: "user.message", content: [{ type: "text", text }] }]);
+    if (s.status === "running") await pushSteer(childId, { seq: ev!.seq, content: ev!.payload.type === "user.message" ? ev!.payload.content : [] });
+    else if (s.status === "idle") await enqueueRun({ session_id: childId, trigger_seq: ev!.seq });
+  },
+  async stop(childId) {
+    const { publishInterrupt } = await import("../infra/pubsub.ts");
+    await publishInterrupt(childId);
+    await appendEvents(childId, [{ type: "session.status_terminated", reason: "stopped by parent" }], { status: "terminated" });
   },
 };
 

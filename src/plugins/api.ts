@@ -104,6 +104,42 @@ export interface AgentCapability {
    */
   run(task: string, opts?: { system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }): Promise<string | { report: string; patch?: string; sessionId: string }>;
 }
+/** Multi-agent: child sessions as first-class handles (parallel, steerable, joinable). */
+export interface ChildHandle { sessionId: string; name?: string; role?: string }
+export interface ChildStatus { sessionId: string; status: "idle" | "running" | "terminated"; finished: boolean; stopReason?: string; lastReport?: string; updates: string[]; pendingQuestion?: { id: string; text: string } }
+export interface SpawnOptions {
+  /** system prompt for the child (else the parent's) */
+  system?: string;
+  /** model override "provider/id" */
+  model?: string;
+  /** builtin tool subset */
+  tools?: string[];
+  /** attached environment key whose workspace is forked (default main) */
+  env?: string;
+  /** share the parent's workspace instead of forking (no parallel writes: the sandbox lease is exclusive) */
+  shareWorkspace?: boolean;
+  /** free-form label; shows up in events and in `agents.list()` */
+  name?: string;
+  role?: string;
+  maxTurns?: number;
+}
+export interface AgentsCapability {
+  /** Start a child session (does not wait). */
+  spawn(task: string, opts?: SpawnOptions): Promise<ChildHandle>;
+  /** Wait until the child is idle/terminated (or a question is pending when `untilQuestion`); returns its status. */
+  wait(child: ChildHandle | string, opts?: { timeoutMs?: number; untilQuestion?: boolean }): Promise<ChildStatus>;
+  status(child: ChildHandle | string): Promise<ChildStatus>;
+  /** Send a message to a running child (steer) or an idle one (starts its next turn). */
+  steer(child: ChildHandle | string, text: string): Promise<void>;
+  /** Answer a child's pending question. */
+  reply(child: ChildHandle | string, questionId: string, text: string): Promise<void>;
+  stop(child: ChildHandle | string): Promise<void>;
+  /** Children of this session with their status. */
+  list(): Promise<ChildStatus[]>;
+  /** The git patch a finished child produced on its forked workspace, if any. */
+  patch(child: ChildHandle | string): Promise<string | undefined>;
+}
+
 export interface FetchCapability {
   /** HTTP via the runner; the agent's allowlist (env PLUGIN_FETCH_ALLOW) is enforced there. */
   (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
@@ -129,6 +165,7 @@ export interface PluginContext {
   store: StoreCapability;
   model: ModelCapability;
   agent: AgentCapability;
+  agents: AgentsCapability;
   fetch: FetchCapability;
   log(...args: unknown[]): void;
 }

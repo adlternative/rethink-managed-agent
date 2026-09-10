@@ -339,9 +339,14 @@ export type SessionEventPayload =
   /** a note written by a plugin for the user (not part of the model context) */
   | { type: "plugin.message"; plugin: string; content: ContentBlock[] }
   /** a sub-agent session was created for this session */
-  | { type: "session.thread_created"; child_session_id: SessionId; env: string; task: string }
-  /** a sub-agent session finished; its report (and patch, if any) for the parent */
-  | { type: "agent.thread_message_received"; child_session_id: SessionId; content: ContentBlock[]; stop_reason: StopReason; patch?: string };
+  | { type: "session.thread_created"; child_session_id: SessionId; env: string; task: string; role?: string; name?: string }
+  /**
+   * On the parent: a message from a child arrived (its final report, a progress update, or a
+   * question that blocks the child until the parent replies). On a child: a message from the parent.
+   */
+  | { type: "agent.thread_message_received"; child_session_id?: SessionId; from_session_id: SessionId; kind: "report" | "update" | "question" | "reply" | "steer"; content: ContentBlock[]; stop_reason?: StopReason; patch?: string; question_id?: string }
+  /** the sending side of the above */
+  | { type: "agent.thread_message_sent"; to_session_id: SessionId; kind: "report" | "update" | "question" | "reply" | "steer"; content: ContentBlock[]; question_id?: string };
 
 export interface SessionEvent {
   id: string; // "evt_xxx"

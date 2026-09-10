@@ -24,6 +24,14 @@ export interface Capabilities {
   agentRun(task: string, opts: { system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }): Promise<string | { report: string; patch?: string; sessionId: string }>;
   fetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
   log(args: unknown[]): void;
+  agentsSpawn(task: string, opts: Record<string, unknown>): Promise<{ sessionId: string; name?: string; role?: string }>;
+  agentsWait(child: string, opts: { timeoutMs?: number; untilQuestion?: boolean }): Promise<unknown>;
+  agentsStatus(child: string): Promise<unknown>;
+  agentsSteer(child: string, text: string): Promise<void>;
+  agentsReply(child: string, questionId: string, text: string): Promise<void>;
+  agentsStop(child: string): Promise<void>;
+  agentsList(): Promise<unknown>;
+  agentsPatch(child: string): Promise<string | null>;
   sessionNote(plugin: string, text: string): Promise<void>;
   sessionSend(text: string): Promise<void>;
   sessionInterrupt(): Promise<void>;
@@ -154,6 +162,14 @@ export class PluginHost {
       case "agent.run": { const p = params as RunnerMethods["agent.run"]["params"]; return caps.agentRun(p.task, { system: p.system, maxTurns: p.maxTurns, tools: p.tools, isolated: p.isolated, env: p.env }); }
       case "fetch": { const p = params as RunnerMethods["fetch"]["params"]; return caps.fetch(p.url, { method: p.method, headers: p.headers, body: p.body }); }
       case "log": caps.log((params as RunnerMethods["log"]["params"]).args); return null;
+      case "agents.spawn": { const p = params as RunnerMethods["agents.spawn"]["params"]; return caps.agentsSpawn(p.task, p.opts ?? {}); }
+      case "agents.wait": { const p = params as RunnerMethods["agents.wait"]["params"]; return caps.agentsWait(p.child, { timeoutMs: p.timeoutMs, untilQuestion: p.untilQuestion }); }
+      case "agents.status": return caps.agentsStatus((params as RunnerMethods["agents.status"]["params"]).child);
+      case "agents.steer": { const p = params as RunnerMethods["agents.steer"]["params"]; await caps.agentsSteer(p.child, p.text); return null; }
+      case "agents.reply": { const p = params as RunnerMethods["agents.reply"]["params"]; await caps.agentsReply(p.child, p.questionId, p.text); return null; }
+      case "agents.stop": await caps.agentsStop((params as RunnerMethods["agents.stop"]["params"]).child); return null;
+      case "agents.list": return caps.agentsList();
+      case "agents.patch": return caps.agentsPatch((params as RunnerMethods["agents.patch"]["params"]).child);
       case "session.note": { const p = params as RunnerMethods["session.note"]["params"]; await caps.sessionNote(p.plugin, p.text); return null; }
       case "session.send": await caps.sessionSend((params as RunnerMethods["session.send"]["params"]).text); return null;
       case "session.interrupt": await caps.sessionInterrupt(); return null;

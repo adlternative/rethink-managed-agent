@@ -68,6 +68,9 @@ model. The handler's `reply` is persisted as `plugin.message` (shown to the user
 | `ctx.model.complete(prompt, {system, maxTokens})` | one-shot completion with the session's model | runner |
 | `ctx.agent.run(task, {system, maxTurns, tools})` | a sub-agent loop with the builtin tools in the same sandbox; returns its final text | runner + sandbox |
 | `ctx.agent.run(task, {isolated: true, env?})` | a real child session on a fork of the workspace with its own sandbox (runs on any runner slot); returns `{report, patch?, sessionId}` and records thread events on the parent | runner + child sandbox |
+| `ctx.agents.spawn(task, {role, name, system, model, tools, env, shareWorkspace, maxTurns})` | start a child session and return a handle immediately (parallelism) | runner |
+| `ctx.agents.wait(h, {timeoutMs, untilQuestion})` · `status(h)` · `list()` | join / inspect children: `{finished, stopReason, lastReport, updates[], pendingQuestion?}` | runner |
+| `ctx.agents.steer(h, text)` · `reply(h, questionId, text)` · `stop(h)` · `patch(h)` | talk to a child, answer its question, stop it, fetch its git patch | runner |
 | `ctx.sandbox.*(…, {env})`, `ctx.sandbox.envs()` | target one of the session's attached environments | sandbox |
 | `ctx.fetch(url, init)` | HTTP through the runner, host allowlist `PLUGIN_FETCH_ALLOW` (default `*`) | runner |
 | `ctx.log(...)` | runner log | runner |
@@ -128,6 +131,8 @@ Hooks and tools are wired into the pi-agent-core loop in `src/harness/run-turn.t
 | `fork` | `fork` tool: delegate a standalone brief to a sub-agent (`ctx.agent.run`), optionally read-only |
 | `safety-net` | `tool_call` hook blocking `rm -rf /`, force push, hard reset, `DROP TABLE`, disk wipes |
 | `web-fetch` | `web_fetch` tool over `ctx.fetch` plus a `web-research` skill |
+| `team` | agent teams: roles (`explorer`, `planner`, `worker`, `reviewer`, custom via `/team set`), tools `spawn_agent` / `wait_agents` / `message_agent` / `list_agents` / `agent_patch`; children run in parallel on forked workspaces and talk back with `report_to_parent` |
+| `workflow` | `run_workflow` tool: a deterministic JS script with `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `args` (the pi-subagents / Claude Code `Workflow` shape) over child sessions; `Date.now` / `Math.random` throw |
 | `outcome` | Managed-Agents-style outcomes: `/outcome <goal> \| rubric: … \| max: N`; at `session_end` a read-only sub-agent gathers evidence, the model judges it, and `needs_revision` feedback is sent back as a new turn until satisfied or the cap |
 | `webhook` | `/webhook set <url> [secret]`; POSTs `session.started` / `session.ended` / `session.error` through `ctx.fetch` with an HMAC-SHA256 `x-pma-signature` |
 
@@ -152,3 +157,13 @@ and `ctx.session.send`. Scheduled runs are not: plugins only live inside a run, 
 process that exists between runs. Today that is any external scheduler calling
 `pma sessions create --agent … --env … --message …` (or the HTTP API); a `/v1/schedules` table plus a
 runner tick is the ~100-line core addition if platform-managed schedules are ever wanted.
+
+## Multi-agent model
+
+Children are ordinary sessions (`parent_id` set) on a **fork** of the parent's workspace, run by any runner
+slot, so they are parallel by construction and never write the same files. A child gets the builtin
+`report_to_parent {kind: update | report | question}` tool: updates and reports are recorded as
+`agent.thread_message_sent` (child) / visible through `ctx.agents.status` (parent); a `question` ends the
+child's turn and the parent's `reply` arrives as the child's next user message (Managed-Agents thread
+semantics, pi-subagents "intercom"). Nesting is allowed (a child can spawn children); depth is bounded only
+by `MAX_TURNS` and runner concurrency, so keep fleets small or use `run_workflow` with `max_agents`.

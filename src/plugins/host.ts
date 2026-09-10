@@ -95,6 +95,16 @@ function makeContext(session: SessionInfo, plugin = "plugin"): PluginContext {
     },
     model: { complete: (prompt, opts) => call("model.complete", { prompt, ...opts }) },
     agent: { run: (task, opts) => call("agent.run", { task, ...opts }) },
+    agents: {
+      spawn: (task, opts) => call("agents.spawn", { task, opts }),
+      wait: (child, opts) => call("agents.wait", { child: typeof child === "string" ? child : child.sessionId, ...opts }) as Promise<never>,
+      status: (child) => call("agents.status", { child: typeof child === "string" ? child : child.sessionId }) as Promise<never>,
+      steer: (child, text) => call("agents.steer", { child: typeof child === "string" ? child : child.sessionId, text }).then(() => undefined),
+      reply: (child, questionId, text) => call("agents.reply", { child: typeof child === "string" ? child : child.sessionId, questionId, text }).then(() => undefined),
+      stop: (child) => call("agents.stop", { child: typeof child === "string" ? child : child.sessionId }).then(() => undefined),
+      list: () => call("agents.list", {}) as Promise<never>,
+      patch: (child) => call<string | null>("agents.patch", { child: typeof child === "string" ? child : child.sessionId }).then((r) => r ?? undefined),
+    },
     fetch: (url, init) => call("fetch", { url, ...init }),
     log: (...args) => void call("log", { args }).catch(() => {}),
   };

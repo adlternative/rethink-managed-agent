@@ -62,12 +62,19 @@ export interface AgentPlugins {
 }
 
 /** Everything runSession needs from the outside world; no DB/Redis code lives here. */
-/** A child session created for `ctx.agent.run({ isolated: true })`. */
+/** Child sessions (sub-agents) as seen by the harness. Implemented by the runner on top of the DB + queue. */
+export interface ChildSpawnOptions { system?: string; model?: { provider: string; id: string }; tools?: string[]; shareWorkspace?: boolean; name?: string; role?: string; maxTurns?: number }
 export interface ChildSpawn {
-  /** Fork the env's workspace, create the child session (parent_id set), post the task, enqueue it. */
-  spawn(parent: SessionResource, env: SessionEnvironment, task: string, system?: string): Promise<SessionResource>;
+  /** Fork the env's workspace (or share it), create the child session (parent_id set), post the task, enqueue it. */
+  spawn(parent: SessionResource, env: SessionEnvironment, task: string, opts?: ChildSpawnOptions): Promise<SessionResource>;
   /** Resolve when the child is idle/terminated (polls); rejects on abort. */
-  wait(childId: SessionId, signal: AbortSignal): Promise<SessionResource>;
+  wait(childId: SessionId, signal: AbortSignal, opts?: { timeoutMs?: number; untilQuestion?: boolean }): Promise<SessionResource>;
+  /** Children of a session. */
+  list(parentId: SessionId): Promise<SessionResource[]>;
+  /** Post a user-role message to a child (steer if running, else starts its next turn). */
+  message(childId: SessionId, text: string): Promise<void>;
+  /** Interrupt + archive a child. */
+  stop(childId: SessionId): Promise<void>;
 }
 
 export interface RunDeps {
@@ -144,6 +151,27 @@ export function redactRef(ref: WorkspaceRef): WorkspaceRef {
   } catch {
     return ref;
   }
+}
+
+/**
+ * Child sessions get `report_to_parent`: progress updates, a final report, or a question that ends
+ * the child's turn until the parent replies (the reply arrives as the child's next user message).
+ */
+function reportToParentTool(parentId: SessionId, emit: (p: SessionEventPayload) => Promise<void>, endTurn: () => void): AgentTool {
+  return {
+    name: "report_to_parent",
+    label: "report_to_parent",
+    description: "Send a message to the parent agent that delegated this task. kind=update: progress note (continue working). kind=report: your final result (then stop). kind=question: you are blocked on a decision; the turn ends and the parent's answer arrives as your next message.",
+    parameters: Type.Object({ kind: Type.Union([Type.Literal("update"), Type.Literal("report"), Type.Literal("question")]), text: Type.String() }),
+    executionMode: "sequential",
+    execute: async (_id, params) => {
+      const { kind, text } = params as { kind: "update" | "report" | "question"; text: string };
+      const question_id = kind === "question" ? Math.random().toString(36).slice(2, 10) : undefined;
+      await emit({ type: "agent.thread_message_sent", to_session_id: parentId, kind, content: [{ type: "text", text }], question_id });
+      if (kind === "question") { setTimeout(endTurn, 50); return { content: [{ type: "text", text: `question ${question_id} sent; this turn ends here — the parent's reply will arrive as your next message.` }], details: {} }; }
+      return { content: [{ type: "text", text: kind === "report" ? "report delivered; you may stop now." : "update delivered." }], details: {} };
+    },
+  };
 }
 
 /** Skills/prompt templates are listed in the system prompt and fetched on demand with the `skill` tool. */
@@ -297,6 +325,29 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     messages = await maybeCompact(messages);
     const plugins = await deps.pluginsFor(session.agent);
     const builtinTools = createTools(session.agent.tools, ctx);
+
+    /** Fold a child's event log into a status: finished?, last report, progress updates, pending question. */
+    const childStatus = async (childId: SessionId) => {
+      const c = await deps.getSession(childId);
+      if (!c) throw new Error(`child session ${childId} not found`);
+      const evs = await deps.listEvents(childId);
+      let lastReport: string | undefined; const updates: string[] = []; let pendingQuestion: { id: string; text: string } | undefined; let stopReason: string | undefined; let ran = false;
+      for (const ev of evs) {
+        const p = ev.payload;
+        if (p.type === "session.status_running") ran = true;
+        if (p.type === "session.status_idle") stopReason = p.stop_reason;
+        if (p.type === "agent.thread_message_sent" && p.to_session_id === sessionId) {
+          const text = blocksText(p.content);
+          if (p.kind === "report") lastReport = text;
+          else if (p.kind === "update") updates.push(text);
+          else if (p.kind === "question") pendingQuestion = { id: p.question_id ?? "", text };
+        }
+        if (p.type === "user.message" && pendingQuestion && blocksText(p.content).startsWith(`[reply to question ${pendingQuestion.id}]`)) pendingQuestion = undefined;
+        if (p.type === "agent.message" && !lastReport) { const t = blocksText(p.content); if (t) lastReport = t; }
+      }
+      const finished = c.status === "terminated" || (c.status === "idle" && ran);
+      return { sessionId: childId, status: c.status, finished, stopReason, lastReport, updates, pendingQuestion };
+    };
     if (plugins.manifests.length > 0) {
       if (environment.plugin_host === "sandbox" && environment.provider !== "local") {
         // Plugins live in the sandbox: lease it now (the host needs a process to run in).
@@ -349,7 +400,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
           // A real child session on a forked workspace with its own sandbox; runs on any runner slot.
           const e = envs.get(opts.env ?? "main");
           if (!e) throw new Error(`no environment ${opts.env} attached`);
-          const child = await deps.children.spawn(session, { key: e.key, environment_id: e.environment.id, workspace_id: e.workspace.id }, task, opts.system);
+          const child = await deps.children.spawn(session, { key: e.key, environment_id: e.environment.id, workspace_id: e.workspace.id }, task, { system: opts.system, tools: opts.tools, maxTurns: opts.maxTurns });
           await emit({ type: "session.thread_created", child_session_id: child.id, env: e.key, task });
           const done = await deps.children.wait(child.id, abort.signal);
           const childEvents = await deps.listEvents(child.id);
@@ -359,7 +410,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
           const stop: StopReason = idle && idle.payload.type === "session.status_idle" ? idle.payload.stop_reason : done.status === "terminated" ? "error" : "end_turn";
           const childWs = await deps.getWorkspace(child.workspace_id);
           const patch = childWs?.ref.kind === "git" ? childWs.ref.patch : undefined;
-          await emit({ type: "agent.thread_message_received", child_session_id: child.id, content: [{ type: "text", text: report }], stop_reason: stop, patch });
+          await emit({ type: "agent.thread_message_received", child_session_id: child.id, from_session_id: child.id, kind: "report", content: [{ type: "text", text: report }], stop_reason: stop, patch });
           return { report, patch, sessionId: child.id };
         }
         // A nested loop in the same sandbox with the builtin tools only (no plugin tools: no recursion).
@@ -387,6 +438,28 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         return { status: r.status, headers, body: truncateOutput(await r.text(), 200_000) };
       },
       log: (args) => console.log(`[plugin ${sessionId}]`, ...args),
+      // ---- multi-agent: children as handles ----
+      agentsSpawn: async (task, o) => {
+        const e = envs.get((o.env as string | undefined) ?? "main");
+        if (!e) throw new Error(`no environment ${String(o.env)} attached`);
+        const model = typeof o.model === "string" ? { provider: o.model.split("/")[0]!, id: o.model.split("/").slice(1).join("/") } : undefined;
+        const child = await deps.children.spawn(session, { key: e.key, environment_id: e.environment.id, workspace_id: e.workspace.id }, task, { system: o.system as string | undefined, model, tools: o.tools as string[] | undefined, shareWorkspace: !!o.shareWorkspace, name: o.name as string | undefined, role: o.role as string | undefined, maxTurns: o.maxTurns as number | undefined });
+        await emit({ type: "session.thread_created", child_session_id: child.id, env: e.key, task, role: o.role as string | undefined, name: o.name as string | undefined });
+        return { sessionId: child.id, name: o.name as string | undefined, role: o.role as string | undefined };
+      },
+      agentsWait: async (child, o) => { await deps.children.wait(child, abort.signal, o); return childStatus(child); },
+      agentsStatus: (child) => childStatus(child),
+      agentsSteer: async (child, text) => {
+        await deps.children.message(child, text);
+        await emit({ type: "agent.thread_message_sent", to_session_id: child, kind: "steer", content: [{ type: "text", text }] });
+      },
+      agentsReply: async (child, questionId, text) => {
+        await deps.children.message(child, `[reply to question ${questionId}] ${text}`);
+        await emit({ type: "agent.thread_message_sent", to_session_id: child, kind: "reply", content: [{ type: "text", text }], question_id: questionId });
+      },
+      agentsStop: (child) => deps.children.stop(child),
+      agentsList: async () => Promise.all((await deps.children.list(sessionId)).map((c) => childStatus(c.id))),
+      agentsPatch: async (child) => { const c = await deps.getSession(child); const ws = c ? await deps.getWorkspace(c.workspace_id) : null; return ws?.ref.kind === "git" ? ws.ref.patch ?? null : null; },
       sessionNote: async (plugin, text) => { await emit({ type: "plugin.message", plugin, content: [{ type: "text", text }] }); },
       sessionSend: async (text) => { await deps.pushSteer(sessionId, text); },
       sessionInterrupt: async () => { stopReason = "interrupted"; abort.abort(); },
@@ -394,6 +467,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     detachPlugins = host?.attach(info, caps) ?? null;
 
     const tools: AgentTool[] = [...builtinTools, ...(host?.agentTools(info) ?? [])];
+    if (session.parent_id) tools.push(reportToParentTool(session.parent_id, emit, () => { stopReason = "end_turn"; abort.abort(); }));
     const allSkills = [...plugins.skills, ...dbSkills];
     const st = skillTool(allSkills, plugins.prompts);
     if (st) tools.push(st);

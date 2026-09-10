@@ -27,6 +27,14 @@ export interface RunnerMethods {
   "model.complete": { params: { session: SessionInfo; prompt: string; system?: string; maxTokens?: number }; result: string };
   "agent.run": { params: { session: SessionInfo; task: string; system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }; result: string | { report: string; patch?: string; sessionId: string } };
   fetch: { params: { session: SessionInfo; url: string; method?: string; headers?: Record<string, string>; body?: string }; result: { status: number; headers: Record<string, string>; body: string } };
+  "agents.spawn": { params: { session: SessionInfo; task: string; opts?: Record<string, unknown> }; result: { sessionId: string; name?: string; role?: string } };
+  "agents.wait": { params: { session: SessionInfo; child: string; timeoutMs?: number; untilQuestion?: boolean }; result: unknown };
+  "agents.status": { params: { session: SessionInfo; child: string }; result: unknown };
+  "agents.steer": { params: { session: SessionInfo; child: string; text: string }; result: null };
+  "agents.reply": { params: { session: SessionInfo; child: string; questionId: string; text: string }; result: null };
+  "agents.stop": { params: { session: SessionInfo; child: string }; result: null };
+  "agents.list": { params: { session: SessionInfo }; result: unknown };
+  "agents.patch": { params: { session: SessionInfo; child: string }; result: string | null };
   log: { params: { session: SessionInfo; args: unknown[] }; result: null };
   "session.note": { params: { session: SessionInfo; plugin: string; text: string }; result: null };
   "session.send": { params: { session: SessionInfo; text: string }; result: null };
