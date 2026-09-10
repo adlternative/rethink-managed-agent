@@ -1,7 +1,7 @@
 {
   "name": "pma-cli",
   "version": "0.1.0",
-  "description": "Terminal client for pi-like-managed-agent (Ink TUI + subcommands), modelled on qca-cli.",
+  "description": "Terminal client for rethink-managed-agent (Ink TUI + subcommands), modelled on qca-cli.",
   "type": "module",
   "engines": { "node": ">=20" },
   "bin": { "pma": "bundle/pma.js" },

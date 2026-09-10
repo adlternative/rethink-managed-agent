@@ -1,4 +1,4 @@
-# pi-like managed agent
+# rethink-managed-agent
 
 A small, self-hostable coding-agent service in the spirit of Claude Managed Agents, built on three ideas:
 

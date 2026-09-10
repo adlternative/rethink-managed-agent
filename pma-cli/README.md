@@ -1,4 +1,4 @@
-# pma — pi-like Managed Agent CLI
+# pma — rethink-managed-agent CLI
 
 Terminal client for the API in this repo, modelled on `qca-cli` (Qoder Cloud Agent CLI): a thin set of
 subcommands over `fetch`, plus an Ink TUI for interactive chat with streaming, tool folding and slash commands.

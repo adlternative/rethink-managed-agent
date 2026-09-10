@@ -2,7 +2,7 @@ import { loadConfig, saveConfig } from "./lib/config.ts";
 import { parseArgs, str, die } from "./lib/args.ts";
 
 const VERSION = process.env.CLI_VERSION ?? "dev";
-const HELP = `pma — terminal client for pi-like-managed-agent (v${VERSION})
+const HELP = `pma — terminal client for rethink-managed-agent (v${VERSION})
 
 usage:
   pma                                   interactive chat (new session on first message)

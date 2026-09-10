@@ -1,4 +1,4 @@
-# pi-like Managed Agent：薄 Harness + 可插拔 Sandbox 设计
+# rethink-managed-agent：薄 Harness + 可插拔 Sandbox 设计
 
 ## 0. 一句话
 
