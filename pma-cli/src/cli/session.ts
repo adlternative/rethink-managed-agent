@@ -1,4 +1,4 @@
-import { apiGet, interrupt, sendMessage, streamEvents, textOf, type SessionEvent } from "../lib/client.ts";
+import { apiGet, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, type SessionEvent } from "../lib/client.ts";
 import { die, parseArgs, printJson, str, table } from "../lib/args.ts";
 
 const USAGE = `session subcommand:
@@ -81,6 +81,8 @@ function summarize(e: SessionEvent): string {
     : e.type === "session.status_idle" ? p.stop_reason
     : e.type === "sandbox.acquired" ? `${p.provider} ${p.sandbox_id}${p.env ? ` [${p.env}]` : ""}${p.origin ? ` (${p.origin})` : ""}`
     : e.type === "workspace.captured" ? `${p.workspace_id ?? ""}${p.env ? ` [${p.env}]` : ""}`
+    : e.type === "span.model_request_end" ? `in ${fmtTokens(p.usage.input)} +cache ${fmtTokens(p.usage.cache_read)} out ${fmtTokens(p.usage.output)} · ctx ${fmtCtx(p.context)}`
+    : e.type === "session.usage" ? `total ${fmtTokens(p.usage.total_tokens)} tokens over ${p.usage.requests} requests · ctx ${fmtCtx(p.context)}`
     : e.type === "agent.thread_context_compacted" ? `${p.tokens_before} -> ${p.tokens_after} tokens, kept from seq ${p.first_kept_seq}`
     : e.type === "session.thread_created" ? `${p.child_session_id} [${p.env}] ${p.task}`
     : e.type === "agent.thread_message_received" ? `${p.child_session_id} (${p.stop_reason}) ${textOf(p.content)}`

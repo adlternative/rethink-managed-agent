@@ -26,6 +26,8 @@ import type {
   WorkspaceId,
   WorkspaceRef,
   WorkspaceResource,
+  Usage,
+  ContextSize,
 } from "../shared/types.ts";
 import type { PackageManifest, PromptTemplate, Skill } from "../plugins/api.ts";
 import { PluginHost, type Capabilities } from "../plugins/client.ts";
@@ -93,6 +95,8 @@ export interface RunDeps {
    * user.message this run never saw (seq > consumedSeq); the caller should enqueue a follow-up run.
    */
   finishRun(sessionId: SessionId, stopReason: StopReason, consumedSeq: number): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }>;
+  /** Accumulate one model request's usage on the session row. */
+  recordUsage(sessionId: SessionId, usage: Omit<Usage, "requests">, context: ContextSize): Promise<Usage>;
 }
 
 export type RunOutcome = { status: "busy" } | { status: "done"; stopReason: StopReason; unconsumedSeq: number | null };
@@ -426,6 +430,15 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
             const [ev2] = await deps.appendEvents(sessionId, [{ type: "agent.message", content: toContentBlocks(m), pi: m }]);
             seqOf.set(m, ev2!.seq);
             await publishAll([ev2!]);
+            // Usage is first-class: one span per model request, cumulative counters on the session.
+            const u = (m as { usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number } }).usage;
+            if (u && (u.input || u.output || u.cacheRead)) {
+              const carried = u.totalTokens && u.totalTokens > 0 ? u.totalTokens : u.input + u.cacheRead + u.cacheWrite + u.output;
+              const usage = { input: u.input, output: u.output, cache_read: u.cacheRead, cache_write: u.cacheWrite, total_tokens: carried };
+              const context: ContextSize = { tokens: carried, window: model.contextWindow, ratio: model.contextWindow ? Math.min(1, carried / model.contextWindow) : 0, model: `${model.provider}/${model.id}` };
+              await deps.recordUsage(sessionId, usage, context);
+              await emit({ type: "span.model_request_end", model: context.model, usage, context, stop_reason: m.stopReason });
+            }
             // pi-ai reports "error" (not "aborted") when the signal was already aborted before the
             // request started — e.g. an interrupt that landed during the previous tool call.
             if (m.stopReason === "aborted" || (m.stopReason === "error" && abort.signal.aborted)) {

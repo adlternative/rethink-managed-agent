@@ -1,6 +1,6 @@
 import { pool } from "./db.ts";
 import { appendIn, setStatusIn, withSession } from "./events.ts";
-import type { SessionEvent, SessionEventPayload, StopReason } from "../shared/types.ts";
+import type { ContextSize, SessionEvent, SessionEventPayload, StopReason, Usage } from "../shared/types.ts";
 
 /** A `running` session whose runner has not heartbeated for this long is considered dead. */
 export const RUN_STALE_MS = 90_000;
@@ -35,7 +35,11 @@ export async function finishRun(
   consumedSeq: number,
 ): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }> {
   return withSession(sessionId, async (c, s) => {
-    const events = await appendIn(c, sessionId, [{ type: "session.status_idle", stop_reason: stopReason }]);
+    const u = await c.query<{ usage: Usage; context: ContextSize | null }>(`SELECT usage, context FROM sessions WHERE id=$1`, [sessionId]);
+    const events = await appendIn(c, sessionId, [
+      { type: "session.usage", usage: u.rows[0]!.usage, context: u.rows[0]!.context },
+      { type: "session.status_idle", stop_reason: stopReason },
+    ]);
     // A session archived mid-run stays terminated.
     if (s.status !== "terminated") await setStatusIn(c, sessionId, "idle");
     const r = await c.query(`SELECT MAX(seq) AS max FROM events WHERE session_id=$1 AND type='user.message' AND seq>$2`, [sessionId, consumedSeq]);
@@ -64,4 +68,22 @@ export async function findStrandedSessions(graceMs: number): Promise<{ session_i
     [graceMs],
   );
   return r.rows.map((x) => ({ session_id: x.session_id, trigger_seq: Number(x.trigger_seq) }));
+}
+
+/** Add one model request's usage to the session's cumulative counters and record the context size, atomically. */
+export async function recordUsage(sessionId: string, usage: Omit<Usage, "requests">, context: ContextSize): Promise<Usage> {
+  const r = await pool.query<{ usage: Usage }>(
+    `UPDATE sessions SET
+       usage = jsonb_build_object(
+         'input', (usage->>'input')::bigint + $2::bigint,
+         'output', (usage->>'output')::bigint + $3::bigint,
+         'cache_read', (usage->>'cache_read')::bigint + $4::bigint,
+         'cache_write', (usage->>'cache_write')::bigint + $5::bigint,
+         'total_tokens', (usage->>'total_tokens')::bigint + $6::bigint,
+         'requests', (usage->>'requests')::bigint + 1),
+       context = $7::jsonb
+     WHERE id=$1 RETURNING usage`,
+    [sessionId, usage.input, usage.output, usage.cache_read, usage.cache_write, usage.total_tokens, JSON.stringify(context)],
+  );
+  return r.rows[0]!.usage;
 }

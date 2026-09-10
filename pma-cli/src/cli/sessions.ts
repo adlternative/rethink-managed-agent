@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, type Session } from "../lib/client.ts";
+import { apiDelete, apiGet, apiPost, fmtCtx, fmtTokens, type Session } from "../lib/client.ts";
 import { loadConfig } from "../lib/config.ts";
 import { die, fmtTime, parseArgs, printJson, str, table } from "../lib/args.ts";
 
@@ -45,7 +45,7 @@ export async function cmdSessions(args: string[]): Promise<void> {
     case "list": case "ls": {
       let { data } = (await apiGet("/sessions")) as { data: Session[] };
       if (str(flags, "status")) data = data.filter((s) => s.status === str(flags, "status"));
-      table([["ID", "STATUS", "AGENT", "MODEL", "UPDATED"], ...data.map((s) => [s.id, s.status, s.agent.name, `${s.agent.model.provider}/${s.agent.model.id}`, fmtTime(s.updated_at)])]);
+      table([["ID", "STATUS", "AGENT", "MODEL", "CTX", "TOKENS", "UPDATED"], ...data.map((s) => [s.id, s.status, s.agent.name, `${s.agent.model.provider}/${s.agent.model.id}`, fmtCtx(s.context), s.usage ? fmtTokens(s.usage.total_tokens) : "-", fmtTime(s.updated_at)])]);
       return;
     }
     case "get":

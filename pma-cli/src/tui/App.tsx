@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
-import { apiGet, apiPost, interrupt, sendMessage, streamEvents, textOf, ApiError, type Agent, type Environment, type ModelInfo, type Session, type SessionEvent } from "../lib/client.ts";
+import { apiGet, apiPost, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, ApiError, type Agent, type ContextSize, type Environment, type ModelInfo, type Session, type SessionEvent, type Usage } from "../lib/client.ts";
 import { loadConfig, saveConfig } from "../lib/config.ts";
 import { createSession } from "../cli/sessions.ts";
 import { Input } from "./Input.tsx";
@@ -128,6 +128,8 @@ function App({ opts }: { opts: TuiOptions }) {
   const [ctrlC, setCtrlC] = useState(0);
   const [modelOverride, setModelOverride] = useState<string | undefined>(opts.model);
   const [sandboxInfo, setSandboxInfo] = useState<string>("");
+  const [ctx, setCtx] = useState<ContextSize | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const lastSeq = useRef(0);
   const streamAbort = useRef<AbortController | null>(null);
   const streamingMsg = useRef<Message | null>(null);
@@ -249,6 +251,8 @@ function App({ opts }: { opts: TuiOptions }) {
       case "agent.tool_result":
         setMessages((prev) => prev.map((m) => (m.role === "tool" && m.toolUseId === p.tool_use_id ? { ...m, result: textOf(p.content), toolStatus: p.is_error ? "error" : "success" } : m)));
         break;
+      case "span.model_request_end": setCtx(p.context); break;
+      case "session.usage": setUsage(p.usage); setCtx(p.context); break;
       case "sandbox.acquired": setSandboxInfo(`${p.provider}:${p.sandbox_id}`); break;
       case "sandbox.released": setSandboxInfo(""); break;
     }
@@ -288,6 +292,8 @@ function App({ opts }: { opts: TuiOptions }) {
     setMessages(built.messages);
     setGenerating(built.running);
     setSandboxInfo("");
+    setCtx(s.context ?? null);
+    setUsage(s.usage ?? null);
     setSession(s);
   }, []);
 
@@ -298,6 +304,8 @@ function App({ opts }: { opts: TuiOptions }) {
     setMessages(first ? [msg({ role: "user", content: first, pending: true })] : []);
     setGenerating(!!first);
     setSandboxInfo("");
+    setCtx(null);
+    setUsage(null);
     setSession(s);
     return s;
   }, [opts, modelOverride]);
@@ -353,7 +361,12 @@ function App({ opts }: { opts: TuiOptions }) {
         case "/status": {
           if (!session) return sys("no session");
           const s = (await apiGet(`/sessions/${session.id}`)) as Session;
-          sys([`session   ${s.id}`, `status    ${s.status}`, `agent     ${s.agent.name} (${s.agent_id})`, `model     ${s.agent.model.provider}/${s.agent.model.id}`, `env       ${s.environment_id}`, `workspace ${s.workspace_id}`, `sandbox   ${sandboxInfo || "-"}`, `host      ${cfg.host}`].join("\n"));
+          const u = s.usage;
+          sys([`session   ${s.id}`, `status    ${s.status}`, `agent     ${s.agent.name} (${s.agent_id})`, `model     ${s.agent.model.provider}/${s.agent.model.id}`,
+            `context   ${fmtCtx(s.context)}`,
+            `usage     ${u ? `${fmtTokens(u.total_tokens)} tokens · in ${fmtTokens(u.input)} · cache ${fmtTokens(u.cache_read)} · out ${fmtTokens(u.output)} · ${u.requests} requests` : "-"}`,
+            `envs      ${(s.environments ?? []).map((e) => `${e.key}=${e.environment_id}`).join(", ") || s.environment_id}`,
+            `workspace ${s.workspace_id}`, `sandbox   ${sandboxInfo || "-"}`, `host      ${cfg.host}`].join("\n"));
           return;
         }
         case "/sessions": {
@@ -450,6 +463,8 @@ function App({ opts }: { opts: TuiOptions }) {
       <Box>
         <Text bold color="magenta">pma</Text>
         <Text dimColor> · {session ? `${session.id} · ${session.agent.name}` : "no session"}{model ? ` · ${model}` : ""}{sandboxInfo ? ` · ⧉ ${sandboxInfo}` : ""}</Text>
+        {ctx ? <Text color={ctx.ratio > 0.8 ? "red" : ctx.ratio > 0.5 ? "yellow" : undefined}> · ctx {fmtCtx(ctx)}</Text> : null}
+        {usage ? <Text dimColor> · {fmtTokens(usage.total_tokens)} tok</Text> : null}
       </Box>
       {messages.map((m) => <MessageView key={m.id} m={m} expanded={expanded} />)}
       {generating && <Box marginTop={1}><Spinner seconds={seconds} /></Box>}

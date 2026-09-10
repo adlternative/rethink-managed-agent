@@ -3,7 +3,7 @@ import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, onProvidersChanged, popSteer, publish, redis } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun } from "../infra/queue.ts";
-import { claimRun, findStrandedSessions, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
+import { claimRun, findStrandedSessions, finishRun, heartbeat, HEARTBEAT_MS, recordUsage } from "../infra/runs.ts";
 import { runSession, type AgentPlugins, type ChildSpawn, type RunDeps } from "../harness/run-turn.ts";
 import { workspaceRoot } from "../sandbox/workspace.ts";
 import { execFile } from "node:child_process";
@@ -136,6 +136,7 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     updateWorkspaceRef: (id, ref, expected) => repos.workspaces.updateRef(id, ref, expected),
     claimRun,
     finishRun,
+    recordUsage,
   };
 }
 

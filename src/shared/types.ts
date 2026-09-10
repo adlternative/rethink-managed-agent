@@ -206,9 +206,31 @@ export interface SessionEnvironment {
   environment_id: EnvironmentId;
   workspace_id: WorkspaceId;
 }
+/** Token accounting. Cumulative on the session; per request on span.model_request_end. */
+export interface Usage {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  /** context size the request carried (input + cache) or, cumulatively, the sum of per-request totals */
+  total_tokens: number;
+  requests: number;
+}
+/** Where the context stands right now (from the latest model request). */
+export interface ContextSize {
+  tokens: number;
+  window: number;
+  /** tokens / window, 0..1 */
+  ratio: number;
+  model: string;
+}
 export interface SessionResource {
   id: SessionId;
   agent_id: AgentId;
+  /** cumulative token usage across all runs */
+  usage: Usage;
+  /** context size after the most recent model request; null before the first */
+  context: ContextSize | null;
   /** primary environment / workspace (== environments[key="main"]) */
   environment_id: EnvironmentId;
   workspace_id: WorkspaceId;
@@ -241,6 +263,10 @@ export type SessionEventPayload =
   | { type: "session.status_idle"; stop_reason: StopReason }
   | { type: "session.status_terminated"; reason?: string }
   | { type: "session.error"; error: { type: string; message: string } }
+  /** one model request finished: its usage and the context size it carried */
+  | { type: "span.model_request_end"; model: string; usage: Omit<Usage, "requests">; context: ContextSize; stop_reason?: string }
+  /** cumulative usage snapshot, emitted when a run ends */
+  | { type: "session.usage"; usage: Usage; context: ContextSize | null }
   | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName; env?: string; origin?: "created" | "reused" | "resumed" }
   | { type: "sandbox.released"; sandbox_id: SandboxId; env?: string }
   | { type: "workspace.captured"; ref: WorkspaceRef; workspace_id?: WorkspaceId; env?: string }

@@ -163,6 +163,13 @@ src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/
 ```
 
+## Usage and context size
+
+Every model request appends `span.model_request_end {model, usage:{input, output, cache_read, cache_write,
+total_tokens}, context:{tokens, window, ratio}}`; the session row keeps cumulative `usage` and the latest
+`context`, and each run ends with a `session.usage` snapshot. `GET /v1/sessions/:id` returns both; pma shows
+`ctx 4.5k/200k (2%)` in the TUI header (yellow > 50%, red > 80%), in `/status`, and in `pma sessions list`.
+
 ## Context compaction
 
 Before every model request the runner estimates the context (last reported usage plus an estimate of
