@@ -5,6 +5,8 @@ import { loadConfig, saveConfig } from "../lib/config.ts";
 import { createSession } from "../cli/sessions.ts";
 import { Input } from "./Input.tsx";
 import { Selector, type SelectorItem } from "./Selector.tsx";
+import { emitUiEvent, keyOf, loadUiPlugins, type UiRegistry } from "./plugins.ts";
+import type { UiContext } from "../ui-api.ts";
 
 // ─── Message model (same shape as qca: tool results hang under their tool_use) ───
 interface Message {
@@ -19,6 +21,8 @@ interface Message {
   streamIndex?: number;
   /** stream id shared by an assistant message's deltas and its persisted event */
   streamId?: string;
+  /** raw tool input (for UI plugin renderers) */
+  toolInput?: unknown;
   result?: string;
   streaming?: boolean;
   /** Optimistically shown user message not yet confirmed by its persisted event. */
@@ -47,7 +51,7 @@ function buildMessages(events: SessionEvent[]): { messages: Message[]; lastSeq: 
         if (p.thinking) out.push(msg({ role: "thinking", content: p.thinking }));
         const t = textOf(p.content); if (t) out.push(msg({ role: "agent", content: t })); break;
       }
-      case "agent.tool_use": { const m = msg({ role: "tool", content: formatToolDesc(p.name, p.input), toolName: p.name, toolUseId: p.tool_use_id, toolStatus: "success" }); tools.set(p.tool_use_id, m); out.push(m); break; }
+      case "agent.tool_use": { const m = msg({ role: "tool", content: formatToolDesc(p.name, p.input), toolName: p.name, toolUseId: p.tool_use_id, toolStatus: "success", toolInput: p.input }); tools.set(p.tool_use_id, m); out.push(m); break; }
       case "agent.tool_result": { const m = tools.get(p.tool_use_id); if (m) { m.result = textOf(p.content); m.toolStatus = p.is_error ? "error" : "success"; } break; }
       case "session.status_running": running = true; break;
       case "session.status_idle": running = false; if (p.stop_reason !== "end_turn") out.push(msg({ role: "system", content: `stopped: ${p.stop_reason}` })); break;
@@ -82,7 +86,7 @@ function Spinner({ seconds }: { seconds: number }) {
   return <Text color="cyan">{FRAMES[f]} Generating… <Text dimColor>(esc to cancel, {seconds}s)</Text></Text>;
 }
 
-function MessageView({ m, expanded }: { m: Message; expanded: boolean }) {
+function MessageView({ m, expanded, reg, uiCtx }: { m: Message; expanded: boolean; reg?: UiRegistry; uiCtx?: UiContext }) {
   switch (m.role) {
     case "user":
       return <Box marginTop={1}><Text color="cyan" bold>› </Text><Text>{m.content}</Text></Box>;
@@ -102,14 +106,19 @@ function MessageView({ m, expanded }: { m: Message; expanded: boolean }) {
     }
     case "tool": {
       const color = m.toolStatus === "error" ? "red" : m.toolStatus === "running" || m.toolStatus === "preparing" ? "yellow" : "green";
-      const lines = (m.result ?? "").split("\n");
-      const shown = expanded ? lines : lines.slice(0, 3);
+      // A UI plugin may take over the title and body of this tool's rows.
+      let custom: { title?: string; lines?: string[] } | null = null;
+      const renderer = m.toolName && reg?.toolRenderers.get(m.toolName);
+      if (renderer && uiCtx && m.toolStatus !== "preparing") { try { custom = renderer(m.toolInput, m.result, uiCtx); } catch { custom = null; } }
+      const title = custom?.title ?? m.content;
+      const lines = custom?.lines ?? (m.result ?? "").split("\n");
+      const shown = custom?.lines ? custom.lines : expanded ? lines : lines.slice(0, 3);
       const preview = m.toolStatus === "preparing" ? (m.argsPreview ?? "").replace(/\s+/g, " ").slice(-70) : "";
       return (
         <Box flexDirection="column" marginTop={1}>
-          <Text><Text color={color}>▪</Text> <Text bold>{m.content}</Text>{m.toolStatus === "running" ? <Text dimColor> …</Text> : m.toolStatus === "preparing" ? <Text dimColor> {preview || "…"}</Text> : null}</Text>
-          {m.result !== undefined && shown.map((l, i) => <Text key={i} dimColor>  {i === 0 ? "└ " : "  "}{l}</Text>)}
-          {m.result !== undefined && lines.length > shown.length && <Text dimColor>    … {lines.length - shown.length} more lines (ctrl+o)</Text>}
+          <Text><Text color={color}>▪</Text> <Text bold>{title}</Text>{m.toolStatus === "running" ? <Text dimColor> …</Text> : m.toolStatus === "preparing" ? <Text dimColor> {preview || "…"}</Text> : null}</Text>
+          {(m.result !== undefined || custom?.lines) && shown.map((l, i) => <Text key={i} dimColor>  {i === 0 ? "└ " : "  "}{l}</Text>)}
+          {m.result !== undefined && !custom?.lines && lines.length > shown.length && <Text dimColor>    … {lines.length - shown.length} more lines (ctrl+o)</Text>}
         </Box>
       );
     }
@@ -135,16 +144,44 @@ function App({ opts }: { opts: TuiOptions }) {
   const [modelOverride, setModelOverride] = useState<string | undefined>(opts.model);
   const [sandboxInfo, setSandboxInfo] = useState<string>("");
   const [ctx, setCtx] = useState<ContextSize | null>(null);
+  const [reg, setReg] = useState<UiRegistry | null>(null);
+  const regRef = useRef<UiRegistry | null>(null);
+  const sessionRef = useRef<Session | null>(null);
+  const expandedRef = useRef(false);
+  const selectResolve = useRef<((id: string | null) => void) | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
   const lastSeq = useRef(0);
   const streamAbort = useRef<AbortController | null>(null);
   const streamingMsg = useRef<Message | null>(null);
   const thinkingMsg = useRef<Message | null>(null);
   const preparingTools = useRef(new Map<number, Message>());
-  const suggestions = value.startsWith("/") && !value.includes(" ") ? COMMANDS.filter((c) => c.name.startsWith(value)) : [];
+  const allCommands = [...COMMANDS, ...[...(reg?.commands.values() ?? [])].map((c) => ({ name: `/${c.name}`, desc: `${c.description} (${c.source})` }))];
+  const suggestions = value.startsWith("/") && !value.includes(" ") ? allCommands.filter((c) => c.name.startsWith(value)) : [];
   const [sugIdx, setSugIdx] = useState(0);
 
   const sys = useCallback((content: string) => setMessages((p) => [...p, msg({ role: "system", content })]), []);
+
+  // What UI plugins get: a small, client-only capability set.
+  const uiCtx: UiContext = {
+    get session() { return sessionRef.current; },
+    send: (text) => send(text),
+    note: (text) => sys(text),
+    api: { get: (p) => apiGet(p), post: (p, b) => apiPost(p, b) },
+    get expanded() { return expandedRef.current; },
+    openSession: (id) => openSession(id),
+    select: (title, items) => new Promise<string | null>((resolve) => {
+      selectResolve.current = resolve;
+      setSelector({ title, items, onSelect: (it) => { setSelector(null); selectResolve.current = null; resolve(it.id); } });
+    }),
+  };
+  useEffect(() => { sessionRef.current = session; }, [session]);
+  useEffect(() => { expandedRef.current = expanded; }, [expanded]);
+  useEffect(() => {
+    loadUiPlugins().then((r) => {
+      regRef.current = r; setReg(r);
+      for (const l of r.loaded) if (l.error) sys(`✗ ui plugin ${l.source}: ${l.error}`);
+    }).catch((e) => sys(`✗ ui plugins: ${e.message}`));
+  }, []);
 
   // generating timer
   useEffect(() => {
@@ -207,6 +244,18 @@ function App({ opts }: { opts: TuiOptions }) {
     if (e.seq <= lastSeq.current) return;
     lastSeq.current = e.seq;
     const p = e.payload;
+    const r = regRef.current;
+    if (r) {
+      emitUiEvent(r, e, uiCtx);
+      const render = r.eventRenderers.get(e.type);
+      if (render) {
+        let line: string | null = null;
+        try { line = render(p, e, uiCtx); } catch (err: any) { line = `✗ renderer: ${err?.message ?? err}`; }
+        if (line) sys(line);
+        // a registered renderer owns this event type entirely (except the state transitions below)
+        if (!["session.status_running", "session.status_idle", "session.status_terminated", "agent.message", "agent.tool_use", "agent.tool_result", "user.message", "span.model_request_end", "session.usage", "sandbox.acquired", "sandbox.released"].includes(e.type)) return;
+      }
+    }
     switch (e.type) {
       case "session.status_running": setGenerating(true); break;
       case "session.status_idle":
@@ -252,7 +301,7 @@ function App({ opts }: { opts: TuiOptions }) {
         // Replace the streaming "preparing" placeholder (oldest pending one of this name) with the real call.
         const pending = [...preparingTools.current.entries()].find(([, m]) => m.toolName === p.name);
         setMessages((prev) => {
-          const real = { role: "tool" as const, content: formatToolDesc(p.name, p.input), toolName: p.name, toolUseId: p.tool_use_id, toolStatus: "running" as const };
+          const real = { role: "tool" as const, content: formatToolDesc(p.name, p.input), toolName: p.name, toolUseId: p.tool_use_id, toolStatus: "running" as const, toolInput: p.input };
           if (pending && prev.includes(pending[1])) {
             preparingTools.current.delete(pending[0]);
             return prev.map((m) => (m === pending[1] ? { ...m, ...real, argsPreview: undefined } : m));
@@ -362,11 +411,18 @@ function App({ opts }: { opts: TuiOptions }) {
     const [cmd, ...rest] = line.trim().split(/\s+/);
     const arg = rest.join(" ");
     const cfg = loadConfig();
+    const plugin = regRef.current?.commands.get((cmd ?? "").slice(1));
+    if (plugin) {
+      try { await plugin.handler(arg, uiCtx); } catch (e: any) { sys(`✗ /${plugin.name}: ${e?.message ?? e}`); }
+      return;
+    }
     try {
       switch (cmd) {
-        case "/help":
-          sys(COMMANDS.map((c) => `${c.name.padEnd(12)} ${c.desc}`).join("\n") + "\n\nkeys: esc cancel · ctrl+o expand tools · ↑↓ history · tab complete · ctrl+c ×2 exit");
+        case "/help": {
+          const sc = [...(regRef.current?.shortcuts.values() ?? [])].map((x) => `${x.key.padEnd(12)} ${x.description} (${x.source})`);
+          sys(allCommands.map((c) => `${c.name.padEnd(12)} ${c.desc}`).join("\n") + "\n\nkeys: esc cancel · ctrl+o expand tools · ↑↓ history · tab complete · ctrl+c ×2 exit" + (sc.length ? "\n" + sc.join("\n") : ""));
           return;
+        }
         case "/quit": case "/exit": case "/q": exit(); return;
         case "/cancel": case "/stop": await cancel(); return;
         case "/clear": stdout.write("\x1b[2J\x1b[H"); setMessages([]); return;
@@ -425,7 +481,9 @@ function App({ opts }: { opts: TuiOptions }) {
           sys(`exported to ${file}`);
           return;
         }
-        default: sys(`unknown command ${cmd} (try /help)`);
+        default:
+          // Not a local command: server-side plugin commands (e.g. /goal) are ordinary messages.
+          await send(line.trim());
       }
     } catch (e: any) { sys(`✗ ${e instanceof ApiError ? `${e.status} ${e.message}` : e.message}`); }
   }
@@ -433,7 +491,7 @@ function App({ opts }: { opts: TuiOptions }) {
   function onSubmit(v: string) {
     const text = v.trim();
     if (!text) return;
-    if (suggestions.length && text.startsWith("/") && !COMMANDS.some((c) => c.name === text.split(" ")[0])) {
+    if (suggestions.length && text.startsWith("/") && !allCommands.some((c) => c.name === text.split(" ")[0])) {
       const s = suggestions[sugIdx] ?? suggestions[0]!;
       setValue(s.name + " "); setCursor(s.name.length + 1); return;
     }
@@ -443,6 +501,12 @@ function App({ opts }: { opts: TuiOptions }) {
 
   // global keys (handled before the editor)
   const onKey = (input: string, key: any): boolean => {
+    const k = keyOf(input, key);
+    const sc = k ? regRef.current?.shortcuts.get(k) : undefined;
+    if (sc && !(key.ctrl && (input === "c" || input === "o"))) {
+      Promise.resolve(sc.handler(uiCtx)).catch((e: any) => sys(`✗ ${sc.key}: ${e?.message ?? e}`));
+      return true;
+    }
     if (key.ctrl && input === "c") {
       if (ctrlC > 0) { exit(); return true; }
       setCtrlC(1); setTimeout(() => setCtrlC(0), 1500); return true;
@@ -478,12 +542,13 @@ function App({ opts }: { opts: TuiOptions }) {
         <Text dimColor> · {session ? `${session.id} · ${session.agent.name}` : "no session"}{model ? ` · ${model}` : ""}{sandboxInfo ? ` · ⧉ ${sandboxInfo}` : ""}</Text>
         {ctx ? <Text color={ctx.ratio > 0.8 ? "red" : ctx.ratio > 0.5 ? "yellow" : undefined}> · ctx {fmtCtx(ctx)}</Text> : null}
         {usage ? <Text dimColor> · {fmtTokens(usage.total_tokens)} tok</Text> : null}
+        {[...(reg?.status.entries() ?? [])].map(([id, render]) => { let t: string | null = null; try { t = render(uiCtx); } catch { t = null; } return t ? <Text key={id} dimColor> · {t}</Text> : null; })}
       </Box>
-      {messages.map((m) => <MessageView key={m.id} m={m} expanded={expanded} />)}
+      {messages.map((m) => <MessageView key={m.id} m={m} expanded={expanded} reg={reg ?? undefined} uiCtx={uiCtx} />)}
       {generating && <Box marginTop={1}><Spinner seconds={seconds} /></Box>}
       <Box marginTop={1} flexDirection="column">
         {selector ? (
-          <Selector title={selector.title} items={selector.items} onSelect={selector.onSelect} onCancel={() => setSelector(null)} />
+          <Selector title={selector.title} items={selector.items} onSelect={selector.onSelect} onCancel={() => { setSelector(null); selectResolve.current?.(null); selectResolve.current = null; }} />
         ) : (
           <>
             <Input value={value} cursor={cursor} onChange={(v, c) => { setValue(v); setCursor(c); setSugIdx(0); }} onSubmit={onSubmit} onKey={onKey} active={!selector} placeholder={session ? "message…  (/ for commands)" : "first message starts a session…"} />

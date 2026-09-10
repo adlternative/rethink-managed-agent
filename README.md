@@ -202,6 +202,10 @@ pma sessions attach sess_x browser=$E2B_ENV:fork                         # later
 
 ## Plugins
 
+Two independent plugin surfaces: **agent plugins** (server side, below) and **UI plugins** for the pma terminal
+client (commands, shortcuts, status segments, renderers; see [pma-cli/README.md](pma-cli/README.md#ui-plugins-client-side)).
+They share nothing but the event JSON.
+
 Agents are extended with **pma plugins**: tools, hooks (`tool_call` / `tool_result` / `context` / turn
 and session events), skills and prompt templates, packaged like pi packages (`npm:`, `git:`, or a path).
 Plugins run either in a per-agent host process on the runner (Node permission model + network lockdown;

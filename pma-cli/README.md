@@ -72,3 +72,29 @@ src/tui/Input.tsx   line editor; src/tui/Selector.tsx  ↑↓ picker
 
 Unlike qca this uses the published `ink` package rather than a vendored fork, so there is no mouse
 selection / scrollback pagination; the terminal's own scrollback is used.
+
+## UI plugins (client-side)
+
+pma has its own plugin API, independent of the server's: a module in `~/.pma/plugins/<name>.ts` (or a path
+under `ui_plugins` in `~/.pma/config.json`) that default-exports `(ui) => void`. It never sees server code;
+the only shared contract is the JSON shape of session events.
+
+```ts
+import type { UiAPI } from "pma-cli/src/ui-api";   // types only
+export default function (ui: UiAPI) {
+  ui.registerCommand({ name: "bookmark", description, handler(args, ctx) { ... } });   // local /bookmark
+  ui.registerShortcut({ key: "ctrl+b", description, handler(ctx) { ... } });
+  ui.registerStatus("bell", (ctx) => "🔔");                                              // header segment
+  ui.registerToolRenderer("write", (input, result, ctx) => ({ title, lines }));       // custom tool rows
+  ui.registerEventRenderer("sandbox.acquired", (payload, event, ctx) => "…");         // one-line event render
+  ui.on("session.status_idle", (event, ctx) => { ... });                               // observe events
+}
+```
+
+`ctx` offers `session`, `send(text)`, `note(text)`, `api.get/post`, `expanded`, `select(title, items)` and
+`openSession(id)`. Unknown `/commands` are forwarded to the server as ordinary messages, so server-side plugin
+commands (`/goal …`) and local ones coexist; `/help` lists both plus shortcuts.
+
+Examples in `plugins/`: `notify` (bell + macOS notification when a run ends), `tool-preview` (write/edit/bash
+rows show what they touch), `bookmarks` (`/bookmark`, `/bookmarks`, ctrl+b). Install with
+`cp plugins/*.ts ~/.pma/plugins/`.
