@@ -11,8 +11,9 @@ import type { HookEvent, HookName, PackageManifest, PluginAPI, PluginContext, Pl
 import { Rpc, type SessionInfo } from "./protocol.ts";
 import { piCompatFactory } from "./pi-compat.ts";
 
-// Must run before the first plugin import: after this, net/http/etc. cannot be resolved and fetch is gone.
-lockdown();
+// Runner mode: must run before the first plugin import (net/http/etc. unresolvable, fetch gone).
+// Sandbox mode (PMA_HOST_LOCKDOWN=0): the sandbox is the boundary; plugins may use fs/net directly.
+if (process.env.PMA_HOST_LOCKDOWN !== "0") lockdown();
 
 type Handler = (event: HookEvent, ctx: PluginContext) => unknown;
 const tools = new Map<string, { spec: ToolSpec; source: string }>();

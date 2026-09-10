@@ -1,9 +1,9 @@
 import { readFile, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../shared/env.ts";
-import type { ExecChunk, ExecOptions, Sandbox, SandboxHandle, SandboxId, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
+import type { ExecChunk, ExecOptions, Sandbox, SandboxHandle, SandboxId, SandboxProcess, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
 import { materialize, captureGit, captureDir } from "./workspace.ts";
-import { streamProcess, sandboxEnv, resolveInside, resolveInsideReal } from "./exec.ts";
+import { streamProcess, sandboxEnv, resolveInside, resolveInsideReal, spawnProcess } from "./exec.ts";
 
 const root = () => path.resolve(env.SANDBOX_LOCAL_ROOT);
 const dirExists = (p: string) => stat(p).then((st) => st.isDirectory(), () => false);
@@ -33,6 +33,9 @@ function makeSandbox(id: SandboxId, workdir: string): Sandbox {
       const host = await resolveInsideReal(workdir, workdir, p);
       await mkdir(path.dirname(host), { recursive: true });
       await writeFile(host, data);
+    },
+    async spawn(cmd, opts = {}): Promise<SandboxProcess> {
+      return spawnProcess("bash", ["-lc", cmd], { cwd: opts.cwd ? resolveInside(workdir, workdir, opts.cwd) : workdir, env: sandboxEnv(opts.env) });
     },
   };
 }

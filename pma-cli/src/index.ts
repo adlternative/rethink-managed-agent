@@ -18,7 +18,7 @@ subcommands:
   logout
   models
   agents     list | get <id> | create <name> <provider/model> [--system S] [--tools t,t] [--packages p,p]
-  envs       list | get <id> | create <name> --provider local|docker|e2b [--image I] [--git URL]
+  envs       list | get <id> | create <name> --provider local|docker|e2b [--image I] [--network bridge] [--plugin-host sandbox] [--git URL]
   sessions   list | get <id> | create [...] | archive <id> | delete <id>
   session    events <id> | send <id> <text> [--wait] | stream <id> | interrupt <id> | export <id>
   sandboxes  list [--all] | get <id> | delete <id>

@@ -45,7 +45,34 @@ export default function (p: PluginAPI) {
 Skills and prompt templates are listed in the system prompt and loaded on demand with a builtin
 `skill` tool, so the model never needs a filesystem path.
 
-## Isolation
+## Where plugins run: two placements
+
+An environment chooses `plugin_host`:
+
+| | `runner` (default) | `sandbox` |
+|---|---|---|
+| process | one host per agent on the runner, long-lived | one host per run, started inside the leased sandbox (`/tmp/pma-host`, outside the workspace) |
+| plugin's own `fs` / `child_process` / `net` | denied (permission model + lockdown) | allowed — confined by the sandbox itself (docker `--cap-drop ALL`, resource limits, `network`) |
+| `ctx.*` capabilities | RPC to runner | RPC to runner (store, model, sub-agent, fetch, log are still runner-served) |
+| sandbox lease | lazy, only when a tool needs it | eager: the sandbox is leased at turn start so the host has somewhere to run |
+| needs | nothing | `node` ≥ 22.18 in the sandbox image; a provider with `spawn` (local, docker; e2b pending) |
+| use for | policy hooks, memory/goal, remote APIs, orchestration | plugins that read/write the workspace or talk to the network directly: search, LSP, indexers, git tooling, ported pi extensions |
+
+`plugin_host: "sandbox"` is refused for the `local` provider (no isolation there). Network egress
+from a docker sandbox is `network: "bridge"` on the environment; the default is `none`.
+
+```bash
+pma envs create web --provider docker --image node:22-alpine --network bridge --plugin-host sandbox
+pma agents create researcher qoder/kmodel --packages /app/plugins/web-search,/app/plugins/goal,/app/plugins/safety-net
+```
+
+`plugins/web-search` is the sandbox-native sample: `web_search` (Bing) and `fetch_to_file` use the
+global `fetch` and `node:fs` directly and were verified in a docker sandbox (Bing results parsed,
+`example.com` downloaded into `/workspace/example.html`, `goal` store and `safety-net` hook working
+over RPC from inside the sandbox). In `runner` mode the same plugin fails visibly at the first
+`fetch`, which is the intended signal that it needs the sandbox placement.
+
+## Isolation (runner placement)
 
 Plugins load in a **plugin host** process per agent (`src/plugins/host.ts`), started by the runner
 with Node's permission model (`--permission --allow-fs-read=` only `src/plugins`, `node_modules/typebox` and the package dirs — never the repo root, so `.env` and the rest of `src/` are invisible): no fs writes, no

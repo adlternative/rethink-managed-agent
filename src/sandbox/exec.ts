@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { ExecChunk, ExecOptions } from "../shared/types.ts";
+import type { ExecChunk, ExecOptions, SandboxProcess } from "../shared/types.ts";
 
 /** Spawns `file args` (process-group leader) and streams stdout/stderr; timeout/abort kills the whole group. */
 export async function* streamProcess(
@@ -83,3 +83,18 @@ export async function resolveInsideReal(hostRoot: string, workdir: string, p: st
 }
 
 export type { ExecOptions };
+
+/** Long-lived child with stdin, for hosting a plugin host process inside a sandbox. */
+export function spawnProcess(file: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }): SandboxProcess {
+  const child = spawn(file, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  return {
+    write: (d) => { child.stdin.write(d); },
+    end: () => { child.stdin.end(); },
+    onStdout: (cb) => { child.stdout.on("data", cb); },
+    onStderr: (cb) => { child.stderr.on("data", cb); },
+    onExit: (cb) => { child.on("exit", (code) => cb(code)); },
+    kill: () => { child.stdin.end(); setTimeout(() => child.kill("SIGKILL"), 2000).unref(); },
+  };
+}

@@ -3,9 +3,9 @@ import { promisify } from "node:util";
 import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../shared/env.ts";
-import type { ExecChunk, ExecOptions, Sandbox, SandboxHandle, SandboxId, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
+import type { ExecChunk, ExecOptions, Sandbox, SandboxHandle, SandboxId, SandboxProcess, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
 import { materialize, captureGit, captureDir } from "./workspace.ts";
-import { streamProcess, sandboxEnv } from "./exec.ts";
+import { streamProcess, sandboxEnv, spawnProcess } from "./exec.ts";
 
 const docker = promisify(execFile);
 const WORKDIR = "/workspace";
@@ -89,6 +89,12 @@ function makeSandbox(id: SandboxId, container: string, shell: "bash" | "sh"): Sa
       const abs = insidePath(p);
       await execIn(container, ["sh", "-c", 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', "sh", abs], data);
     },
+    async spawn(cmd, opts = {}): Promise<SandboxProcess> {
+      const args = ["exec", "-i", "-w", opts.cwd ? path.posix.resolve(WORKDIR, opts.cwd) : WORKDIR];
+      for (const k of Object.keys(opts.env ?? {})) args.push("-e", k);
+      args.push(container, shell, "-lc", cmd);
+      return spawnProcess("docker", args, { env: sandboxEnv(opts.env) });
+    },
   };
 }
 
@@ -103,7 +109,7 @@ export class DockerProvider implements SandboxProvider {
     await materialize(req.workspaceRef, hostDir);
     const args = [
       "run", "-d", "--name", id, "-w", WORKDIR, "-v", `${toHostPath(hostDir)}:${WORKDIR}`,
-      "--network", env.SANDBOX_DOCKER_NETWORK, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+      "--network", req.network === "bridge" ? "bridge" : env.SANDBOX_DOCKER_NETWORK, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
       "--pids-limit", env.SANDBOX_DOCKER_PIDS, "--memory", env.SANDBOX_DOCKER_MEMORY, "--cpus", env.SANDBOX_DOCKER_CPUS,
       "--label", "pi.sandbox=1", "--label", `pi.workspace=${req.workspaceId}`,
     ];

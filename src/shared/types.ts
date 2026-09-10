@@ -41,6 +41,13 @@ export interface EnvironmentResource {
   provider: SandboxProviderName;
   /** docker image (docker provider) or e2b template name (e2b provider); ignored by local */
   image: string | null;
+  /** docker network for sandboxes: "none" (default, no egress) or "bridge" (internet). e2b always has egress. */
+  network: "none" | "bridge";
+  /**
+   * Where plugin code runs. "runner": a permission-restricted process on the runner (no fs/net of its
+   * own). "sandbox": inside the leased sandbox — plugins use fs/net directly, confined by the sandbox.
+   */
+  plugin_host: "runner" | "sandbox";
   /** default workspace spec for sessions created in this env (may be overridden per session) */
   workspace: WorkspaceSpec;
   created_at: string;
@@ -88,11 +95,23 @@ export interface Sandbox {
   exec(cmd: string, opts?: ExecOptions): AsyncIterable<ExecChunk>;
   readFile(path: string): Promise<Uint8Array>;
   writeFile(path: string, data: Uint8Array): Promise<void>;
+  /** Long-lived process with stdin (used to run a plugin host inside the sandbox). Optional per provider. */
+  spawn?(cmd: string, opts?: { cwd?: string; env?: Record<string, string> }): Promise<SandboxProcess>;
+}
+export interface SandboxProcess {
+  write(data: string): void;
+  /** close stdin */
+  end(): void;
+  onStdout(cb: (chunk: string) => void): void;
+  onStderr(cb: (chunk: string) => void): void;
+  onExit(cb: (code: number | null) => void): void;
+  kill(): void;
 }
 export interface SandboxRequest {
   workspaceId: WorkspaceId;
   workspaceRef: WorkspaceRef;
   image?: string | null;
+  network?: "none" | "bridge";
   /** sessions passing the same key may share a sandbox */
   affinity?: string;
   secrets?: Record<string, string>;

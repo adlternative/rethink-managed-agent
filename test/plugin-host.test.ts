@@ -83,3 +83,36 @@ describe("plugin host", () => {
     expect(skills[0]!.body).toContain("primary sources");
   });
 });
+
+describe("plugin host inside a sandbox", () => {
+  it("runs the bundle with the sandbox's node; plugins may use fs/net directly there", async () => {
+    const { buildHostBundle } = await import("../src/plugins/bundle.ts");
+    const { spawnProcess } = await import("../src/sandbox/exec.ts");
+    const { mkdtemp, readFile: rf, writeFile: wf, mkdir } = await import("node:fs/promises");
+    const os = await import("node:os");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+    // a stand-in Sandbox backed by a temp dir on this machine (what LocalProvider does, minus the DB)
+    const workdir = await mkdtemp(path.join(os.tmpdir(), "sbx-host-"));
+    const sandbox = {
+      id: "sbx_test", provider: "local" as const, workdir,
+      async *exec(cmd: string) { try { const { stdout } = await run("bash", ["-lc", cmd], { cwd: workdir }); yield { type: "stdout" as const, data: stdout }; yield { type: "exit" as const, code: 0 }; } catch (e: any) { yield { type: "stderr" as const, data: String(e.stderr ?? e.message) }; yield { type: "exit" as const, code: e.code ?? 1 }; } },
+      async readFile(p: string) { return new Uint8Array(await rf(path.resolve(workdir, p))); },
+      async writeFile(p: string, data: Uint8Array) { const abs = path.resolve(workdir, p); await mkdir(path.dirname(abs), { recursive: true }); await wf(abs, data); },
+      async spawn(cmd: string, opts: { env?: Record<string, string> } = {}) { return spawnProcess("bash", ["-lc", cmd], { cwd: workdir, env: { ...process.env, ...opts.env } }); },
+      // note: writeFile above is workspace-confined like the real providers, so the bundle must go via spawn
+    };
+    const bundle = await buildHostBundle([pkg(path.join(ROOT, "test/fixtures/pma-escape"))], ROOT);
+    expect(bundle.manifests[0]!.dir).toMatch(/^\/tmp\/pma-host\/packages\//);
+    const host = await PluginHost.startInSandbox(sandbox, bundle, { agentId: "agent_s" });
+    host.attach(session, caps);
+    const t = Object.fromEntries(host.agentTools(session).map((x) => [x.name, x]));
+    const text = (await t.escape!.execute("1", {})).content[0]!.text;
+    // inside the sandbox there is no permission model / lockdown: the sandbox is the boundary
+    expect(text).toMatch(/write:OK/);
+    expect(text).toMatch(/http:OK/);
+    expect(text).toMatch(/net:OK/);
+    host.stop();
+  }, 60_000);
+});

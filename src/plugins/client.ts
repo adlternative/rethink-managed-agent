@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import type { HookEvent, HookResultFor, PackageManifest } from "./api.ts";
+import type { Sandbox, SandboxProcess } from "../shared/types.ts";
+import { SANDBOX_HOST_DIR, type HostBundle } from "./bundle.ts";
 import { Rpc, type RunnerMethods, type SessionInfo } from "./protocol.ts";
 
 export interface Capabilities {
@@ -27,26 +29,81 @@ export interface LoadedTools { name: string; description: string; parameters: un
 
 const HOST_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "host.ts");
 
+function localTransport(child: ChildProcess): SandboxProcess {
+  child.stdout!.setEncoding("utf8");
+  child.stderr!.setEncoding("utf8");
+  return {
+    write: (d) => { child.stdin!.write(d); },
+    end: () => { child.stdin!.end(); },
+    onStdout: (cb) => { child.stdout!.on("data", cb); },
+    onStderr: (cb) => { child.stderr!.on("data", cb); },
+    onExit: (cb) => { child.on("exit", (code, sig) => cb(code ?? (sig ? 137 : null))); },
+    kill: () => { child.stdin?.end(); setTimeout(() => child.kill("SIGKILL"), 2000).unref(); },
+  };
+}
+
 export class PluginHost {
-  private child: ChildProcess;
+  private proc: SandboxProcess;
   private rpc: Rpc;
   private sessions = new Map<string, Capabilities>();
   private exited: Promise<string>;
   public tools: LoadedTools[] = [];
   public hooks = new Set<string>();
   public warnings: string[] = [];
+  /** "runner" (permission-restricted local process) or "sandbox" (inside the leased sandbox). */
+  public mode: "runner" | "sandbox";
 
-  private constructor(child: ChildProcess) {
-    this.child = child;
+  private constructor(proc: SandboxProcess, mode: "runner" | "sandbox") {
+    this.proc = proc;
+    this.mode = mode;
     this.rpc = new Rpc(
-      (line) => { child.stdin!.write(line); },
+      (line) => proc.write(line),
       (method, params) => this.serve(method as keyof RunnerMethods, params as never),
     );
-    child.stdout!.setEncoding("utf8");
-    child.stdout!.on("data", (c: string) => this.rpc.feed(c));
-    child.stderr!.setEncoding("utf8");
-    child.stderr!.on("data", (c: string) => process.stderr.write(`[plugin-host] ${c}`));
-    this.exited = new Promise((resolve) => child.on("exit", (code, sig) => { const why = `plugin host exited (${code ?? sig})`; this.rpc.abortAll(why); resolve(why); }));
+    proc.onStdout((c) => this.rpc.feed(c));
+    proc.onStderr((c) => process.stderr.write(`[plugin-host:${mode}] ${c}`));
+    this.exited = new Promise((resolve) => proc.onExit((code) => { const why = `plugin host exited (${code})`; this.rpc.abortAll(why); resolve(why); }));
+  }
+
+  private static async load(host: PluginHost, packages: PackageManifest[], agentId: string): Promise<PluginHost> {
+    const loaded = await Promise.race([
+      host.rpc.call<{ tools: LoadedTools[]; hooks: string[]; warnings: string[] }>("load", { packages }),
+      host.exited.then((why) => { throw new Error(`${why} while loading packages for ${agentId}`); }),
+    ]);
+    host.tools = loaded.tools;
+    host.hooks = new Set(loaded.hooks);
+    host.warnings = loaded.warnings;
+    return host;
+  }
+
+  /**
+   * Start a host inside a sandbox: upload the bundle (host sources + typebox + packages), unpack it
+   * under /tmp (outside the workspace, so captures never include it), and run it with the sandbox's
+   * own node. No permission model / lockdown: the sandbox is the boundary, and plugins may use fs
+   * and the network directly (subject to the environment's `network`).
+   */
+  static async startInSandbox(sandbox: Sandbox, bundle: HostBundle, opts: { agentId: string }): Promise<PluginHost> {
+    if (!sandbox.spawn) throw new Error(`sandbox provider ${sandbox.provider} cannot host plugins (no spawn support)`);
+    const tgz = `${SANDBOX_HOST_DIR}.tgz`;
+    // The bundle lives outside the workspace, where writeFile (workspace-confined by design) cannot
+    // reach: stream it through a process's stdin instead.
+    await new Promise<void>((resolve, reject) => {
+      sandbox.spawn!(`base64 -d > ${tgz}`).then((up) => {
+        let err = "";
+        up.onStderr((c) => { err += c; });
+        up.onExit((code) => (code === 0 ? resolve() : reject(new Error(`bundle upload failed (${code}): ${err.trim()}`))));
+        const b64 = Buffer.from(bundle.tgz).toString("base64");
+        for (let i = 0; i < b64.length; i += 65536) up.write(b64.slice(i, i + 65536) + "\n");
+        up.end();
+      }, reject);
+    });
+    let out = "";
+    for await (const c of sandbox.exec(`command -v node >/dev/null || { echo "node is not installed in the sandbox image" >&2; exit 127; }; rm -rf ${SANDBOX_HOST_DIR} && mkdir -p ${SANDBOX_HOST_DIR} && tar xzf ${tgz} -C ${SANDBOX_HOST_DIR} && rm -f ${tgz} && node --version`, { timeoutMs: 60_000 })) {
+      if (c.type === "exit" && c.code !== 0) throw new Error(`plugin host bundle setup failed in sandbox: ${out.trim()}`);
+      if (c.data) out += c.data;
+    }
+    const proc = await sandbox.spawn(`exec node ${SANDBOX_HOST_DIR}/src/plugins/host.ts`, { env: { PMA_HOST_LOCKDOWN: "0", PMA_PLUGIN_HOST: "1" } });
+    return PluginHost.load(new PluginHost(proc, "sandbox"), bundle.manifests, opts.agentId);
   }
 
   /**
@@ -67,15 +124,7 @@ export class PluginHost {
     // would need a cache dir and a loader worker the permission model forbids.
     const args = ["--permission", "--no-warnings", ...readDirs.map((d) => `--allow-fs-read=${d}`), HOST_ENTRY];
     const child = spawn(process.execPath, args, { stdio: ["pipe", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "", NODE_OPTIONS: "", PMA_PLUGIN_HOST: "1" } });
-    const host = new PluginHost(child);
-    const loaded = await Promise.race([
-      host.rpc.call<{ tools: LoadedTools[]; hooks: string[]; warnings: string[] }>("load", { packages }),
-      host.exited.then((why) => { throw new Error(`${why} while loading packages for ${opts.agentId}`); }),
-    ]);
-    host.tools = loaded.tools;
-    host.hooks = new Set(loaded.hooks);
-    host.warnings = loaded.warnings;
-    return host;
+    return PluginHost.load(new PluginHost(localTransport(child), "runner"), packages, opts.agentId);
   }
 
   /** Register the capabilities backing one session's calls; returns an unregister. */
@@ -123,7 +172,6 @@ export class PluginHost {
   }
 
   stop(): void {
-    this.child.stdin?.end();
-    setTimeout(() => this.child.kill("SIGKILL"), 2000).unref();
+    this.proc.kill();
   }
 }

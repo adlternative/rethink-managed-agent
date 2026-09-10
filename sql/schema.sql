@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS environments (
   name TEXT NOT NULL,
   provider TEXT NOT NULL,
   image TEXT,
+  network TEXT NOT NULL DEFAULT 'none',
+  plugin_host TEXT NOT NULL DEFAULT 'runner',
   workspace JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -63,3 +65,5 @@ CREATE TABLE IF NOT EXISTS plugin_store (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (scope, owner, key)
 );
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS network TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS plugin_host TEXT NOT NULL DEFAULT 'runner';

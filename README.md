@@ -165,9 +165,10 @@ sql/schema.sql, scripts/e2e.sh, test/
 
 Agents are extended with **pma plugins**: tools, hooks (`tool_call` / `tool_result` / `context` / turn
 and session events), skills and prompt templates, packaged like pi packages (`npm:`, `git:`, or a path).
-Plugins run in a per-agent host process under Node's permission model and only reach the world through
-`ctx` — sandbox, store, model, sub-agent, allow-listed fetch — so a plugin cannot read or write outside
-the workspace no matter what it imports. Pure-tool / pure-hook pi packages load through a compat
+Plugins run either in a per-agent host process on the runner (Node permission model + network lockdown;
+only `ctx` — sandbox, store, model, sub-agent, allow-listed fetch — reaches the world) or, per environment
+(`plugin_host: "sandbox"`), inside the leased sandbox where they may use fs and the network directly and the
+sandbox is the boundary. Pure-tool / pure-hook pi packages load through a compat
 adapter. Samples in `plugins/`: goal, fork, safety-net, web-fetch. See [docs/PLUGINS.md](docs/PLUGINS.md).
 
 ```bash

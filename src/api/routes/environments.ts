@@ -40,13 +40,18 @@ export function validateImage(image: unknown): string | null {
 
 export const environments = new Hono()
   .post("/", async (c) => {
-    const body = await readJson<{ name?: string; provider?: string; image?: string; workspace?: unknown }>(c);
+    const body = await readJson<{ name?: string; provider?: string; image?: string; workspace?: unknown; network?: string; plugin_host?: string }>(c);
+    if (body.network !== undefined && body.network !== "none" && body.network !== "bridge") throw invalid("network must be 'none' | 'bridge'");
+    if (body.plugin_host !== undefined && body.plugin_host !== "runner" && body.plugin_host !== "sandbox") throw invalid("plugin_host must be 'runner' | 'sandbox'");
+    if (body.plugin_host === "sandbox" && body.provider === "local") throw invalid("plugin_host 'sandbox' needs an isolating provider (docker | e2b)");
     if (!body.name) throw invalid("name is required");
     if (body.provider !== "local" && body.provider !== "docker" && body.provider !== "e2b") throw invalid("provider must be 'local' | 'docker' | 'e2b'");
     const env = await repos.environments.create({
       name: body.name,
       provider: body.provider,
       image: validateImage(body.image),
+      network: (body.network as "none" | "bridge") ?? "none",
+      plugin_host: (body.plugin_host as "runner" | "sandbox") ?? "runner",
       workspace: validateWorkspaceSpec(body.workspace),
     });
     return c.json(env, 201);

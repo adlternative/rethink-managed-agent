@@ -7,6 +7,7 @@ import { claimRun, finishRun, heartbeat, HEARTBEAT_MS } from "../infra/runs.ts";
 import { runSession, type AgentPlugins, type RunDeps } from "../harness/run-turn.ts";
 import { createModelRegistry } from "../harness/models.ts";
 import { PluginHost } from "../plugins/client.ts";
+import { buildHostBundle } from "../plugins/bundle.ts";
 import { ensurePackages, loadContent } from "../plugins/installer.ts";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,17 +30,24 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const pluginCache = new Map<string, Promise<AgentPlugins>>();
 function pluginsFor(agent: Parameters<RunDeps["pluginsFor"]>[0]): Promise<AgentPlugins> {
   const packages = agent.packages ?? [];
-  if (packages.length === 0) return Promise.resolve({ host: null, skills: [], prompts: [] });
+  if (packages.length === 0) return Promise.resolve({ manifests: [], skills: [], prompts: [], runnerHost: () => Promise.reject(new Error("no packages")), bundle: () => Promise.reject(new Error("no packages")) });
   const key = `${agent.id}:${JSON.stringify(packages)}`;
   let p = pluginCache.get(key);
   if (!p) {
     p = (async () => {
       const manifests = await ensurePackages(agent.id, packages);
       const content = await loadContent(manifests);
-      const host = await PluginHost.start(manifests, { agentId: agent.id, repoRoot: REPO_ROOT, extraReadDirs: [env.PI_AGENT_ROOT] });
-      for (const w of host.warnings) console.warn(`[plugins] ${agent.id}: ${w}`);
-      console.log(`[plugins] ${agent.id}: tools=${host.tools.map((t) => t.name).join(",") || "-"} hooks=${[...host.hooks].join(",") || "-"} skills=${content.skills.map((s) => s.name).join(",") || "-"}`);
-      return { host, ...content };
+      let runner: Promise<PluginHost> | null = null;
+      return {
+        manifests,
+        ...content,
+        runnerHost: () => (runner ??= PluginHost.start(manifests, { agentId: agent.id, repoRoot: REPO_ROOT, extraReadDirs: [env.PI_AGENT_ROOT] }).then((host) => {
+          for (const w of host.warnings) console.warn(`[plugins] ${agent.id}: ${w}`);
+          console.log(`[plugins] ${agent.id} (runner host): tools=${host.tools.map((t) => t.name).join(",") || "-"} hooks=${[...host.hooks].join(",") || "-"} skills=${content.skills.map((s) => s.name).join(",") || "-"}`);
+          return host;
+        })),
+        bundle: () => buildHostBundle(manifests, REPO_ROOT),
+      };
     })();
     pluginCache.set(key, p);
     p.catch(() => pluginCache.delete(key));

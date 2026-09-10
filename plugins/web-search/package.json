@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-web-search", "version": "0.1.0", "type": "module", "description": "Sandbox-native plugin: web_search (Bing) and fetch_to_file use the sandbox's own network and filesystem directly. Needs plugin_host=sandbox and network=bridge.", "pma": { "plugins": ["./index.ts"] } }

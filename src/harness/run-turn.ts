@@ -25,8 +25,9 @@ import type {
   WorkspaceRef,
   WorkspaceResource,
 } from "../shared/types.ts";
-import type { PromptTemplate, Skill } from "../plugins/api.ts";
-import type { Capabilities, PluginHost } from "../plugins/client.ts";
+import type { PackageManifest, PromptTemplate, Skill } from "../plugins/api.ts";
+import { PluginHost, type Capabilities } from "../plugins/client.ts";
+import type { HostBundle } from "../plugins/bundle.ts";
 import type { SessionInfo } from "../plugins/protocol.ts";
 import { foldEvents, toContentBlocks } from "./fold.ts";
 import { resolveModel } from "./models.ts";
@@ -40,11 +41,15 @@ export interface SteerMessage {
   content: ContentBlock[];
 }
 
-/** Plugins resolved for an agent: a running host (or none) plus package content. */
+/** Plugins resolved for an agent: package content plus lazy host factories for either placement. */
 export interface AgentPlugins {
-  host: PluginHost | null;
+  manifests: PackageManifest[];
   skills: Skill[];
   prompts: PromptTemplate[];
+  /** Shared, long-lived host on the runner (permission-restricted). */
+  runnerHost(): Promise<PluginHost>;
+  /** Bundle for starting a host inside a sandbox. */
+  bundle(): Promise<HostBundle>;
 }
 
 /** Everything runSession needs from the outside world; no DB/Redis code lives here. */
@@ -174,7 +179,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     signal: abort.signal,
     sandbox: async () => {
       held.acquiring ??= deps.sandboxes
-        .acquire({ workspaceId: workspace.id, workspaceRef: workspace.ref, image: environment.image, affinity: workspace.id })
+        .acquire({ workspaceId: workspace.id, workspaceRef: workspace.ref, image: environment.image, network: environment.network, affinity: workspace.id })
         .then(
           async (l) => {
             held.lease = l;
@@ -200,15 +205,27 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
 
   const info: SessionInfo = { sessionId, agentId: session.agent.id, workspaceId: workspace.id };
   let detachPlugins: (() => void) | null = null;
-  let plugins: AgentPlugins = { host: null, skills: [], prompts: [] };
+  let host: PluginHost | null = null;
+  let ownHost = false; // sandbox-hosted: started for this run, stopped with it
 
   try {
     const { messages, lastSeq } = foldEvents(await deps.listEvents(sessionId));
     consumedSeq = lastSeq;
     const model = resolveModel(deps.models, session.agent.model);
-    plugins = await deps.pluginsFor(session.agent);
-    const host = plugins.host;
+    const plugins = await deps.pluginsFor(session.agent);
     const builtinTools = createTools(session.agent.tools, ctx);
+    if (plugins.manifests.length > 0) {
+      if (environment.plugin_host === "sandbox" && environment.provider !== "local") {
+        // Plugins live in the sandbox: lease it now (the host needs a process to run in).
+        const sb = await ctx.sandbox();
+        host = await PluginHost.startInSandbox(sb, await plugins.bundle(), { agentId: session.agent.id });
+        ownHost = true;
+        for (const w of host.warnings) console.warn(`[plugins ${sessionId}] ${w}`);
+      } else {
+        if (environment.plugin_host === "sandbox") console.warn(`[plugins ${sessionId}] plugin_host=sandbox ignored for the local provider (no isolation); using the runner host`);
+        host = await plugins.runnerHost();
+      }
+    }
 
     // ---- capabilities plugins may call back into (all scoped to this session) ----
     const caps: Capabilities = {
@@ -357,8 +374,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     loopDone = true;
     clearTimeout(wallClock);
     await unsubscribe();
-    await plugins.host?.emit(info, { type: "session_end", sessionId, stopReason }).catch(() => {});
+    await host?.emit(info, { type: "session_end", sessionId, stopReason }).catch(() => {});
     detachPlugins?.();
+    if (ownHost) host?.stop();
     if (stopReason === "error" && abort.signal.aborted) {
       await emit({ type: "session.error", error: { type: "run_timeout", message: `run exceeded RUN_TIMEOUT_MS (${env.RUN_TIMEOUT_MS})` } });
     }
