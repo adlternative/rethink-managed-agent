@@ -54,6 +54,7 @@ function buildMessages(events: SessionEvent[]): { messages: Message[]; lastSeq: 
       case "session.status_terminated": running = false; out.push(msg({ role: "system", content: "session terminated" })); break;
       case "session.error": out.push(msg({ role: "system", content: `✗ ${p.error.type}: ${p.error.message}` })); break;
       case "agent.thread_context_compacted": out.push(msg({ role: "system", content: `⇣ context compacted: ${p.tokens_before} → ${p.tokens_after} tokens` })); break;
+      case "plugin.message": out.push(msg({ role: "system", content: `⚑ ${p.plugin}: ${textOf(p.content)}` })); break;
     }
   }
   return { messages: out, lastSeq: events.length ? events[events.length - 1]!.seq : 0, running };
@@ -218,6 +219,7 @@ function App({ opts }: { opts: TuiOptions }) {
       case "session.status_terminated": setGenerating(false); finishStream(); sys("session terminated"); break;
       case "session.error": sys(`✗ ${p.error.type}: ${p.error.message}`); break;
       case "agent.thread_context_compacted": sys(`⇣ context compacted: ${p.tokens_before} → ${p.tokens_after} tokens`); break;
+      case "plugin.message": sys(`⚑ ${p.plugin}: ${textOf(p.content)}`); break;
       case "user.message": {
         const text = textOf(p.content);
         setMessages((prev) => {

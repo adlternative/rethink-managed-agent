@@ -24,17 +24,45 @@ They are installed once per agent into `PI_AGENT_ROOT/<agent_id>` and cached by 
 ```ts
 export default function (p: PluginAPI) {
   p.registerTool({ name, description, parameters /* typebox */, async execute(input, ctx) { return "text" | { content, isError } } });
-  p.on("tool_call",   (ev, ctx) => ({ block: true, reason }) | undefined);   // before a tool runs; can block
-  p.on("tool_result", (ev, ctx) => ({ content?, isError? }) | undefined);    // after; can rewrite the result
-  p.on("context",     (ev, ctx) => ({ appendSystemPrompt }) | undefined);   // before every model request
-  p.on("turn_start" | "turn_end" | "session_start" | "session_end", (ev, ctx) => void);
+  p.registerCommand({ name: "goal", description, async handler(args, ctx) { return { reply?, send? } | "reply" } });   // "/goal ..." in a user message
+  p.on("<hook>", (event, ctx) => result | undefined);
 }
 ```
+
+### Hooks (modelled on pi's extension events)
+
+| hook | when | may return |
+|---|---|---|
+| `input` | a user message is about to enter the session (trigger, steer, or sub-agent brief) | `{text}` rewrite · `{cancel:true}` swallow |
+| `before_agent_start` | once per run, before the first model request | `{systemPrompt \| appendSystemPrompt, injectMessage}` |
+| `context` | before every model request; carries `contextTokens` / `contextWindow` | `{appendSystemPrompt}` (this request only) |
+| `model_request_start` / `model_request_end` | around each provider call; end carries usage | — |
+| `message_end` | the assistant produced a message: text, thinking, tool calls | — |
+| `tool_call` | before a tool runs | `{block, reason}` · `{input}` rewrite |
+| `tool_result` | after a tool ran | `{content, isError}` rewrite |
+| `turn_start` / `turn_end` | per model turn; end carries `toolCalls` | `turn_end`: `{stop, reason}` |
+| `before_compact` / `after_compact` | around context compaction | `before`: `{cancel}` · `{instructions}` for the summarizer |
+| `sandbox_acquired` / `sandbox_released` / `workspace_captured` | sandbox lifecycle | — |
+| `session_start` / `session_end` | per run; end carries `stopReason`, `turns` | — |
+| `error` | a run failed | — |
+
+Handlers run in registration order and see the event as modified by earlier handlers (`input.text`,
+`tool_call.input`), so plugins compose like middleware. Text results (`appendSystemPrompt`, `instructions`,
+`reason`) accumulate; decisions (`block`, `cancel`, `stop`) are final once made.
+
+### Commands
+
+`registerCommand({name, handler})` makes `/name args` in a user message run the handler instead of the
+model. The handler's `reply` is persisted as `plugin.message` (shown to the user, never sent to the model);
+`send` forwards a rewritten prompt to the model. Without `send` the turn ends after the reply.
 
 `ctx` capabilities:
 
 | capability | what it does | where it runs |
 |---|---|---|
+| `ctx.session.note(text)` | persist a note for the user (`plugin.message`; not model context) | runner |
+| `ctx.session.send(text)` | queue a user-role message: steers the running turn or starts the next run | runner |
+| `ctx.session.interrupt()` | abort the current run | runner |
 | `ctx.sandbox.exec / readFile / writeFile` | the session's sandbox, workspace-confined, lazily leased like the builtin tools | sandbox |
 | `ctx.store.get / set(key, value, "agent" \| "workspace")` | JSON KV in Postgres (`plugin_store`) | runner |
 | `ctx.model.complete(prompt, {system, maxTokens})` | one-shot completion with the session's model | runner |

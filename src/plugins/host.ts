@@ -7,7 +7,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { lockdown } from "./lockdown.ts";
-import type { HookEvent, HookName, PackageManifest, PluginAPI, PluginContext, PluginFactory, ToolSpec } from "./api.ts";
+import type { CommandSpec, HookEvent, HookName, PackageManifest, PluginAPI, PluginContext, PluginFactory, ToolSpec } from "./api.ts";
 import { Rpc, type SessionInfo } from "./protocol.ts";
 import { piCompatFactory } from "./pi-compat.ts";
 
@@ -17,6 +17,7 @@ if (process.env.PMA_HOST_LOCKDOWN !== "0") lockdown();
 
 type Handler = (event: HookEvent, ctx: PluginContext) => unknown;
 const tools = new Map<string, { spec: ToolSpec; source: string }>();
+const commands = new Map<string, { spec: CommandSpec; source: string }>();
 const hooks = new Map<HookName, { handler: Handler; source: string }[]>();
 const warnings: string[] = [];
 
@@ -29,24 +30,36 @@ const rpc = new Rpc(
         const p = params as { session: SessionInfo; name: string; input: unknown };
         const t = tools.get(p.name);
         if (!t) throw new Error(`plugin host: unknown tool ${p.name}`);
-        const r = await t.spec.execute(p.input as never, makeContext(p.session));
+        const r = await t.spec.execute(p.input as never, makeContext(p.session, t.source));
         return typeof r === "string" ? { content: [{ type: "text", text: r }] } : r;
+      }
+      case "command.run": {
+        const p = params as { session: SessionInfo; name: string; args: string };
+        const c = commands.get(p.name);
+        if (!c) throw new Error(`plugin host: unknown command /${p.name}`);
+        const r = await c.spec.handler(p.args, makeContext(p.session, c.source));
+        return typeof r === "string" ? { reply: r } : (r ?? {});
       }
       case "hook.emit": {
         const p = params as { session: SessionInfo; event: HookEvent };
-        const ctx = makeContext(p.session);
         let merged: Record<string, unknown> | undefined;
+        // Handlers run in registration order; each sees the event as modified by earlier ones
+        // (input.text, tool_call.input), so plugins compose like middleware.
+        let event: Record<string, unknown> = { ...p.event };
         for (const h of hooks.get(p.event.type) ?? []) {
-          const r = (await h.handler(p.event, ctx)) as Record<string, unknown> | undefined | void;
-          if (r && typeof r === "object") {
-            merged = { ...(merged ?? {}), ...r };
-            // first block wins; later handlers still run (they may log) but cannot unblock
-            if (p.event.type === "tool_call" && r.block) break;
-            // context hooks accumulate appended text
-            if (p.event.type === "context" && typeof r.appendSystemPrompt === "string" && typeof (merged as { appendSystemPrompt?: string }).appendSystemPrompt === "string" && merged.appendSystemPrompt !== r.appendSystemPrompt) {
-              merged.appendSystemPrompt = [(merged.appendSystemPrompt as string), r.appendSystemPrompt].filter(Boolean).join("\n");
-            }
+          const r = (await h.handler(event as unknown as HookEvent, makeContext(p.session, h.source))) as Record<string, unknown> | undefined | void;
+          if (!r || typeof r !== "object") continue;
+          merged = { ...(merged ?? {}) };
+          for (const [k, v] of Object.entries(r)) {
+            if (v === undefined) continue;
+            // accumulate text-ish fields, otherwise last writer wins
+            if ((k === "appendSystemPrompt" || k === "instructions" || k === "reason") && typeof merged[k] === "string" && typeof v === "string") merged[k] = `${merged[k]}\n${v}`;
+            else merged[k] = v;
           }
+          if (p.event.type === "input" && typeof r.text === "string") event = { ...event, text: r.text };
+          if (p.event.type === "tool_call" && r.input !== undefined) event = { ...event, input: r.input };
+          // decisions that later handlers cannot undo
+          if ((p.event.type === "tool_call" && r.block) || (p.event.type === "input" && r.cancel) || (p.event.type === "before_compact" && r.cancel) || (p.event.type === "turn_end" && r.stop)) break;
         }
         return merged ?? null;
       }
@@ -58,12 +71,18 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (c: string) => rpc.feed(c));
 process.stdin.on("end", () => process.exit(0));
 
-function makeContext(session: SessionInfo): PluginContext {
+function makeContext(session: SessionInfo, plugin = "plugin"): PluginContext {
   const call = <T>(method: string, params: Record<string, unknown>) => rpc.call<T>(method, { session, ...params });
   return {
     sessionId: session.sessionId,
     agentId: session.agentId,
     workspaceId: session.workspaceId,
+    plugin,
+    session: {
+      note: (text) => call("session.note", { plugin, text }).then(() => undefined),
+      send: (text) => call("session.send", { text }).then(() => undefined),
+      interrupt: () => call("session.interrupt", {}).then(() => undefined),
+    },
     sandbox: {
       exec: (command, opts) => call("sandbox.exec", { command, ...opts }),
       readFile: (p, opts) => call("sandbox.readFile", { path: p, ...opts }),
@@ -87,6 +106,11 @@ function apiFor(source: string): PluginAPI {
       if (tools.has(spec.name)) warnings.push(`${source}: tool ${spec.name} already registered by ${tools.get(spec.name)!.source}; overriding`);
       tools.set(spec.name, { spec: spec as ToolSpec, source });
     },
+    registerCommand(spec) {
+      if (!/^[a-z][a-z0-9_-]*$/.test(spec.name)) { warnings.push(`${source}: invalid command name /${spec.name}`); return; }
+      if (commands.has(spec.name)) warnings.push(`${source}: command /${spec.name} already registered by ${commands.get(spec.name)!.source}; overriding`);
+      commands.set(spec.name, { spec, source });
+    },
     on(event, handler) {
       const list = hooks.get(event) ?? [];
       list.push({ handler: handler as Handler, source });
@@ -99,7 +123,7 @@ async function load(packages: PackageManifest[]) {
   for (const pkg of packages) {
     for (const rel of pkg.plugins) {
       const file = path.resolve(pkg.dir, rel);
-      const source = `${pkg.source}:${rel}`;
+      const source = pkg.name ?? `${pkg.source}:${rel}`;
       try {
         const mod = (await import(pathToFileURL(file).href)) as { default?: PluginFactory };
         if (typeof mod.default !== "function") throw new Error("plugin module must default-export a function (api) => void");
@@ -112,6 +136,7 @@ async function load(packages: PackageManifest[]) {
   }
   return {
     tools: [...tools.entries()].map(([name, t]) => ({ name, description: t.spec.description, parameters: t.spec.parameters, source: t.source })),
+    commands: [...commands.entries()].map(([name, c]) => ({ name, description: c.spec.description, source: c.source })),
     hooks: [...hooks.keys()],
     warnings: warnings.splice(0),
   };

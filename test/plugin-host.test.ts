@@ -4,7 +4,7 @@ import { PluginHost, type Capabilities } from "../src/plugins/client.ts";
 import { loadContent, type PackageManifest } from "../src/plugins/installer.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const pkg = (dir: string, extra: Partial<PackageManifest> = {}): PackageManifest => ({ dir, source: dir, kind: "pma", plugins: ["index.ts"], skills: [], prompts: [], ...extra });
+const pkg = (dir: string, extra: Partial<PackageManifest> = {}): PackageManifest => ({ dir, source: dir, name: path.basename(dir), kind: "pma", plugins: ["index.ts"], skills: [], prompts: [], ...extra });
 const session = { sessionId: "sess_t", agentId: "agent_t", workspaceId: "ws_t" };
 
 let host: PluginHost;
@@ -21,6 +21,9 @@ const caps: Capabilities = {
   agentRun: async (task) => `sub-agent report for: ${task}`,
   fetch: async (url) => ({ status: 200, headers: {}, body: `<html><body><h1>Hello ${url}</h1><script>x()</script></body></html>` }),
   log: (args) => calls.push(`log:${args.join(" ")}`),
+  sessionNote: async (plugin, text) => { calls.push(`note:${plugin}:${text}`); },
+  sessionSend: async (text) => { calls.push(`send:${text}`); },
+  sessionInterrupt: async () => { calls.push("interrupt"); },
 };
 
 beforeAll(async () => {
@@ -39,10 +42,25 @@ beforeAll(async () => {
 afterAll(() => host?.stop());
 
 describe("plugin host", () => {
-  it("loads pma and pi packages and reports tools/hooks", () => {
+  it("loads pma and pi packages and reports tools/commands/hooks", () => {
     expect(host.tools.map((t) => t.name).sort()).toEqual(["demo_secret", "fork", "goal_progress", "set_goal", "web_fetch"]);
-    expect([...host.hooks].sort()).toEqual(["context", "tool_call"]);
+    expect(host.commands.map((c) => c.name)).toEqual(["goal"]);
+    expect([...host.hooks].sort()).toEqual(["before_agent_start", "context", "session_end", "tool_call"]);
     expect(host.warnings).toEqual([]);
+  });
+
+  it("dispatches slash commands and lets hooks talk to the session", async () => {
+    expect(await host.runCommand(session, "goal", "")).toMatchObject({ reply: expect.stringContaining("No goal set") });
+    const r = await host.runCommand(session, "goal", "ship v1");
+    expect(r.reply).toContain("Goal noted");
+    expect(r.send).toContain("set_goal");
+    // hooks can post notes through ctx.session
+    await host.emit(session, { type: "before_agent_start", systemPrompt: "s", messageCount: 1, trigger: "x" });
+    expect(calls.some((c) => c.startsWith("note:") && c.includes("working toward"))).toBe(false); // no goal in store yet
+    const tools = Object.fromEntries(host.agentTools(session).map((t) => [t.name, t]));
+    await tools.set_goal!.execute("g", { goal: "ship v1", steps: ["a"] });
+    await host.emit(session, { type: "before_agent_start", systemPrompt: "s", messageCount: 1, trigger: "x" });
+    expect(calls.some((c) => c.includes("note:") && c.includes("working toward: ship v1"))).toBe(true);
   });
 
   it("runs tools through capabilities (store, agent, fetch)", async () => {

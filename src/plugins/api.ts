@@ -25,23 +25,56 @@ export interface ToolSpec<TParams extends TSchema = TSchema> {
   execute(input: Static<TParams>, ctx: PluginContext): Promise<ToolResult | string>;
 }
 
-// ---------- hook events ----------
+// ---------- hook events (modelled on pi's extension events; every one is optional) ----------
+/** A user message is about to enter the session (trigger, steering, or sub-agent brief). Rewrite or swallow it. */
+export interface InputEvent { type: "input"; text: string; source: "user" | "steer" | "subagent" }
+export interface InputResult { text?: string; /** drop the message: nothing is sent to the model */ cancel?: boolean }
+/** Once per run, before the first model request. */
+export interface BeforeAgentStartEvent { type: "before_agent_start"; systemPrompt: string; messageCount: number; trigger: string }
+export interface BeforeAgentStartResult { systemPrompt?: string; appendSystemPrompt?: string; /** extra user message placed right before the trigger */ injectMessage?: string }
+/** Before every model request; may add text to the system prompt for this request only. */
+export interface ContextEvent { type: "context"; systemPrompt: string; messageCount: number; contextTokens: number; contextWindow: number }
+export interface ContextResult { appendSystemPrompt?: string }
+export interface ModelRequestStartEvent { type: "model_request_start"; model: string; messageCount: number; contextTokens: number }
+export interface ModelRequestEndEvent { type: "model_request_end"; model: string; stopReason: string; usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }; contextTokens: number; contextWindow: number }
+/** The assistant produced a message (text + tool calls it wants to make). Read-only. */
+export interface MessageEndEvent { type: "message_end"; text: string; thinking?: string; toolCalls: { id: string; name: string; input: unknown }[]; stopReason: string }
 export interface ToolCallEvent { type: "tool_call"; toolName: string; input: unknown; toolCallId: string }
-export interface ToolCallResult { block?: boolean; reason?: string }
+export interface ToolCallResult { block?: boolean; reason?: string; /** replace the arguments the tool runs with */ input?: unknown }
 export interface ToolResultEvent { type: "tool_result"; toolName: string; input: unknown; toolCallId: string; content: string; isError: boolean }
 export interface ToolResultResult { content?: string; isError?: boolean }
-/** Runs before each model request; may add text to the system prompt for this request only. */
-export interface ContextEvent { type: "context"; systemPrompt: string; messageCount: number }
-export interface ContextResult { appendSystemPrompt?: string }
-export interface TurnEvent { type: "turn_start" | "turn_end"; turn: number }
-export interface SessionEvent { type: "session_start" | "session_end"; sessionId: string; stopReason?: string }
+export interface TurnEvent { type: "turn_start" | "turn_end"; turn: number; /** turn_end only */ toolCalls?: number }
+export interface TurnEndResult { /** stop the run after this turn */ stop?: boolean; reason?: string }
+export interface SessionEvent { type: "session_start" | "session_end"; sessionId: string; stopReason?: string; turns?: number }
+export interface BeforeCompactEvent { type: "before_compact"; contextTokens: number; contextWindow: number; messageCount: number }
+export interface BeforeCompactResult { /** skip this compaction */ cancel?: boolean; /** extra focus for the summarizer */ instructions?: string }
+export interface AfterCompactEvent { type: "after_compact"; summary: string; tokensBefore: number; tokensAfter: number }
+export interface SandboxEvent { type: "sandbox_acquired" | "sandbox_released"; sandboxId: string; provider: string; env: string; origin?: string }
+export interface WorkspaceCapturedEvent { type: "workspace_captured"; env: string; workspaceId: string; refKind: string }
+export interface ErrorEvent { type: "error"; errorType: string; message: string }
 
-export type HookEvent = ToolCallEvent | ToolResultEvent | ContextEvent | TurnEvent | SessionEvent;
-export type HookResultFor<E extends HookEvent> = E extends ToolCallEvent ? ToolCallResult
-  : E extends ToolResultEvent ? ToolResultResult
+export type HookEvent =
+  | InputEvent | BeforeAgentStartEvent | ContextEvent | ModelRequestStartEvent | ModelRequestEndEvent | MessageEndEvent
+  | ToolCallEvent | ToolResultEvent | TurnEvent | SessionEvent | BeforeCompactEvent | AfterCompactEvent | SandboxEvent
+  | WorkspaceCapturedEvent | ErrorEvent;
+export type HookResultFor<E extends HookEvent> =
+  E extends InputEvent ? InputResult
+  : E extends BeforeAgentStartEvent ? BeforeAgentStartResult
   : E extends ContextEvent ? ContextResult
+  : E extends ToolCallEvent ? ToolCallResult
+  : E extends ToolResultEvent ? ToolResultResult
+  : E extends TurnEvent ? TurnEndResult
+  : E extends BeforeCompactEvent ? BeforeCompactResult
   : void;
 export type HookName = HookEvent["type"];
+
+/** `/name args` in a user message dispatches to a registered command instead of the model. */
+export interface CommandSpec {
+  name: string;
+  description: string;
+  /** Return text to show the user (persisted as plugin.message) and/or `send` a rewritten prompt to the model. */
+  handler(args: string, ctx: PluginContext): Promise<{ reply?: string; send?: string } | string | void>;
+}
 
 // ---------- capabilities (all mediated by the runner) ----------
 export interface SandboxCapability {
@@ -76,10 +109,22 @@ export interface FetchCapability {
   (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
 }
 
+export interface SessionCapability {
+  /** Persist a plugin-authored note on the session (event plugin.message; shown to the user, not sent to the model). */
+  note(text: string): Promise<void>;
+  /** Queue a user-role message for the model: steers the current run or starts the next one. */
+  send(text: string): Promise<void>;
+  /** Interrupt the current run. */
+  interrupt(): Promise<void>;
+}
+
 export interface PluginContext {
   sessionId: string;
   agentId: string;
   workspaceId: string;
+  /** name of the plugin (its package source) — used to attribute notes */
+  plugin: string;
+  session: SessionCapability;
   sandbox: SandboxCapability;
   store: StoreCapability;
   model: ModelCapability;
@@ -90,6 +135,7 @@ export interface PluginContext {
 
 export interface PluginAPI {
   registerTool<T extends TSchema>(tool: ToolSpec<T>): void;
+  registerCommand(cmd: CommandSpec): void;
   on<E extends HookEvent>(event: E["type"], handler: (event: E, ctx: PluginContext) => Promise<HookResultFor<E> | undefined | void> | HookResultFor<E> | undefined | void): void;
 }
 export type PluginFactory = (api: PluginAPI) => void | Promise<void>;
@@ -99,6 +145,8 @@ export interface PackageManifest {
   /** absolute install dir */
   dir: string;
   source: string;
+  /** package.json name (used to attribute notes and warnings) */
+  name?: string;
   kind: "pma" | "pi";
   plugins: string[];
   skills: string[];

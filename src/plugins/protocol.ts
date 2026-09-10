@@ -11,7 +11,8 @@ export type Frame = Req | Res;
 // runner -> host
 export interface HostMethods {
   /** Load packages; returns registered tools (schemas) and hooks present. */
-  load: { params: { packages: PackageManifest[] }; result: { tools: { name: string; description: string; parameters: unknown; source: string }[]; hooks: string[]; warnings: string[] } };
+  load: { params: { packages: PackageManifest[] }; result: { tools: { name: string; description: string; parameters: unknown; source: string }[]; commands: { name: string; description: string; source: string }[]; hooks: string[]; warnings: string[] } };
+  "command.run": { params: { session: SessionInfo; name: string; args: string }; result: { reply?: string; send?: string } };
   "tool.execute": { params: { session: SessionInfo; name: string; input: unknown }; result: { content: { type: "text"; text: string }[]; isError?: boolean } };
   "hook.emit": { params: { session: SessionInfo; event: HookEvent }; result: unknown };
 }
@@ -27,6 +28,9 @@ export interface RunnerMethods {
   "agent.run": { params: { session: SessionInfo; task: string; system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }; result: string | { report: string; patch?: string; sessionId: string } };
   fetch: { params: { session: SessionInfo; url: string; method?: string; headers?: Record<string, string>; body?: string }; result: { status: number; headers: Record<string, string>; body: string } };
   log: { params: { session: SessionInfo; args: unknown[] }; result: null };
+  "session.note": { params: { session: SessionInfo; plugin: string; text: string }; result: null };
+  "session.send": { params: { session: SessionInfo; text: string }; result: null };
+  "session.interrupt": { params: { session: SessionInfo }; result: null };
 }
 export interface SessionInfo { sessionId: string; agentId: string; workspaceId: string }
 

@@ -83,6 +83,8 @@ export interface RunDeps {
   onInterrupt(sessionId: SessionId, handler: () => void): Unsubscribe | Promise<Unsubscribe>;
   /** Drain user messages queued while the session is running (already persisted as events by the API). */
   popSteer(sessionId: SessionId): Promise<SteerMessage[]>;
+  /** Persist a user message on behalf of a plugin and queue it for the running loop (or the next run). */
+  pushSteer(sessionId: SessionId, text: string): Promise<void>;
   getSession(id: SessionId): Promise<SessionResource | null>;
   getWorkspace(id: WorkspaceId): Promise<WorkspaceResource | null>;
   getEnvironment(id: string): Promise<EnvironmentResource | null>;
@@ -113,6 +115,10 @@ function textBlocks(content: { type: string; text?: string }[]): ContentBlock[] 
   return content.flatMap((c) => (c.type === "text" && c.text !== undefined ? [{ type: "text" as const, text: c.text }] : []));
 }
 const blocksText = (content: { type: string; text?: string }[]) => textBlocks(content).map((b) => b.text).join("");
+const userText = (m: AgentMessage): string => {
+  const c = (m as { content: unknown }).content;
+  return typeof c === "string" ? c : blocksText(c as { type: string; text?: string }[]);
+};
 const thinkingText = (m: { content: { type: string; thinking?: string }[] }) => m.content.filter((c) => c.type === "thinking").map((c) => c.thinking ?? "").join("\n");
 
 /** Credentials embedded in a remote URL must not land in the event log. */
@@ -224,6 +230,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
           async (l) => {
             slot.lease = l;
             await emit({ type: "sandbox.acquired", sandbox_id: l.sandbox.id, provider: l.sandbox.provider, env: key, origin: l.origin });
+            await hostRef.current?.emit(info, { type: "sandbox_acquired", sandboxId: l.sandbox.id, provider: l.sandbox.provider, env: key, origin: l.origin }).catch(() => {});
             return l;
           },
           (err) => {
@@ -245,7 +252,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
 
   const info: SessionInfo = { sessionId, agentId: session.agent.id, workspaceId: workspace.id };
   let detachPlugins: (() => void) | null = null;
+  let turns = 0;
   let host: PluginHost | null = null;
+  const hostRef: { current: PluginHost | null } = { current: null };
   let ownHost = false; // sandbox-hosted: started for this run, stopped with it
 
   try {
@@ -260,8 +269,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     /** Compact `msgs` if over budget; persists the event and returns the new message list (or the same one). */
     const maybeCompact = async (msgs: AgentMessage[]): Promise<AgentMessage[]> => {
       if (!needsCompaction(msgs, model, compaction)) return msgs;
+      const pre = await hostRef.current?.emit(info, { type: "before_compact", contextTokens: contextTokens(msgs), contextWindow: model.contextWindow, messageCount: msgs.length });
+      if (pre?.cancel) return msgs;
       console.log(`[compaction ${sessionId}] ${contextTokens(msgs)} tokens > ${model.contextWindow} - ${compaction.reserveTokens}; compacting ${msgs.length} messages`);
-      const r = await compactMessages({ messages: msgs, model, streamFn: deps.models.streamSimple.bind(deps.models), settings: compaction, previousSummary: lastSummary, signal: abort.signal }).catch((e) => {
+      const r = await compactMessages({ messages: msgs, model, streamFn: deps.models.streamSimple.bind(deps.models), settings: compaction, previousSummary: lastSummary, signal: abort.signal, instructions: pre?.instructions }).catch((e) => {
         console.warn(`[compaction ${sessionId}] failed: ${e instanceof Error ? e.message : e}`);
         return null;
       });
@@ -274,6 +285,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       seqOf.set(r.messages[0]!, ev!.seq);
       lastSummary = r.summary;
       console.log(`[compaction ${sessionId}] ${r.tokensBefore} -> ${r.tokensAfter} tokens, kept from seq ${firstKeptSeq}`);
+      await hostRef.current?.emit(info, { type: "after_compact", summary: r.summary, tokensBefore: r.tokensBefore, tokensAfter: r.tokensAfter });
       return r.messages;
     };
     // History may already be over budget (long session resumed): compact before the first request.
@@ -292,6 +304,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         host = await plugins.runnerHost();
       }
     }
+    hostRef.current = host;
 
     // ---- capabilities plugins may call back into (all scoped to this session) ----
     const caps: Capabilities = {
@@ -359,6 +372,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         return { status: r.status, headers, body: truncateOutput(await r.text(), 200_000) };
       },
       log: (args) => console.log(`[plugin ${sessionId}]`, ...args),
+      sessionNote: async (plugin, text) => { await emit({ type: "plugin.message", plugin, content: [{ type: "text", text }] }); },
+      sessionSend: async (text) => { await deps.pushSteer(sessionId, text); },
+      sessionInterrupt: async () => { stopReason = "interrupted"; abort.abort(); },
     };
     detachPlugins = host?.attach(info, caps) ?? null;
 
@@ -367,30 +383,78 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     if (st) tools.push(st);
     const baseSystemPrompt = [session.agent.system ?? DEFAULT_SYSTEM_PROMPT, skillsPrompt(plugins.skills, plugins.prompts)].filter(Boolean).join("\n\n");
 
-    const systemPromptFor = async (messageCount: number): Promise<string> => {
-      const r = await host?.emit(info, { type: "context", systemPrompt: baseSystemPrompt, messageCount });
-      return r?.appendSystemPrompt ? `${baseSystemPrompt}\n\n${r.appendSystemPrompt}` : baseSystemPrompt;
+    let runSystemPrompt = baseSystemPrompt;
+    const systemPromptFor = async (msgs: AgentMessage[]): Promise<string> => {
+      const r = await host?.emit(info, { type: "context", systemPrompt: runSystemPrompt, messageCount: msgs.length, contextTokens: contextTokens(msgs), contextWindow: model.contextWindow });
+      return r?.appendSystemPrompt ? `${runSystemPrompt}\n\n${r.appendSystemPrompt}` : runSystemPrompt;
     };
 
     await host?.emit(info, { type: "session_start", sessionId });
-    const context: AgentContext = { systemPrompt: await systemPromptFor(messages.length), messages, tools };
-    let turns = 0;
+
+    // The trigger (last user message) passes through `input` hooks and slash-command dispatch.
+    // A command answers the user directly (plugin.message) and may or may not send a prompt on.
+    const trigger = messages[messages.length - 1];
+    let skipModel = false;
+    if (trigger?.role === "user") {
+      let text = userText(trigger);
+      const cmd = /^\/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$/.exec(text.trim());
+      if (cmd && host?.commands.some((c) => c.name === cmd[1])) {
+        const r = await host.runCommand(info, cmd[1]!, cmd[2] ?? "");
+        if (r.reply) await emit({ type: "plugin.message", plugin: `/${cmd[1]}`, content: [{ type: "text", text: r.reply }] });
+        if (r.send) text = r.send; else skipModel = true;
+      }
+      if (!skipModel) {
+        const r = await host?.emit(info, { type: "input", text, source: "user" });
+        if (r?.cancel) skipModel = true;
+        else if (r?.text !== undefined && r.text !== text) text = r.text;
+      }
+      if (!skipModel && text !== userText(trigger)) {
+        const rewritten: UserMessage = { role: "user", content: [{ type: "text", text }], timestamp: trigger.timestamp };
+        const seq = seqOf.get(trigger);
+        if (seq !== undefined) seqOf.set(rewritten, seq);
+        messages = [...messages.slice(0, -1), rewritten];
+      }
+      if (!skipModel) {
+        const pre = await host?.emit(info, { type: "before_agent_start", systemPrompt: baseSystemPrompt, messageCount: messages.length, trigger: text });
+        if (pre?.systemPrompt) runSystemPrompt = pre.systemPrompt;
+        if (pre?.appendSystemPrompt) runSystemPrompt = `${runSystemPrompt}\n\n${pre.appendSystemPrompt}`;
+        if (pre?.injectMessage) {
+          const injected: UserMessage = { role: "user", content: [{ type: "text", text: pre.injectMessage }], timestamp: Date.now() };
+          const seq = seqOf.get(messages[messages.length - 1]!);
+          if (seq !== undefined) seqOf.set(injected, seq);
+          messages = [...messages.slice(0, -1), injected, messages[messages.length - 1]!];
+        }
+      }
+    }
+    const context: AgentContext = { systemPrompt: await systemPromptFor(messages), messages, tools };
     const config: AgentLoopConfig = {
       model,
       convertToLlm,
       toolExecution: "sequential",
-      getSteeringMessages: async () =>
-        (await deps.popSteer(sessionId))
-          .filter((s) => s.seq > consumedSeq) // already in the folded log (stale entry from an earlier run)
-          .map((s): UserMessage => {
-            consumedSeq = Math.max(consumedSeq, s.seq);
-            const m: UserMessage = { role: "user", content: textBlocks(s.content), timestamp: Date.now() };
-            seqOf.set(m, s.seq);
-            return m;
-          }),
+      getSteeringMessages: async () => {
+        const out: UserMessage[] = [];
+        for (const st of (await deps.popSteer(sessionId)).filter((x) => x.seq > consumedSeq)) {
+          consumedSeq = Math.max(consumedSeq, st.seq);
+          let text = blocksText(textBlocks(st.content));
+          const r = await host?.emit(info, { type: "input", text, source: "steer" });
+          if (r?.cancel) continue;
+          if (r?.text !== undefined) text = r.text;
+          const m: UserMessage = { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+          seqOf.set(m, st.seq);
+          out.push(m);
+        }
+        return out;
+      },
       beforeToolCall: async ({ toolCall, args }) => {
         const r = await host?.emit(info, { type: "tool_call", toolName: toolCall.name, toolCallId: toolCall.id, input: args });
-        return r?.block ? { block: true, reason: r.reason ?? `blocked by plugin` } : undefined;
+        if (r?.block) return { block: true, reason: r.reason ?? `blocked by plugin` };
+        // pi-agent-core validates args before this hook and passes the object by reference:
+        // mutate it in place so a rewritten input reaches the tool.
+        if (r?.input && typeof r.input === "object" && args && typeof args === "object") {
+          for (const k of Object.keys(args as object)) delete (args as Record<string, unknown>)[k];
+          Object.assign(args as object, r.input as object);
+        }
+        return undefined;
       },
       afterToolCall: async ({ toolCall, args, result, isError }) => {
         const r = await host?.emit(info, { type: "tool_result", toolName: toolCall.name, toolCallId: toolCall.id, input: args, content: blocksText(result.content), isError });
@@ -399,12 +463,16 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       },
       prepareNextTurn: async ({ context: c }) => {
         const compacted = await maybeCompact(c.messages);
-        const systemPrompt = host?.hooks.has("context") ? await systemPromptFor(compacted.length) : c.systemPrompt;
+        const systemPrompt = host?.hooks.has("context") ? await systemPromptFor(compacted) : c.systemPrompt;
         return compacted !== c.messages || systemPrompt !== c.systemPrompt ? { context: { ...c, messages: compacted, systemPrompt } } : undefined;
       },
       shouldStopAfterTurn: async ({ toolResults }) => {
         turns++;
-        await host?.emit(info, { type: "turn_end", turn: turns });
+        const te = await host?.emit(info, { type: "turn_end", turn: turns, toolCalls: toolResults.length });
+        if (te?.stop) {
+          await emit({ type: "plugin.message", plugin: "hook:turn_end", content: [{ type: "text", text: `run stopped by plugin${te.reason ? `: ${te.reason}` : ""}` }] });
+          return true;
+        }
         if (toolResults.length > 0 && turns >= env.MAX_TURNS) {
           stopReason = "max_turns";
           return true;
@@ -421,7 +489,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     const sink = async (ev: AgentEvent) => {
       switch (ev.type) {
         case "message_start":
-          if (ev.message.role === "assistant") streamId = `${sessionId}:${Date.now().toString(36)}:${++streamSeq}`;
+          if (ev.message.role === "assistant") {
+            streamId = `${sessionId}:${Date.now().toString(36)}:${++streamSeq}`;
+            await host?.emit(info, { type: "model_request_start", model: `${model.provider}/${model.id}`, messageCount: context.messages.length, contextTokens: contextTokens(context.messages) }).catch(() => {});
+          }
           break;
         case "message_update": {
           const e = ev.assistantMessageEvent;
@@ -451,7 +522,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
               const context: ContextSize = { tokens: carried, window: model.contextWindow, ratio: model.contextWindow ? Math.min(1, carried / model.contextWindow) : 0, model: `${model.provider}/${model.id}` };
               await deps.recordUsage(sessionId, usage, context);
               await emit({ type: "span.model_request_end", model: context.model, usage, context, stop_reason: m.stopReason });
+              await host?.emit(info, { type: "model_request_end", model: context.model, stopReason: m.stopReason, usage: { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, totalTokens: carried }, contextTokens: carried, contextWindow: model.contextWindow }).catch(() => {});
             }
+            await host?.emit(info, { type: "message_end", text: blocksText(m.content), thinking: thinkingText(m) || undefined, toolCalls: m.content.flatMap((c) => (c.type === "toolCall" ? [{ id: c.id, name: c.name, input: c.arguments }] : [])), stopReason: m.stopReason }).catch(() => {});
             // pi-ai reports "error" (not "aborted") when the signal was already aborted before the
             // request started — e.g. an interrupt that landed during the previous tool call.
             if (m.stopReason === "aborted" || (m.stopReason === "error" && abort.signal.aborted)) {
@@ -472,7 +545,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
 
     // A log ending in an assistant message has nothing to continue from (duplicate job for an
     // already-answered message): end the turn quietly instead of letting pi throw.
-    const nothingToDo = messages.length > 0 && messages[messages.length - 1]!.role === "assistant";
+    const nothingToDo = skipModel || (messages.length > 0 && messages[messages.length - 1]!.role === "assistant");
     if (!nothingToDo) {
       await host?.emit(info, { type: "turn_start", turn: 1 });
       await runAgentLoopContinue(context, config, sink, abort.signal, deps.models.streamSimple.bind(deps.models));
@@ -484,12 +557,13 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       stopReason = "error";
       const e = err instanceof Error ? err : new Error(String(err));
       await emit({ type: "session.error", error: { type: e.name, message: e.message } });
+      await hostRef.current?.emit(info, { type: "error", errorType: e.name, message: e.message }).catch(() => {});
     }
   } finally {
     loopDone = true;
     clearTimeout(wallClock);
     await unsubscribe();
-    await host?.emit(info, { type: "session_end", sessionId, stopReason }).catch(() => {});
+    await host?.emit(info, { type: "session_end", sessionId, stopReason, turns }).catch(() => {});
     detachPlugins?.();
     if (ownHost) host?.stop();
     if (stopReason === "error" && abort.signal.aborted) {
@@ -504,6 +578,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       try {
         const ref = await deps.sandboxFor(e.environment.provider).capture(lease.sandbox, e.workspace.ref);
         await emit({ type: "workspace.captured", ref: redactRef(ref), workspace_id: e.workspace.id, env: key });
+        await hostRef.current?.emit(info, { type: "workspace_captured", env: key, workspaceId: e.workspace.id, refKind: ref.kind }).catch(() => {});
         if (!(await deps.updateWorkspaceRef(e.workspace.id, ref, e.workspace.ref))) {
           await emit({ type: "session.error", error: { type: "capture_conflict", message: `workspace ${e.workspace.id} (${key}) changed during the run (another session captured first); this run's capture was not saved` } });
         }
@@ -513,6 +588,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       } finally {
         await lease.release();
         await emit({ type: "sandbox.released", sandbox_id: lease.sandbox.id, env: key });
+        await hostRef.current?.emit(info, { type: "sandbox_released", sandboxId: lease.sandbox.id, provider: lease.sandbox.provider, env: key }).catch(() => {});
       }
     }
   }

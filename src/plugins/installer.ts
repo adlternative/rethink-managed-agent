@@ -45,7 +45,7 @@ async function installOne(source: string, root: string): Promise<string> {
 }
 
 async function readManifest(dir: string, source: string): Promise<PackageManifest> {
-  const pkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8").catch(() => "{}")) as { pma?: Record<string, string[]>; pi?: Record<string, string[]> };
+  const pkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8").catch(() => "{}")) as { name?: string; pma?: Record<string, string[]>; pi?: Record<string, string[]> };
   const m = pkg.pma ?? pkg.pi;
   const kind: PackageManifest["kind"] = pkg.pma ? "pma" : "pi";
   // conventional dirs when the manifest omits a field (pi does the same)
@@ -54,6 +54,7 @@ async function readManifest(dir: string, source: string): Promise<PackageManifes
   return {
     dir,
     source,
+    name: pkg.name,
     kind,
     plugins,
     skills: m?.skills ?? ((await exists("skills")) ? ["skills"] : []),

@@ -24,7 +24,11 @@ export interface Capabilities {
   agentRun(task: string, opts: { system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }): Promise<string | { report: string; patch?: string; sessionId: string }>;
   fetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
   log(args: unknown[]): void;
+  sessionNote(plugin: string, text: string): Promise<void>;
+  sessionSend(text: string): Promise<void>;
+  sessionInterrupt(): Promise<void>;
 }
+export interface LoadedCommand { name: string; description: string; source: string }
 
 export interface LoadedTools { name: string; description: string; parameters: unknown; source: string }
 
@@ -49,6 +53,7 @@ export class PluginHost {
   private sessions = new Map<string, Capabilities>();
   private exited: Promise<string>;
   public tools: LoadedTools[] = [];
+  public commands: LoadedCommand[] = [];
   public hooks = new Set<string>();
   public warnings: string[] = [];
   /** "runner" (permission-restricted local process) or "sandbox" (inside the leased sandbox). */
@@ -68,10 +73,11 @@ export class PluginHost {
 
   private static async load(host: PluginHost, packages: PackageManifest[], agentId: string): Promise<PluginHost> {
     const loaded = await Promise.race([
-      host.rpc.call<{ tools: LoadedTools[]; hooks: string[]; warnings: string[] }>("load", { packages }),
+      host.rpc.call<{ tools: LoadedTools[]; commands?: LoadedCommand[]; hooks: string[]; warnings: string[] }>("load", { packages }),
       host.exited.then((why) => { throw new Error(`${why} while loading packages for ${agentId}`); }),
     ]);
     host.tools = loaded.tools;
+    host.commands = loaded.commands ?? [];
     host.hooks = new Set(loaded.hooks);
     host.warnings = loaded.warnings;
     return host;
@@ -148,6 +154,9 @@ export class PluginHost {
       case "agent.run": { const p = params as RunnerMethods["agent.run"]["params"]; return caps.agentRun(p.task, { system: p.system, maxTurns: p.maxTurns, tools: p.tools, isolated: p.isolated, env: p.env }); }
       case "fetch": { const p = params as RunnerMethods["fetch"]["params"]; return caps.fetch(p.url, { method: p.method, headers: p.headers, body: p.body }); }
       case "log": caps.log((params as RunnerMethods["log"]["params"]).args); return null;
+      case "session.note": { const p = params as RunnerMethods["session.note"]["params"]; await caps.sessionNote(p.plugin, p.text); return null; }
+      case "session.send": await caps.sessionSend((params as RunnerMethods["session.send"]["params"]).text); return null;
+      case "session.interrupt": await caps.sessionInterrupt(); return null;
       default: throw new Error(`unknown capability ${String(method)}`);
     }
   }
@@ -166,6 +175,11 @@ export class PluginHost {
         return { content: r.content, details: {} };
       },
     }));
+  }
+
+  /** Run a registered slash command; returns its reply and/or a prompt to send to the model. */
+  runCommand(session: SessionInfo, name: string, args: string): Promise<{ reply?: string; send?: string }> {
+    return this.rpc.call("command.run", { session, name, args });
   }
 
   async emit<E extends HookEvent>(session: SessionInfo, event: E): Promise<HookResultFor<E> | null> {
