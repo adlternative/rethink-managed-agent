@@ -257,7 +257,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       const slot = h;
       slot.acquiring ??= deps
         .sandboxFor(e.environment.provider)
-        .acquire({ environmentId: e.environment.id, workspaceId: e.workspace.id, workspaceRef: e.workspace.ref, image: e.environment.image, network: e.environment.network, affinity: e.workspace.id })
+        .acquire({ environmentId: e.environment.id, containerKey: `${session.container_group}/${e.environment.id}`, workspaceId: e.workspace.id, workspaceRef: e.workspace.ref, image: e.environment.image, network: e.environment.network, affinity: e.workspace.id })
         .then(
           async (l) => {
             slot.lease = l;

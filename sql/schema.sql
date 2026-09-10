@@ -44,10 +44,14 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   workspace_id TEXT,
   affinity TEXT,
   external_ref TEXT,
+  container_key TEXT,
+  container_ref TEXT,
+  workdir TEXT,
   last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sandboxes_affinity ON sandboxes(affinity) WHERE status <> 'destroyed';
+CREATE INDEX IF NOT EXISTS sandboxes_container ON sandboxes(container_key) WHERE status <> 'destroyed';
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -135,3 +139,5 @@ ALTER TABLE environments ADD COLUMN IF NOT EXISTS worker_key TEXT;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS memory_stores JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_system_prompt TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS container_group TEXT;
+UPDATE sessions SET container_group = id WHERE container_group IS NULL;

@@ -153,6 +153,8 @@ export const repos = {
       environments?: SessionEnvironment[];
       parent_id?: string | null;
       memory_stores?: MemoryMount[];
+      /** container-sharing group; children inherit the parent's so a spawn tree shares a container */
+      container_group?: string | null;
     }): Promise<SessionResource> {
       const envs: SessionEnvironment[] = input.environments?.length
         ? input.environments
@@ -162,8 +164,9 @@ export const repos = {
       return tx(async (c) => {
         const row = await one<SessionResource>(
           c,
-          `INSERT INTO sessions (id, agent_id, environment_id, workspace_id, agent, parent_id, memory_stores) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-          [newId("sess"), input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memory_stores ?? [])],
+          `INSERT INTO sessions (id, agent_id, environment_id, workspace_id, agent, parent_id, memory_stores, container_group)
+             VALUES ($1,$2,$3,$4,$5,$6,$7, COALESCE($8, $1)) RETURNING *`,
+          [newId("sess"), input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memory_stores ?? []), input.container_group ?? null],
         );
         for (const e of envs) {
           await c.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4)`, [row!.id, e.key, e.environment_id, e.workspace_id]);

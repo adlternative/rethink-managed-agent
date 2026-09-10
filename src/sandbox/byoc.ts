@@ -46,42 +46,44 @@ function makeSandbox(id: SandboxId, envId: string): Sandbox {
 
 export class ByocProvider implements SandboxProvider {
   name = "byoc" as const;
-  /** environment id per sandbox (needed to route requests); populated on create/connect */
-  private envOf = new Map<SandboxId, string>();
 
-  async create(id: SandboxId, req: SandboxRequest & { environmentId?: string }): Promise<SandboxHandle> {
+  /**
+   * A container is a worker (identified by its environment id). Mounts are the worker's per-sandbox
+   * directories, so all mounts of one environment share the worker process. containerRef = envId.
+   */
+  async openContainer(_containerId: SandboxId, req: SandboxRequest & { environmentId?: string }): Promise<string> {
     const envId = req.environmentId;
     if (!envId) throw new Error("byoc provider: environment id missing");
-    if (req.workspaceRef.kind === "local" || req.workspaceRef.kind === "dir") throw new Error(`byoc provider: ${req.workspaceRef.kind} workspaces cannot be shipped to a worker; use git or empty`);
-    // Fail fast instead of queueing into the void: a worker must be polling this environment.
     if (!(await anyWorkerAlive(envId))) throw new Error(`no BYOC worker is connected for environment ${envId}; start one with: pma worker --env ${envId} --key <worker_key>`);
+    return envId;
+  }
+
+  async connectContainer(containerRef: string): Promise<boolean> { return anyWorkerAlive(containerRef); }
+
+  async destroyContainer(_containerRef: string): Promise<void> { /* the worker owns its own lifecycle; mounts are removed individually */ }
+
+  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef): Promise<SandboxHandle> {
+    if (ref.kind === "local" || ref.kind === "dir" || ref.kind === "blob") throw new Error(`byoc provider: ${ref.kind} workspaces cannot be shipped to a worker; use git or empty`);
     const reqId = newReqId();
-    await enqueue(envId, { req_id: reqId, op: "create", sandbox_id: id, workspace_ref: req.workspaceRef });
+    await enqueue(containerRef, { req_id: reqId, op: "create", sandbox_id: mountId, workspace_ref: ref });
     const r = await awaitResult(reqId, { timeoutMs: 120_000 });
     if (!r.ok) throw new Error(`byoc worker failed to create sandbox: ${r.error}`);
-    const worker = (await workerFor(id)) ?? "unknown";
-    this.envOf.set(id, envId);
-    return { sandbox: makeSandbox(id, envId), externalRef: `${envId}/${worker}` };
+    return { sandbox: makeSandbox(mountId, containerRef), containerRef, workdir: WORKDIR };
   }
 
-  async connect(id: SandboxId, externalRef: string): Promise<SandboxHandle | null> {
-    const [envId, worker] = externalRef.split("/");
-    if (!envId || !worker || !(await isWorkerAlive(envId, worker)) || (await workerFor(id)) !== worker) return null;
-    this.envOf.set(id, envId);
-    return { sandbox: makeSandbox(id, envId), externalRef };
+  async connectMount(containerRef: string, mountId: SandboxId, _workdir: string): Promise<Sandbox | null> {
+    const worker = await workerFor(mountId);
+    if (!worker || !(await isWorkerAlive(containerRef, worker))) return null;
+    return makeSandbox(mountId, containerRef);
   }
 
-  async destroy(id: SandboxId, externalRef: string | null): Promise<void> {
-    const envId = externalRef?.split("/")[0] ?? this.envOf.get(id);
-    if (!envId) return;
-    await enqueue(envId, { req_id: newReqId(), op: "destroy", sandbox_id: id }).catch(() => {});
-    this.envOf.delete(id);
+  async removeMount(containerRef: string, mountId: SandboxId, _workdir: string): Promise<void> {
+    await enqueue(containerRef, { req_id: newReqId(), op: "destroy", sandbox_id: mountId }).catch(() => {});
   }
 
-  async capture(h: SandboxHandle, prev: WorkspaceRef): Promise<WorkspaceRef> {
-    const envId = h.externalRef.split("/")[0]!;
+  async captureMount(containerRef: string, mountId: SandboxId, _workdir: string, prev: WorkspaceRef): Promise<WorkspaceRef> {
     const reqId = newReqId();
-    await enqueue(envId, { req_id: reqId, op: "capture", sandbox_id: h.sandbox.id, prev });
+    await enqueue(containerRef, { req_id: reqId, op: "capture", sandbox_id: mountId, prev });
     const r = await awaitResult(reqId, { timeoutMs: 120_000 });
     if (!r.ok) throw new Error(r.error);
     return r.result as WorkspaceRef;

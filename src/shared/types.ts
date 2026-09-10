@@ -152,6 +152,8 @@ export interface SandboxProcess {
 export interface SandboxRequest {
   /** environment this sandbox belongs to (byoc routes requests to that environment's workers) */
   environmentId?: EnvironmentId;
+  /** container grouping: mounts sharing this key (and provider) live in one container */
+  containerKey?: string;
   workspaceId: WorkspaceId;
   workspaceRef: WorkspaceRef;
   image?: string | null;
@@ -163,35 +165,44 @@ export interface SandboxRequest {
 export interface SandboxLease {
   sandbox: Sandbox;
   release(): Promise<void>;
-  /** how the lease was obtained */
-  origin: "created" | "reused" | "resumed";
+  /** how the lease was obtained: new container, reused mount, resumed container, or a new mount in a shared container */
+  origin: "created" | "reused" | "resumed" | "shared";
 }
-/** A live sandbox as seen by its provider. `externalRef` is what `connect`/`destroy` need later (dir, container, remote id). */
+/** A live mount (a workdir) inside a container, as seen by its provider. */
 export interface SandboxHandle {
   sandbox: Sandbox;
-  externalRef: string;
+  /** container this mount lives in (docker container name / host root / e2b id / byoc route) */
+  containerRef: string;
+  /** absolute workdir of this mount inside the container */
+  workdir: string;
 }
 /**
- * Mechanism layer: how to start, re-attach to, destroy and move files for ONE kind of sandbox.
- * Policy (lease table, affinity reuse, conflict rejection, reaping) lives in SandboxManager.
+ * Mechanism layer. A *container* is a shared runtime (one docker container, one host dir tree, one
+ * e2b sandbox, one byoc worker); *mounts* are per-workspace workdirs inside it, so several agents
+ * (a parent and its children) can share one container while keeping separate directories.
+ * Policy (leases, reuse, reaping, container grouping) lives in SandboxManager.
  */
 export interface SandboxProvider {
   name: SandboxProviderName;
-  /** Start a fresh sandbox with this id and materialize `req.workspaceRef` into it. */
-  create(id: SandboxId, req: SandboxRequest): Promise<SandboxHandle>;
-  /** Re-attach to a sandbox created earlier (possibly by another runner); null when it is gone. */
-  connect(id: SandboxId, externalRef: string): Promise<SandboxHandle | null>;
-  /** Tear down; must tolerate an already-gone sandbox. */
-  destroy(id: SandboxId, externalRef: string | null): Promise<void>;
-  /**
-   * Optional idle tiers: pause frees compute but keeps the sandbox's filesystem (installed deps,
-   * build caches) so resume is fast; connect() must accept a paused sandbox and resume it.
-   */
-  pause?(id: SandboxId, externalRef: string): Promise<void>;
-  resume?(id: SandboxId, externalRef: string): Promise<void>;
-  /** Capture the current workspace state from a live sandbox. */
-  capture(handle: SandboxHandle, prev: WorkspaceRef): Promise<WorkspaceRef>;
+  /** Start a new empty container; returns its ref. */
+  openContainer(containerId: SandboxId, req: SandboxRequest): Promise<string>;
+  /** True if the container is still alive and usable. */
+  connectContainer(containerRef: string): Promise<boolean>;
+  /** Tear down a container and everything in it; must tolerate an already-gone container. */
+  destroyContainer(containerRef: string): Promise<void>;
+  /** Materialize `ref` into a fresh workdir in the container; return a Sandbox bound to it. */
+  addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef): Promise<SandboxHandle>;
+  /** Re-attach a Sandbox to an existing mount. */
+  connectMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null>;
+  /** Remove one mount's workdir (leaves the container). */
+  removeMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<void>;
+  /** Capture a mount's current workspace state. */
+  captureMount(containerRef: string, mountId: SandboxId, workdir: string, prev: WorkspaceRef): Promise<WorkspaceRef>;
+  /** Optional idle tiers, at container granularity. connect resumes on next use. */
+  pause?(containerRef: string): Promise<void>;
+  resume?(containerRef: string): Promise<void>;
 }
+
 /** What the harness needs from the sandbox layer (implemented by SandboxManager.bind). */
 export interface SandboxService {
   acquire(req: SandboxRequest): Promise<SandboxLease>;
@@ -205,6 +216,12 @@ export interface SandboxRow {
    * destroying: retire on the reaper's next pass · destroyed.
    */
   status: "ready" | "busy" | "paused" | "destroying" | "destroyed";
+  /** container grouping (mounts with the same key + provider share a container) */
+  container_key: string | null;
+  /** the container this mount lives in */
+  container_ref: string | null;
+  /** workdir of this mount inside the container */
+  workdir: string | null;
   workspace_id: WorkspaceId | null;
   affinity: string | null;
   external_ref: string | null; // container id / host dir
@@ -253,6 +270,8 @@ export interface SessionResource {
   environments: SessionEnvironment[];
   /** set for sub-agent sessions spawned by another session */
   parent_id: SessionId | null;
+  /** container-sharing group (root session of the spawn tree); a whole tree shares one container per environment */
+  container_group: SessionId;
   /** memory stores mounted into this session's main sandbox (mount_path is relative to the workspace root) */
   memory_stores: MemoryMount[];
   status: SessionStatus;
@@ -329,7 +348,7 @@ export type SessionEventPayload =
   | { type: "span.model_request_end"; model: string; usage: Omit<Usage, "requests">; context: ContextSize; stop_reason?: string }
   /** cumulative usage snapshot, emitted when a run ends */
   | { type: "session.usage"; usage: Usage; context: ContextSize | null }
-  | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName; env?: string; origin?: "created" | "reused" | "resumed" }
+  | { type: "sandbox.acquired"; sandbox_id: SandboxId; provider: SandboxProviderName; env?: string; origin?: "created" | "reused" | "resumed" | "shared" }
   | { type: "sandbox.released"; sandbox_id: SandboxId; env?: string }
   | { type: "workspace.captured"; ref: WorkspaceRef; workspace_id?: WorkspaceId; env?: string }
   /** context was compacted: message events with seq < first_kept_seq are replaced by `summary` when folding */

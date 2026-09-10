@@ -9,6 +9,9 @@ vi.mock("../src/sandbox/lease-store.ts", () => ({
   insert: async (r: SandboxRow) => { rows.set(r.id, { ...r, last_used_at: new Date().toISOString(), created_at: new Date().toISOString() }); },
   setStatus: async (id: string, status: SandboxRow["status"]) => { rows.get(id)!.status = status; },
   setExternalRef: async (id: string, ref: string) => { rows.get(id)!.external_ref = ref; },
+  setMount: async (id: string, cref: string, wd: string) => { const r = rows.get(id)!; r.container_ref = cref; r.workdir = wd; },
+  findContainer: async (p: string, key: string) => [...rows.values()].find((r) => r.provider === p && r.container_key === key && r.container_ref && ["ready", "busy", "paused"].includes(r.status)) ?? null,
+  mountsOf: async (cref: string) => [...rows.values()].filter((r) => r.container_ref === cref && r.status !== "destroyed"),
   touch: async () => {},
   get: async (id: string) => rows.get(id) ?? null,
   list: async () => [...rows.values()].filter((r) => r.status !== "destroyed"),
@@ -48,7 +51,8 @@ describe("LocalProvider", () => {
   it("acquire/exec/write/read/capture/release/reap", async () => {
     const lease = await manager.acquire("local", { workspaceId: "ws_1", workspaceRef: { kind: "empty" }, affinity: "a" });
     const sb = lease.sandbox;
-    expect(sb.workdir).toBe(path.join(root, sb.id));
+    // container dir <root>/<id>, mount workdir <root>/<id>/<id> (first mount of its own container)
+    expect(sb.workdir).toBe(path.join(root, sb.id, sb.id));
 
     await sb.writeFile("hello.txt", new TextEncoder().encode("hi"));
     expect(new TextDecoder().decode(await sb.readFile("hello.txt"))).toBe("hi");

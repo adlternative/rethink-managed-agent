@@ -102,6 +102,7 @@ const children: ChildSpawn = {
       environments: [{ key: "main", environment_id: envRow.environment_id, workspace_id: ws.id }],
       parent_id: parent.id,
       memory_stores: parent.memory_stores ?? [],
+      container_group: parent.container_group,
     });
     const brief = [opts.role ? `You are the "${opts.role}" agent${opts.name ? ` (${opts.name})` : ""} working for a parent agent.` : "You are a sub-agent working for a parent agent.", "Use report_to_parent for progress, questions, and your final report.", "", task].join("\n");
     const [ev] = await appendEvents(child.id, [{ type: "user.message", content: [{ type: "text", text: brief }] }]);

@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { rm, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../shared/env.ts";
 import type { ExecChunk, ExecOptions, Sandbox, SandboxHandle, SandboxId, SandboxProcess, SandboxProvider, SandboxRequest, WorkspaceRef } from "../shared/types.ts";
@@ -8,140 +8,120 @@ import { materialize, captureGit, captureDir } from "./workspace.ts";
 import { streamProcess, sandboxEnv, spawnProcess } from "./exec.ts";
 
 const docker = promisify(execFile);
-const WORKDIR = "/workspace";
+const CONTAINER_ROOT = "/host"; // the container's host-dir bind mount; mounts live at /host/<mountId>
 const DEFAULT_IMAGE = "node:22-alpine";
 const IMAGE_RE = /^[a-z0-9][a-z0-9._\/:-]*(@sha256:[a-f0-9]{64})?$/;
 const root = () => path.resolve(env.SANDBOX_LOCAL_ROOT);
+/** Host dir tree bind-mounted into a container (one per container, shared by all its mounts). */
+const containerHostDir = (containerRef: string) => path.join(root(), containerRef);
+/** Host dir for one mount (materialize/capture operate here; it appears at /host/<mountId> in the container). */
+const mountHostDir = (containerRef: string, mountId: SandboxId) => path.join(containerHostDir(containerRef), mountId);
+const mountWorkdir = (mountId: SandboxId) => path.posix.join(CONTAINER_ROOT, mountId);
 
-/**
- * Translate a runner-local sandbox dir into the path the docker daemon should bind-mount.
- * When the runner runs on the host they are the same; inside a container SANDBOX_HOST_ROOT
- * says where the sandboxes volume/bind lives on the host.
- */
+/** Translate a runner-local dir into the path the docker daemon should bind-mount (SANDBOX_HOST_ROOT inside a container). */
 export function toHostPath(dir: string): string {
   if (!env.SANDBOX_HOST_ROOT) return dir;
   const rel = path.relative(root(), dir);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`docker provider: ${dir} is outside SANDBOX_LOCAL_ROOT (${root()}); cannot map to SANDBOX_HOST_ROOT`);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`docker provider: ${dir} is outside SANDBOX_LOCAL_ROOT (${root()})`);
   return path.posix.join(env.SANDBOX_HOST_ROOT, rel.split(path.sep).join("/"));
 }
 
-/** True when the sandbox container is still running and its workspace dir is still here. */
-async function isAlive(container: string, hostDir: string): Promise<boolean> {
-  const dirOk = await stat(hostDir).then((st) => st.isDirectory(), () => false);
-  if (!dirOk) return false;
-  try {
-    const { stdout } = await docker("docker", ["inspect", "-f", "{{.State.Running}}", container]);
-    return stdout.trim() === "true";
-  } catch {
-    return false;
-  }
+async function isRunning(container: string): Promise<boolean> {
+  try { return (await docker("docker", ["inspect", "-f", "{{.State.Running}}", container])).stdout.trim() === "true"; } catch { return false; }
 }
-
 async function pickShell(container: string): Promise<"bash" | "sh"> {
-  try {
-    await docker("docker", ["exec", container, "bash", "-c", "true"]);
-    return "bash";
-  } catch {
-    return "sh";
-  }
+  try { await docker("docker", ["exec", container, "bash", "-c", "true"]); return "bash"; } catch { return "sh"; }
 }
 
-/** `docker exec` with stdin, collecting stdout; used for file I/O so paths resolve *inside* the container. */
-function execIn(container: string, argv: string[], stdin?: Uint8Array): Promise<Buffer> {
+/** `docker exec -w <workdir>` with stdin, collecting stdout; file I/O resolves inside the container. */
+function execIn(container: string, workdir: string, argv: string[], stdin?: Uint8Array): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const child = spawn("docker", ["exec", "-i", "-w", WORKDIR, container, ...argv], { stdio: ["pipe", "pipe", "pipe"] });
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
+    const child = spawn("docker", ["exec", "-i", "-w", workdir, container, ...argv], { stdio: ["pipe", "pipe", "pipe"] });
+    const out: Buffer[] = []; const err: Buffer[] = [];
     child.stdout.on("data", (d: Buffer) => out.push(d));
     child.stderr.on("data", (d: Buffer) => err.push(d));
     child.on("error", reject);
     child.on("close", (code) => (code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(Buffer.concat(err).toString().trim() || `docker exec exited ${code}`))));
-    if (stdin) child.stdin.end(stdin);
-    else child.stdin.end();
+    child.stdin.end(stdin ?? undefined);
   });
 }
 
-/** Absolute in-container path under /workspace; lexical only — symlinks are resolved by the container's own kernel view. */
-function insidePath(p: string): string {
-  const abs = path.posix.resolve(WORKDIR, p);
-  if (abs !== WORKDIR && !abs.startsWith(WORKDIR + "/")) throw new Error(`path escapes workdir: ${p}`);
+function insidePath(workdir: string, p: string): string {
+  const abs = path.posix.resolve(workdir, p);
+  if (abs !== workdir && !abs.startsWith(workdir + "/")) throw new Error(`path escapes workdir: ${p}`);
   return abs;
 }
 
-function makeSandbox(id: SandboxId, container: string, shell: "bash" | "sh"): Sandbox {
+function makeSandbox(mountId: SandboxId, container: string, shell: "bash" | "sh", workdir: string): Sandbox {
+  const execArgs = (cmd: string, opts: ExecOptions) => {
+    const args = ["exec", "-i", "-w", opts.cwd ? path.posix.resolve(workdir, opts.cwd) : workdir];
+    for (const k of Object.keys(opts.env ?? {})) args.push("-e", k);
+    args.push(container, shell, "-lc", cmd);
+    return args;
+  };
   return {
-    id,
+    id: mountId,
     provider: "docker",
-    workdir: WORKDIR,
-    exec(cmd: string, opts: ExecOptions = {}): AsyncIterable<ExecChunk> {
-      const args = ["exec", "-i", "-w", opts.cwd ? path.posix.resolve(WORKDIR, opts.cwd) : WORKDIR];
-      // `-e K` (no value) copies K from the docker CLI's env: values never appear in argv / `ps`.
-      for (const k of Object.keys(opts.env ?? {})) args.push("-e", k);
-      args.push(container, shell, "-lc", cmd);
-      return streamProcess("docker", args, { env: sandboxEnv(opts.env), timeoutMs: opts.timeoutMs, signal: opts.signal });
-    },
-    // File I/O goes through the container so a symlink planted by the model resolves in the
-    // container's filesystem, never on the runner host side of the bind mount.
-    async readFile(p) {
-      return new Uint8Array(await execIn(container, ["cat", "--", insidePath(p)]));
-    },
-    async writeFile(p, data) {
-      const abs = insidePath(p);
-      await execIn(container, ["sh", "-c", 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', "sh", abs], data);
-    },
-    async spawn(cmd, opts = {}): Promise<SandboxProcess> {
-      const args = ["exec", "-i", "-w", opts.cwd ? path.posix.resolve(WORKDIR, opts.cwd) : WORKDIR];
-      for (const k of Object.keys(opts.env ?? {})) args.push("-e", k);
-      args.push(container, shell, "-lc", cmd);
-      return spawnProcess("docker", args, { env: sandboxEnv(opts.env) });
-    },
+    workdir,
+    exec: (cmd, opts = {}) => streamProcess("docker", execArgs(cmd, opts), { env: sandboxEnv(opts.env), timeoutMs: opts.timeoutMs, signal: opts.signal }),
+    async readFile(p) { return new Uint8Array(await execIn(container, workdir, ["cat", "--", insidePath(workdir, p)])); },
+    async writeFile(p, data) { await execIn(container, workdir, ["sh", "-c", 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', "sh", insidePath(workdir, p)], data); },
+    async spawn(cmd, opts = {}): Promise<SandboxProcess> { return spawnProcess("docker", execArgs(cmd, opts), { env: sandboxEnv(opts.env) }); },
   };
 }
 
-/** externalRef = the host-side workspace dir; the container is named after the sandbox id. */
+/** A container is one docker container with `<root>/<containerId>` bind-mounted at /host; mounts are subdirs. */
 export class DockerProvider implements SandboxProvider {
   name = "docker" as const;
 
-  async create(id: SandboxId, req: SandboxRequest): Promise<SandboxHandle> {
+  async openContainer(containerId: SandboxId, req: SandboxRequest): Promise<string> {
     const image = req.image || DEFAULT_IMAGE;
     if (!IMAGE_RE.test(image)) throw new Error(`docker provider: invalid image reference ${JSON.stringify(image)}`);
-    const hostDir = path.join(root(), id);
-    await materialize(req.workspaceRef, hostDir);
+    const hostRoot = containerHostDir(containerId);
+    await mkdir(hostRoot, { recursive: true });
     const args = [
-      "run", "-d", "--name", id, "-w", WORKDIR, "-v", `${toHostPath(hostDir)}:${WORKDIR}`,
+      "run", "-d", "--name", containerId, "-w", CONTAINER_ROOT, "-v", `${toHostPath(hostRoot)}:${CONTAINER_ROOT}`,
       "--network", req.network === "bridge" ? "bridge" : env.SANDBOX_DOCKER_NETWORK, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
       "--pids-limit", env.SANDBOX_DOCKER_PIDS, "--memory", env.SANDBOX_DOCKER_MEMORY, "--cpus", env.SANDBOX_DOCKER_CPUS,
-      "--label", "pi.sandbox=1", "--label", `pi.workspace=${req.workspaceId}`,
+      "--label", "pi.sandbox=1", "--label", `pi.container=${containerId}`,
     ];
-    // Secrets travel through the CLI's environment (`-e K`), never as `-e K=V` in argv.
     for (const k of Object.keys(req.secrets ?? {})) args.push("-e", k);
     args.push("--", image, "sleep", "infinity");
     await docker("docker", args, { env: sandboxEnv(req.secrets) });
-    return { sandbox: makeSandbox(id, id, await pickShell(id)), externalRef: hostDir };
+    return containerId;
   }
 
-  async connect(id: SandboxId, externalRef: string): Promise<SandboxHandle | null> {
-    if (!(await isAlive(id, externalRef))) return null;
-    return { sandbox: makeSandbox(id, id, await pickShell(id)), externalRef };
-  }
+  connectContainer(containerRef: string): Promise<boolean> { return isRunning(containerRef); }
 
-  /** stop/start: frees CPU and memory, keeps the container's filesystem (installed deps, caches). */
-  async pause(id: SandboxId): Promise<void> {
-    await docker("docker", ["stop", "-t", "5", id]);
-  }
-  async resume(id: SandboxId): Promise<void> {
-    await docker("docker", ["start", id]);
-  }
-
-  async destroy(id: SandboxId, externalRef: string | null): Promise<void> {
-    await docker("docker", ["rm", "-f", id]).catch(() => {});
-    const dir = externalRef ?? path.join(root(), id);
+  async destroyContainer(containerRef: string): Promise<void> {
+    await docker("docker", ["rm", "-f", containerRef]).catch(() => {});
+    const dir = containerHostDir(containerRef);
     if (dir.startsWith(root() + path.sep)) await rm(dir, { recursive: true, force: true });
   }
 
-  async capture(h: SandboxHandle, prev: WorkspaceRef): Promise<WorkspaceRef> {
-    if (prev.kind === "git") return captureGit(h.externalRef, prev);
-    if (prev.kind === "local") return prev;
-    return captureDir(h.externalRef, prev, h.sandbox.id);
+  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef): Promise<SandboxHandle> {
+    await materialize(ref, mountHostDir(containerRef, mountId)); // host-side; appears at /host/<mountId> via the bind mount
+    return { sandbox: makeSandbox(mountId, containerRef, await pickShell(containerRef), mountWorkdir(mountId)), containerRef, workdir: mountWorkdir(mountId) };
   }
+
+  async connectMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null> {
+    const dirOk = await stat(mountHostDir(containerRef, mountId)).then((st) => st.isDirectory(), () => false);
+    if (!dirOk || !(await isRunning(containerRef))) return null;
+    return makeSandbox(mountId, containerRef, await pickShell(containerRef), workdir);
+  }
+
+  async removeMount(containerRef: string, _mountId: SandboxId, workdir: string): Promise<void> {
+    const hostDir = path.join(containerHostDir(containerRef), path.posix.basename(workdir));
+    if (hostDir.startsWith(root() + path.sep)) await rm(hostDir, { recursive: true, force: true });
+  }
+
+  async captureMount(containerRef: string, _mountId: SandboxId, workdir: string, prev: WorkspaceRef): Promise<WorkspaceRef> {
+    const hostDir = path.join(containerHostDir(containerRef), path.posix.basename(workdir));
+    if (prev.kind === "git") return captureGit(hostDir, prev);
+    if (prev.kind === "local") return prev;
+    return captureDir(hostDir, prev, path.posix.basename(workdir));
+  }
+
+  async pause(containerRef: string): Promise<void> { await docker("docker", ["stop", "-t", "5", containerRef]); }
+  async resume(containerRef: string): Promise<void> { await docker("docker", ["start", containerRef]); }
 }

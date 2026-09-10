@@ -7,9 +7,28 @@ const ABANDONED_MS = env.RUN_TIMEOUT_MS + 5 * 60_000;
 
 export async function insert(row: Omit<SandboxRow, "last_used_at" | "created_at">): Promise<void> {
   await pool.query(
-    `INSERT INTO sandboxes (id, provider, status, workspace_id, affinity, external_ref) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [row.id, row.provider, row.status, row.workspace_id, row.affinity, row.external_ref],
+    `INSERT INTO sandboxes (id, provider, status, workspace_id, affinity, external_ref, container_key, container_ref, workdir) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [row.id, row.provider, row.status, row.workspace_id, row.affinity, row.external_ref, row.container_key, row.container_ref, row.workdir],
   );
+}
+
+/** Record the container + workdir a mount landed in (after addMount). */
+export async function setMount(id: SandboxId, containerRef: string, workdir: string): Promise<void> {
+  await pool.query(`UPDATE sandboxes SET container_ref=$2, workdir=$3, last_used_at=now() WHERE id=$1`, [id, containerRef, workdir]);
+}
+
+/** A live (ready/busy/paused) mount whose container we can reuse for a new mount with the same key. */
+export async function findContainer(provider: SandboxProviderName, containerKey: string): Promise<SandboxRow | null> {
+  const r = await pool.query<SandboxRow>(
+    `SELECT * FROM sandboxes WHERE provider=$1 AND container_key=$2 AND status IN ('ready','busy','paused') AND container_ref IS NOT NULL ORDER BY last_used_at DESC LIMIT 1`,
+    [provider, containerKey],
+  );
+  return r.rows[0] ?? null;
+}
+
+/** All non-destroyed mounts in a container. */
+export async function mountsOf(containerRef: string): Promise<SandboxRow[]> {
+  return (await pool.query<SandboxRow>(`SELECT * FROM sandboxes WHERE container_ref=$1 AND status <> 'destroyed'`, [containerRef])).rows;
 }
 
 export async function setStatus(id: SandboxId, status: SandboxRow["status"]): Promise<void> {

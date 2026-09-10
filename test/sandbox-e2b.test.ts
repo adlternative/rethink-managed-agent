@@ -10,6 +10,9 @@ vi.mock("../src/sandbox/lease-store.ts", () => ({
   insert: async (r: SandboxRow) => { rows.set(r.id, { ...r, last_used_at: new Date().toISOString(), created_at: new Date().toISOString() }); },
   setStatus: async (id: string, status: SandboxRow["status"]) => { rows.get(id)!.status = status; },
   setExternalRef: async (id: string, ref: string) => { rows.get(id)!.external_ref = ref; },
+  setMount: async (id: string, cref: string, wd: string) => { const r = rows.get(id)!; r.container_ref = cref; r.workdir = wd; },
+  findContainer: async (p: string, key: string) => [...rows.values()].find((r) => r.provider === p && r.container_key === key && r.container_ref && ["ready", "busy", "paused"].includes(r.status)) ?? null,
+  mountsOf: async (cref: string) => [...rows.values()].filter((r) => r.container_ref === cref && r.status !== "destroyed"),
   touch: async () => {},
   get: async (id: string) => rows.get(id) ?? null,
   list: async () => [...rows.values()].filter((r) => r.status !== "destroyed"),
@@ -67,14 +70,14 @@ class FakeSandbox {
       else if (cmd.startsWith("exit ")) exitCode = Number(cmd.slice(5));
       else if (cmd.includes("git rev-parse HEAD")) stdout = "deadbeef\n";
       else if (cmd.includes("git diff HEAD --binary")) stdout = "diff --git a/x b/x\n";
-      else if (cmd.includes("tar czf /tmp/pi-capture.tgz")) {
+      else if (cmd.includes("tar czf /tmp/pi-cap.tgz")) {
         // produce a real tgz of {hello.txt: "hi"} so the provider's local extraction works
         const { execFile } = await import("node:child_process");
         const { promisify } = await import("node:util");
         const dir = await mkdtemp(path.join(tmpdir(), "fake-"));
         await writeFile(path.join(dir, "hello.txt"), "hi");
         await promisify(execFile)("tar", ["czf", path.join(dir, "c.tgz"), "-C", dir, "hello.txt"]);
-        this.fake.files.set("/tmp/pi-capture.tgz", new Uint8Array(await readFile(path.join(dir, "c.tgz"))));
+        this.fake.files.set("/tmp/pi-cap.tgz", new Uint8Array(await readFile(path.join(dir, "c.tgz"))));
       }
       if (o.background) {
         const handle = {
@@ -113,7 +116,8 @@ describe("E2bProvider", () => {
     const sb = lease.sandbox;
     expect(sb.provider).toBe("e2b");
     const fake = [...fakes.values()][0];
-    expect(fake.cmds[0]).toContain("mkdir -p '/home/user/workspace'");
+    expect(fake.cmds[0]).toContain(`mkdir -p '${sb.workdir}'`);
+    expect(sb.workdir).toMatch(/^\/home\/user\/mnt\/sbx_/);
 
     expect(await collect(sb.exec("echo hi"))).toEqual({ out: "hi\n", code: 0 });
     expect((await collect(sb.exec("exit 3"))).code).toBe(3);
@@ -121,7 +125,7 @@ describe("E2bProvider", () => {
 
     await sb.writeFile("a/b.txt", new TextEncoder().encode("x"));
     expect(new TextDecoder().decode(await sb.readFile("a/b.txt"))).toBe("x");
-    expect(fake.files.has("/home/user/workspace/a/b.txt")).toBe(true);
+    expect(fake.files.has(`${sb.workdir}/a/b.txt`)).toBe(true);
     await expect(sb.readFile("../../etc/passwd")).rejects.toThrow(/escapes/);
 
     const ref = await manager.capture(sb, { kind: "empty" });
@@ -130,7 +134,7 @@ describe("E2bProvider", () => {
 
     await lease.release();
     expect(rows.get(sb.id)!.status).toBe("ready");
-    expect(rows.get(sb.id)!.external_ref).toBe(fake.id);
+    expect(rows.get(sb.id)!.container_ref).toBe(fake.id);
 
     // affinity reuse reconnects to the same remote sandbox
     const lease2 = await manager.acquire("e2b", { workspaceId: "ws_1", workspaceRef: ref, affinity: "ws_1" });
@@ -148,7 +152,7 @@ describe("E2bProvider", () => {
 
   it("materializes git refs with quoted args and captures a patch", async () => {
     const lease = await manager.acquire("e2b", { workspaceId: "ws_2", workspaceRef: { kind: "git", remote: "https://x/y.git", base: "abc", patch: "P" }, affinity: "ws_2" });
-    const fake = fakes.get(rows.get(lease.sandbox.id)!.external_ref!)!;
+    const fake = fakes.get(rows.get(lease.sandbox.id)!.container_ref!)!;
     expect(fake.cmds.some((c) => c.includes("git clone --quiet -- 'https://x/y.git'"))).toBe(true);
     expect(fake.cmds.some((c) => c.includes("git checkout --quiet --detach 'abc'"))).toBe(true);
     expect(fake.cmds.some((c) => c.includes("git apply"))).toBe(true);
