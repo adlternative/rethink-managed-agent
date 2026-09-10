@@ -46,6 +46,8 @@ export const env = {
   COMPACTION_ENABLED: process.env.COMPACTION_ENABLED !== "0",
   COMPACTION_RESERVE_TOKENS: Number(process.env.COMPACTION_RESERVE_TOKENS ?? 16384),
   COMPACTION_KEEP_RECENT_TOKENS: Number(process.env.COMPACTION_KEEP_RECENT_TOKENS ?? 20000),
+  /** 32-byte key (base64/hex) that encrypts user-supplied provider credentials at rest (BYOK). */
+  PMA_SECRET_KEY: process.env.PMA_SECRET_KEY ?? "",
   API_PORT: Number(process.env.API_PORT ?? 8080),
   MAX_TURNS: Number(process.env.MAX_TURNS ?? 50),
   /** Default and hard cap for a single bash tool call. */

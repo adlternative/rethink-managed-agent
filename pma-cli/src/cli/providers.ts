@@ -5,7 +5,7 @@ const USAGE = `providers subcommand:
   list
   get <id>
   create <id> --api openai-completions|openai-responses|anthropic-messages --base-url URL
-         [--auth-env ENV_VAR | --no-auth] [--name N] [--header k:v] [--models id[:ctx],id[:ctx],...]
+         [--auth-env ENV_VAR | --key API_KEY (BYOK, sealed at rest) | --no-auth] [--name N] [--header k:v] [--models id[:ctx],...]
   update <id> [--base-url URL] [--auth-env E] [--enabled true|false] [--models ...] [--name N]
   delete <id>
 example:
@@ -25,6 +25,7 @@ function bodyFrom(flags: Record<string, string | true>): Record<string, unknown>
   if (str(flags, "base-url")) b.base_url = str(flags, "base-url");
   if (str(flags, "auth-env")) b.auth = { type: "env", name: str(flags, "auth-env") };
   if (flags["no-auth"]) b.auth = { type: "none" };
+  if (str(flags, "key")) b.auth = { type: "key", key: str(flags, "key") };
   if (str(flags, "models")) b.models = parseModels(str(flags, "models")!);
   if (str(flags, "enabled")) b.enabled = str(flags, "enabled") === "true";
   const h = str(flags, "header");
@@ -38,7 +39,7 @@ export async function cmdProviders(args: string[]): Promise<void> {
   switch (sub) {
     case "list": case "ls": {
       const { data } = (await apiGet("/providers")) as { data: any[] };
-      table([["ID", "API", "BASE URL", "AUTH", "MODELS", "ENABLED"], ...data.map((p) => [p.id, p.api, p.base_url, p.auth.type === "env" ? `env:${p.auth.name}` : "none", String(p.models.length), String(p.enabled)])]);
+      table([["ID", "API", "BASE URL", "AUTH", "MODELS", "ENABLED"], ...data.map((p) => [p.id, p.api, p.base_url, p.auth.type === "env" ? `env:${p.auth.name}` : p.auth.type === "encrypted" ? "byok (sealed)" : "none", String(p.models.length), String(p.enabled)])]);
       return;
     }
     case "get":

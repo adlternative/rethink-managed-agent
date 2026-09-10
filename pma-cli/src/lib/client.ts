@@ -3,7 +3,7 @@ import { resolveConfig, buildHeaders } from "./config.ts";
 // ---- API resource shapes (mirror src/shared/types.ts on the server) ----
 export interface ContentBlock { type: "text"; text: string }
 export interface Agent { id: string; name: string; model: { provider: string; id: string }; system: string | null; tools: string[]; packages?: string[]; created_at: string }
-export interface Environment { id: string; name: string; provider: string; image: string | null; network?: "none" | "bridge"; plugin_host?: "runner" | "sandbox"; workspace: unknown; created_at: string }
+export interface Environment { id: string; name: string; provider: string; image: string | null; worker_key?: string | null; worker_key_set?: boolean; network?: "none" | "bridge"; plugin_host?: "runner" | "sandbox"; workspace: unknown; created_at: string }
 export interface Usage { input: number; output: number; cache_read: number; cache_write: number; total_tokens: number; requests: number }
 export interface ContextSize { tokens: number; window: number; ratio: number; model: string }
 export interface Session { id: string; agent_id: string; usage?: Usage; context?: ContextSize | null; environment_id: string; workspace_id: string; environments?: { key: string; environment_id: string; workspace_id: string }[]; parent_id?: string | null; status: "idle" | "running" | "terminated"; agent: Omit<Agent, "created_at">; created_at: string; updated_at: string }

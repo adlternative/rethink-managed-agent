@@ -96,8 +96,8 @@ export const repos = {
     async create(input: Omit<EnvironmentResource, "id" | "created_at">): Promise<EnvironmentResource> {
       const row = await one<EnvironmentResource>(
         pool,
-        `INSERT INTO environments (id, name, provider, image, network, plugin_host, workspace) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [newId("env"), input.name, input.provider, input.image, input.network ?? "none", input.plugin_host ?? "runner", JSON.stringify(input.workspace)],
+        `INSERT INTO environments (id, name, provider, image, network, plugin_host, worker_key, workspace) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [newId("env"), input.name, input.provider, input.image, input.network ?? "none", input.plugin_host ?? "runner", input.worker_key ?? null, JSON.stringify(input.workspace)],
       );
       return iso(row)!;
     },

@@ -30,6 +30,7 @@ export async function materialize(ws: WorkspaceSpec | WorkspaceRef, targetHostDi
     if (path.resolve(ws.path) !== path.resolve(targetHostDir)) await run("cp", ["-R", `${ws.path}/.`, targetHostDir]);
     return targetHostDir;
   }
+  if (ws.kind === "byoc") throw new Error(`workspace lives on BYOC worker ${ws.worker}; only a byoc environment can materialize it`);
   // git spec or ref
   await git(targetHostDir, "clone", "--quiet", "--", assertGitArg("remote", ws.remote), ".");
   const base = "base" in ws ? ws.base : ws.ref;

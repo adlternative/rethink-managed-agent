@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { randomBytes } from "node:crypto";
+import { worker } from "./worker.ts";
 import path from "node:path";
 import { repos } from "../../infra/db.ts";
 import { env } from "../../shared/env.ts";
@@ -38,6 +40,12 @@ export function validateImage(image: unknown): string | null {
   return image;
 }
 
+/** Never return the worker key after creation. */
+function mask<T extends { worker_key?: string | null }>(e: T): T & { worker_key_set: boolean } {
+  const { worker_key, ...rest } = e;
+  return { ...(rest as T), worker_key_set: !!worker_key };
+}
+
 export const environments = new Hono()
   .post("/", async (c) => {
     const body = await readJson<{ name?: string; provider?: string; image?: string; workspace?: unknown; network?: string; plugin_host?: string }>(c);
@@ -45,20 +53,24 @@ export const environments = new Hono()
     if (body.plugin_host !== undefined && body.plugin_host !== "runner" && body.plugin_host !== "sandbox") throw invalid("plugin_host must be 'runner' | 'sandbox'");
     if (body.plugin_host === "sandbox" && body.provider === "local") throw invalid("plugin_host 'sandbox' needs an isolating provider (docker | e2b)");
     if (!body.name) throw invalid("name is required");
-    if (body.provider !== "local" && body.provider !== "docker" && body.provider !== "e2b") throw invalid("provider must be 'local' | 'docker' | 'e2b'");
+    if (body.provider !== "local" && body.provider !== "docker" && body.provider !== "e2b" && body.provider !== "byoc") throw invalid("provider must be 'local' | 'docker' | 'e2b' | 'byoc'");
+    if (body.provider === "byoc" && body.plugin_host === "sandbox") throw invalid("plugin_host 'sandbox' is not available for byoc yet");
     const env = await repos.environments.create({
       name: body.name,
       provider: body.provider,
       image: validateImage(body.image),
       network: (body.network as "none" | "bridge") ?? "none",
       plugin_host: (body.plugin_host as "runner" | "sandbox") ?? "runner",
+      // byoc: a per-environment key the worker authenticates with; shown once, in this response only
+      worker_key: body.provider === "byoc" ? `wk_${randomBytes(24).toString("base64url")}` : null,
       workspace: validateWorkspaceSpec(body.workspace),
     });
     return c.json(env, 201);
   })
-  .get("/", async (c) => c.json({ data: await repos.environments.list() }))
+  .get("/", async (c) => c.json({ data: (await repos.environments.list()).map(mask) }))
+  .route("/:id/worker", worker)
   .get("/:id", async (c) => {
     const e = await repos.environments.get(c.req.param("id"));
     if (!e) throw notFound("environment", c.req.param("id"));
-    return c.json(e);
+    return c.json(mask(e));
   });

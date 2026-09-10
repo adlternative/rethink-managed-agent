@@ -4,7 +4,8 @@ import { die, parseArgs, printJson, str, table } from "../lib/args.ts";
 const USAGE = `envs subcommand:
   list
   get <id>
-  create <name> --provider local|docker|e2b [--image <docker image | e2b template>] [--network none|bridge] [--plugin-host runner|sandbox]
+  create <name> --provider local|docker|e2b|byoc [--image <docker image | e2b template>] [--network none|bridge] [--plugin-host runner|sandbox]
+         (byoc: the response includes worker_key once; run: pma worker --env <id> --key <worker_key>  on your machine)
                 [--git <remote> [--ref <ref>]] [--local <host path>]`;
 
 export async function cmdEnvs(args: string[]): Promise<void> {

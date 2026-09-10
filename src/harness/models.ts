@@ -7,6 +7,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { env } from "../shared/env.ts";
+import { open as unseal } from "../infra/secrets.ts";
 import type { ModelRef, ProviderResource } from "../shared/types.ts";
 
 const APIS = {
@@ -49,6 +50,7 @@ export function defaultProviders(): Omit<ProviderResource, "created_at" | "updat
 
 function resolveKey(auth: ProviderResource["auth"]): string {
   if (auth.type === "none") return "none"; // pi-ai needs a non-empty string; proxies ignore it
+  if (auth.type === "encrypted") return unseal(auth); // BYOK: sealed with PMA_SECRET_KEY
   // QODER_API_KEY has a code default (the proxy ignores it); every other name must really be set.
   const v = process.env[auth.name] ?? (auth.name === "QODER_API_KEY" ? env.QODER_API_KEY : undefined);
   if (!v) throw new Error(`provider credential env var ${auth.name} is not set on the runner`);
@@ -81,7 +83,7 @@ export function buildModelRegistry(providers: ProviderResource[]): Models {
         id: p.id,
         name: p.name,
         baseUrl: p.base_url,
-        auth: { apiKey: { name: p.name, resolve: async () => ({ auth: { apiKey: resolveKey(p.auth) }, source: p.auth.type === "env" ? p.auth.name : "none" }) } },
+        auth: { apiKey: { name: p.name, resolve: async () => ({ auth: { apiKey: resolveKey(p.auth) }, source: p.auth.type === "env" ? p.auth.name : p.auth.type }) } },
         models: list,
         api: makeApi() as never,
       }),

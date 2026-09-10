@@ -294,3 +294,8 @@ busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paus
 - **destroyed**：之后再来就是从 workspace ref 重建（`origin: created`）。
 
 运维入口：`POST /v1/sandboxes/:id/pause` 和 `DELETE`，都由 runner 的 reaper 在下一轮执行，API 进程不直接碰容器。`sandbox.acquired` 事件带 `origin` 字段，能看出每次是新建、复用还是恢复。
+
+## 13. BYOC 与 BYOK
+
+- **BYOC**：`byoc` provider 的沙箱在用户自己跑的 `pma worker` 上。worker 只发起出站长轮询，runner 的 exec / read / write / capture 经 Redis 列表和 API 中转到 worker，结果原路返回。每个环境一把 worker key，创建时返回一次。同一 workspace 的沙箱靠 worker 心跳判断是否还在，非 git 工作区以 `{kind:"byoc", worker, path}` 留在 worker 磁盘上。这是 Managed Agents 的 self-hosted 形态在本设计里的对应物，harness 和事件模型完全不变。
+- **BYOK**：provider 的凭证多一种 `{type:"key"}` 输入，API 用 `PMA_SECRET_KEY` 做 AES-256-GCM 封存后落库，读取永不返回密文，runner 解封后注册 provider。运营方的 key 仍用 `{type:"env"}` 引用。

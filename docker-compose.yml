@@ -18,6 +18,7 @@ services:
       API_PORT: "8080"
       QODER_BASE_URL: http://host.docker.internal:4141/v1   # seeded provider must be reachable from the runner
       QODER_API_KEY: ${QODER_API_KEY:-qoder}
+      PMA_SECRET_KEY: ${PMA_SECRET_KEY:-}
     ports: ["${API_PORT:-8080}:8080"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
   runner:
@@ -28,6 +29,7 @@ services:
       REDIS_URL: redis://redis:6379
       QODER_BASE_URL: http://host.docker.internal:4141/v1
       QODER_API_KEY: ${QODER_API_KEY:-qoder}   # placeholder; the proxy ignores it, pi-ai requires a non-empty key
+      PMA_SECRET_KEY: ${PMA_SECRET_KEY:-}      # 32-byte base64/hex; seals BYOK provider keys at rest
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SANDBOX_DEFAULT_PROVIDER: ${SANDBOX_DEFAULT_PROVIDER:-local}
       E2B_API_KEY: ${E2B_API_KEY:-}

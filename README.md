@@ -186,6 +186,28 @@ the compacted context. Defaults match pi (16384 / 20000); `COMPACTION_ENABLED=0`
   `user.message` is newer than their newest status event and older than 30s, and re-enqueues them. Messages
   arriving while a run is active are covered by `finishRun`'s unconsumed-seq check.
 
+## BYOC (self-hosted sandboxes)
+
+```bash
+pma envs create my-laptop --provider byoc            # -> worker_key (shown once)
+pma worker --env env_x --key wk_… --workdir ~/pma-work   # on the machine that should run the tools
+pma sessions create --agent <agent> --env env_x --message "uname -a"
+```
+
+The worker never accepts inbound connections: it long-polls `POST /v1/environments/:id/worker/poll`
+(authenticated with the key) for create / exec / read / write / capture / destroy requests, runs them
+under one directory per sandbox (file access confined to it, commands with an allow-listed env), and posts
+results back; the runner relays over Redis. A sandbox whose worker stops heartbeating (60s) is retired, and a
+run on an environment with no worker connected fails immediately with instructions instead of hanging.
+Runner-side plugins work unchanged; `plugin_host: "sandbox"` is not available for byoc yet.
+
+## BYOK (bring your own model key)
+
+Providers accept `auth: {type: "key", key: "sk-…"}`: the API seals the key with AES-256-GCM under
+`PMA_SECRET_KEY` before storing, reads return only `{type:"encrypted"}`, and the runner unseals it when
+building the model registry. `pma providers create my-openai --api openai-responses --base-url https://api.openai.com/v1 --key sk-… --models gpt-5:400000`.
+Operator-owned keys keep using `{type:"env", name}`. Without `PMA_SECRET_KEY`, storing keys is refused.
+
 ## Sessions ↔ sandboxes (N:N)
 
 A session attaches one or more environments (`environments: [{key:"main", ...}, {key:"browser", ...}]`,
@@ -240,6 +262,7 @@ The older single-file `npm run cli` client is kept for scripts/e2e.sh.
 | `local` | runner host, `bash -lc` | in place | dev only, no isolation |
 | `docker` | sibling container via docker socket | bind mount | default `--network none`, caps dropped, resource limits |
 | `e2b` | e2b cloud sandbox (https://e2b.dev) | materialized inside the sandbox over the SDK; captured back as git patch or tarball | needs `E2B_API_KEY`; `image` is the e2b template name |
+| `byoc` | **your own machine / cloud**: a `pma worker` you run polls the API (outbound only) and executes there | git refs are cloned by the worker; non-git workspaces stay on the worker (`{kind:"byoc"}` refs) | `pma envs create x --provider byoc` returns a `worker_key` once; `pma worker --env <id> --key <key> --workdir DIR` |
 
 All three implement the same mechanism-only `SandboxProvider` interface (`create` / `connect` / `destroy` / `capture`). Policy lives in one place, `SandboxManager` (`src/sandbox/manager.ts`): the lease table, affinity reuse, rejecting a second live lease on the same workspace, reaping, and list/get/destroy. Adding a provider means one file under `src/sandbox/` plus a registry entry; it never touches the lease table.
 

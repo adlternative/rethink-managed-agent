@@ -35,8 +35,12 @@ export interface AgentResource {
 
 // ---------- Model provider (DB-configured; pi-ai createProvider under the hood) ----------
 export type ProviderApi = "openai-completions" | "openai-responses" | "anthropic-messages";
-/** Credentials never live in the DB in clear text: an env-var reference, or none for keyless proxies. */
-export type ProviderAuth = { type: "none" } | { type: "env"; name: string };
+/**
+ * Credentials never live in the DB in clear text: an env-var reference (operator-owned), none for
+ * keyless proxies, or a user-supplied key sealed with PMA_SECRET_KEY (BYOK). API input may use
+ * {type:"key", key} which the API seals before storing; reads never return ciphertext.
+ */
+export type ProviderAuth = { type: "none" } | { type: "env"; name: string } | { type: "encrypted"; v: 1; iv: string; ct: string; tag: string };
 export interface ProviderModel {
   id: string;
   name?: string;
@@ -63,13 +67,18 @@ export interface ProviderResource {
 }
 
 // ---------- Environment ----------
-export type SandboxProviderName = "local" | "docker" | "e2b";
+export type SandboxProviderName = "local" | "docker" | "e2b" | "byoc";
 export interface EnvironmentResource {
   id: EnvironmentId;
   name: string;
   provider: SandboxProviderName;
-  /** docker image (docker provider) or e2b template name (e2b provider); ignored by local */
+  /** docker image (docker provider) or e2b template name (e2b provider); ignored by local / byoc */
   image: string | null;
+  /**
+   * byoc only: a worker you run (`pma worker --env <id> --key <key>`) executes this environment's
+   * sandboxes on your own infrastructure. The key is returned once on creation; GET shows only whether it is set.
+   */
+  worker_key?: string | null;
   /** docker network for sandboxes: "none" (default, no egress) or "bridge" (internet). e2b always has egress. */
   network: "none" | "bridge";
   /**
@@ -94,7 +103,8 @@ export type WorkspaceRef =
   | { kind: "empty" }
   | { kind: "git"; remote: string; base: string; patch?: string } // base = commit sha, patch = git diff text (may be large)
   | { kind: "local"; path: string }
-  | { kind: "dir"; path: string }; // provider-managed persistent dir (local provider default)
+  | { kind: "dir"; path: string } // provider-managed persistent dir (local provider default)
+  | { kind: "byoc"; worker: string; path: string }; // lives on a BYOC worker's disk; only that worker can materialize it
 
 export interface WorkspaceResource {
   id: WorkspaceId;
@@ -137,6 +147,8 @@ export interface SandboxProcess {
   kill(): void;
 }
 export interface SandboxRequest {
+  /** environment this sandbox belongs to (byoc routes requests to that environment's workers) */
+  environmentId?: EnvironmentId;
   workspaceId: WorkspaceId;
   workspaceRef: WorkspaceRef;
   image?: string | null;

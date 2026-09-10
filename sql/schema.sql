@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS environments (
   image TEXT,
   network TEXT NOT NULL DEFAULT 'none',
   plugin_host TEXT NOT NULL DEFAULT 'runner',
+  worker_key TEXT,
   workspace JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -102,3 +103,4 @@ INSERT INTO session_environments (session_id, key, environment_id, workspace_id)
   SELECT id, 'main', environment_id, workspace_id FROM sessions s WHERE NOT EXISTS (SELECT 1 FROM session_environments e WHERE e.session_id = s.id) ON CONFLICT DO NOTHING;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS usage JSONB NOT NULL DEFAULT '{"input":0,"output":0,"cache_read":0,"cache_write":0,"total_tokens":0,"requests":0}';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context JSONB;
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS worker_key TEXT;
