@@ -4,3 +4,4 @@ dist
 data/
 docs/*.html
 docs/*.visual-check.*
+demos/gifs/

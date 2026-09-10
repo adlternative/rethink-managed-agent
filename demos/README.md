@@ -12,6 +12,11 @@ bash demos/run.sh 03-shared-container   # just one
 # or: make demo
 ```
 
+To record them as animated GIFs (into `demos/gifs/`, git-ignored — regenerate any time), run
+`bash demos/record.sh`. It captures each demo's real output and renders a terminal-style GIF with
+Pillow, no external screen recorder needed (needs `python3` + Pillow and a monospace font; override
+the font with `DEMO_FONT=/path/to.ttf`).
+
 Every demo prints its ground-truth evidence: the sandbox rows (id, provider, status, container_key,
 container_ref, workspace). That container_ref column is where the claims become visible — several
 sandboxes sharing one `container=…` is a shared runtime; a workspace surviving across different
