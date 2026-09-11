@@ -1,37 +1,47 @@
-# rethink-managed-agent：薄 Harness + 可插拔 Sandbox 设计
+# rethink-managed-agent: a thin harness + a pluggable sandbox
 
-## 0. 一句话
+## 0. In one line
 
-**Harness 只做一件事：跑 agent loop 并把一切写进 append-only 事件日志。**
-Sandbox 是可插拔的"计算租约"，不是 session 的一部分；session 只持有"工作区引用"，需要执行时才去租一个 sandbox。
+**The harness does exactly one thing: run the agent loop and write everything to an append-only event log.**
+The sandbox is a pluggable "compute lease", not part of the session; a session only holds a "workspace
+reference" and rents a sandbox when it actually needs to execute.
 
-## 1. 现有产品为什么"重"
+## 1. Why the existing products feel "heavy"
 
-以 Claude Managed Agent / Qoder Cloud Agent 这类产品为参照，重的根源不在功能多，而在几个耦合：
+Taking Claude Managed Agents / Qoder Cloud Agent as the reference, the weight comes not from feature
+count but from a few couplings:
 
-| 耦合 | 后果 |
+| Coupling | Consequence |
 |---|---|
-| session ≡ 容器生命周期 | session 挂起就得快照/冻结整个容器；恢复要等容器起来；一个 session 只能在一个容器里跑 |
-| 工具栈内置在平台 | 加一个工具要改平台；用户无法用自己的 shell/自己的 MCP |
-| 状态散落在平台 DB + 容器磁盘 | "恢复"要同时恢复两处，语义模糊；无法把 session 搬到别的 sandbox |
-| 控制面承担 orchestration | 计划模式、子 agent、审批流全在平台层，每加一个能力平台就厚一层 |
+| session ≡ container lifecycle | suspending a session means snapshotting/freezing the whole container; resuming waits for it to boot; one session can only run in one container |
+| the tool stack is baked into the platform | adding a tool means changing the platform; users can't bring their own shell or their own MCP |
+| state scattered across the platform DB + container disk | "resume" has to restore both, with fuzzy semantics; you can't move a session to a different sandbox |
+| the control plane owns orchestration | plan mode, sub-agents, approval flows all live in the platform layer, so every new capability thickens the platform |
 
-pi（Mario Zechner 的 pi coding agent）的反面做法：loop 极小、工具是普通函数、session 是可重放的 JSONL 树、所有"高级能力"都是 extension 而不是 core。本设计把这套思想搬到"托管/云端"形态，并补上它没有的一层：sandbox 的解耦。
+pi (Mario Zechner's pi coding agent) takes the opposite approach: a tiny loop, tools that are plain
+functions, a session that is a replayable JSONL tree, and every "advanced capability" as an extension
+rather than core. This design ports that philosophy to a "managed/cloud" shape and adds the one layer
+pi doesn't have: decoupling the sandbox.
 
-## 2. 设计原则
+## 2. Design principles
 
-1. **Harness 极薄**：core 只有 loop、事件日志、工具分发、provider 抽象。目标 < 1500 行。
-2. **一切皆事件**：session 状态 = 事件日志的折叠结果。没有第二份真相。
-3. **Sandbox 是租约（lease），不是所有物**：session 不拥有 sandbox，只在需要时 acquire，用完 release。
-4. **工作区（workspace）才是持久的**：文件状态用 git commit + diff 或 volume snapshot 表达，sandbox 只是加载它的临时算力。
-5. **工具对 provider 无感**：工具只拿到 `ctx.sandbox` 这个接口，不知道背后是本机、docker 还是 firecracker。
-6. **扩展即模块**：工具、系统提示片段、事件 hook、sandbox provider 全是可以 import 的普通模块，没有插件注册中心。
+1. **A very thin harness**: core is only the loop, the event log, tool dispatch, and the provider
+   abstraction. Target < 1500 lines.
+2. **Everything is an event**: session state = the fold of the event log. There is no second source of truth.
+3. **The sandbox is a lease, not a possession**: a session doesn't own a sandbox; it acquires one when
+   needed and releases it when done.
+4. **The workspace is what's persistent**: file state is expressed as a git commit + diff or a volume
+   snapshot; the sandbox is just ephemeral compute that loads it.
+5. **Tools are provider-agnostic**: a tool only gets the `ctx.sandbox` interface and doesn't know whether
+   it's backed by the local host, docker, or firecracker.
+6. **Extensions are modules**: tools, system-prompt fragments, event hooks, and sandbox providers are all
+   plain importable modules — no plugin registry.
 
-## 3. 三层结构
+## 3. The three layers
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ Control Plane（可选，很薄）                                │
+│ Control Plane (optional, very thin)                       │
 │ HTTP/WS: createSession / send / stream / list             │
 └───────────────┬──────────────────────────────────────────┘
                 │
@@ -39,36 +49,36 @@ pi（Mario Zechner 的 pi coding agent）的反面做法：loop 极小、工具�
 │ Harness Core                                              │
 │  AgentLoop  ─ Model provider ─ ToolRegistry ─ EventLog     │
 │      │                                                    │
-│      │ ctx.sandbox (接口)                                  │
+│      │ ctx.sandbox (interface)                            │
 └──────┼───────────────────────────────────────────────────┘
        │ SandboxLease (acquire / release)
 ┌──────▼───────────────────────────────────────────────────┐
-│ Sandbox Layer（可插拔）                                    │
+│ Sandbox Layer (pluggable)                                 │
 │  Provider: local | docker | firecracker | e2b | k8s | ssh  │
 │  WorkspaceMaterializer: git | volume-snapshot | rsync      │
 └──────────────────────────────────────────────────────────┘
 ```
 
-三个独立生命周期：
+Three independent lifecycles:
 
-| 对象 | 生命周期 | 持久化 |
+| Object | Lifecycle | Persisted as |
 |---|---|---|
-| Session | 用户对话的生命周期，可挂起数天 | 事件日志（JSONL） |
-| Workspace | 代码/文件状态，可跨 session 共享 | git ref + diff，或 snapshot id |
-| Sandbox | 分钟级到小时级，随时可销毁 | 无（可丢） |
+| Session | the lifetime of the conversation, can be suspended for days | event log (JSONL) |
+| Workspace | code/file state, shareable across sessions | git ref + diff, or snapshot id |
+| Sandbox | minutes to hours, disposable at any time | nothing (throwaway) |
 
-## 4. 核心接口
+## 4. Core interfaces
 
-### 4.1 Sandbox（provider 必须实现的最小面）
+### 4.1 Sandbox (the minimal surface a provider must implement)
 
 ```ts
 interface Sandbox {
   id: string;
   exec(cmd: string, opts?: { cwd?: string; env?: Record<string,string>; timeoutMs?: number; signal?: AbortSignal })
-    : AsyncIterable<ExecChunk>;              // 流式 stdout/stderr + exit
+    : AsyncIterable<ExecChunk>;              // streamed stdout/stderr + exit
   readFile(path: string): Promise<Uint8Array>;
   writeFile(path: string, data: Uint8Array): Promise<void>;
-  // 可选能力，用 capability 声明，工具按需降级
+  // optional capabilities, declared so tools can degrade gracefully
   capabilities: { ports?: boolean; snapshot?: boolean; gpu?: boolean };
   exposePort?(port: number): Promise<URL>;
   snapshot?(): Promise<SnapshotRef>;
@@ -80,40 +90,41 @@ interface SandboxProvider {
 }
 
 interface SandboxRequest {
-  workspace: WorkspaceRef;      // 要在里面加载什么
+  workspace: WorkspaceRef;      // what to load inside
   image?: string;
   resources?: { cpu?: number; memMb?: number };
-  secrets?: Record<string,string>;   // 租约时注入，不落日志
-  affinity?: string;            // 提示 provider 复用某个已有 sandbox（同 workspace 的多个 session）
+  secrets?: Record<string,string>;   // injected at lease time, never logged
+  affinity?: string;            // hint the provider to reuse an existing sandbox (many sessions, one workspace)
 }
 
 interface SandboxLease {
   sandbox: Sandbox;
-  release(): Promise<void>;     // 归还；provider 决定销毁还是回池
-  ttlMs: number;                // 空闲多久自动回收
+  release(): Promise<void>;     // return it; the provider decides whether to destroy or pool
+  ttlMs: number;                // auto-reclaim after this much idle time
 }
 ```
 
-`exec/readFile/writeFile` 三个方法就够跑 90% 的工具。别的都放 capabilities。
+`exec/readFile/writeFile` are enough to run 90% of tools. Everything else goes behind capabilities.
 
-### 4.2 Workspace（持久层，session 与 sandbox 之间的桥）
+### 4.2 Workspace (the persistent layer, the bridge between session and sandbox)
 
 ```ts
 type WorkspaceRef =
-  | { kind: "git"; remote: string; base: string; patch?: BlobRef }   // commit + 未提交 diff
-  | { kind: "snapshot"; provider: string; id: string }               // volume / overlay 快照
-  | { kind: "local"; path: string };                                 // 本机开发
+  | { kind: "git"; remote: string; base: string; patch?: BlobRef }   // commit + uncommitted diff
+  | { kind: "snapshot"; provider: string; id: string }               // volume / overlay snapshot
+  | { kind: "local"; path: string };                                 // local dev
 
 interface WorkspaceMaterializer {
-  materialize(ref: WorkspaceRef, sb: Sandbox): Promise<void>;  // 把 workspace 放进 sandbox
-  capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef>; // 从 sandbox 提取新状态
+  materialize(ref: WorkspaceRef, sb: Sandbox): Promise<void>;  // put the workspace into the sandbox
+  capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef>; // extract new state from the sandbox
 }
 ```
 
-session 挂起时：`capture` → 新 `WorkspaceRef` 写进事件日志 → `lease.release()`。
-恢复时：读日志得到最新 `WorkspaceRef` → `acquire` → `materialize`。整个 sandbox 可以是全新的，甚至换 provider。
+On suspend: `capture` → a new `WorkspaceRef` is written to the event log → `lease.release()`.
+On resume: read the log to get the latest `WorkspaceRef` → `acquire` → `materialize`. The sandbox can be
+brand new, or even a different provider.
 
-### 4.3 Session 与事件日志
+### 4.3 Session and the event log
 
 ```ts
 type Event =
@@ -121,21 +132,22 @@ type Event =
   | { t: "assistant"; content: ContentBlock[] }
   | { t: "tool_call"; id: string; name: string; input: unknown }
   | { t: "tool_result"; id: string; output: unknown; truncated?: boolean }
-  | { t: "workspace"; ref: WorkspaceRef }          // 工作区状态变更点
+  | { t: "workspace"; ref: WorkspaceRef }          // a workspace-state change point
   | { t: "sandbox"; action: "acquired" | "released"; provider: string; sandboxId: string }
-  | { t: "meta"; ... };                             // 模型切换、system prompt 片段等
+  | { t: "meta"; ... };                             // model switch, system-prompt fragments, etc.
 
 interface Session {
   id: string;
   log: EventLog;                    // append(ev) / replay() / fork(atEventId)
-  workspace(): WorkspaceRef;        // 折叠日志得到最新 ref
+  workspace(): WorkspaceRef;        // the latest ref, from folding the log
 }
 ```
 
-关键：**session 里没有 sandbox 字段**。sandbox 只作为事件出现，用来审计和调试。
-和 pi 一样，日志是树：`fork(atEventId)` 得到分支 session，共享前缀。两个分支可以各租各的 sandbox，也可以用 `affinity` 共享同一个。
+The key: **a session has no sandbox field**. The sandbox only appears as events, for audit and debugging.
+Like pi, the log is a tree: `fork(atEventId)` yields a branch session sharing the prefix. Two branches can
+each rent their own sandbox, or share one via `affinity`.
 
-### 4.4 Agent loop（整个 harness 的核心，示意）
+### 4.4 The agent loop (the heart of the harness, sketched)
 
 ```ts
 async function run(session: Session, model: Model, tools: ToolRegistry, provider: SandboxProvider) {
@@ -143,7 +155,7 @@ async function run(session: Session, model: Model, tools: ToolRegistry, provider
   const sandbox = async () => (lease ??= await acquireAndLog(session, provider)).sandbox;
 
   while (true) {
-    const msgs = session.log.replay();                 // 折叠成模型上下文
+    const msgs = session.log.replay();                 // folded into model context
     const resp = await model.stream(msgs, tools.schemas());
     session.log.append({ t: "assistant", content: resp.content });
     const calls = resp.toolCalls();
@@ -159,7 +171,7 @@ async function run(session: Session, model: Model, tools: ToolRegistry, provider
 }
 ```
 
-注意 `sandbox` 是懒获取的：纯对话的 turn 根本不租 sandbox。
+Note `sandbox` is acquired lazily: a pure-conversation turn never rents a sandbox at all.
 
 ### 4.5 Tool
 
@@ -170,183 +182,289 @@ interface Tool<I> {
   run(input: I, ctx: ToolContext): Promise<ToolOutput>;
 }
 interface ToolContext {
-  sandbox(): Promise<Sandbox>;   // 懒
+  sandbox(): Promise<Sandbox>;   // lazy
   session: Session;
   signal: AbortSignal;
 }
 ```
 
-内置工具只有 `bash`、`read`、`write`、`edit` 四个，全部通过 `ctx.sandbox()` 干活。
-"子 agent""计划模式""审批"都不进 core：子 agent = 一个工具，内部 `fork` session 再调 `run`。
+The builtin tools are only `bash`, `read`, `write`, `edit` — all working through `ctx.sandbox()`.
+"Sub-agent", "plan mode", "approval" never enter core: a sub-agent is a tool that internally `fork`s the
+session and calls `run` again.
 
-## 5. Sandbox 与 Session 的多对多
+## 5. Sandboxes and sessions are many-to-many
 
-| 场景 | 做法 |
+| Scenario | How |
 |---|---|
-| 一个 session 跨多个 sandbox | 挂起/恢复自然发生；也可显式 `release` 再用不同 image/provider `acquire` |
-| 多个 session 共用一个 sandbox | 同 workspace 的 review-session 与 fix-session 用相同 `affinity`；provider 返回同一实例，各 session 用自己的 cwd 或 git worktree 隔离 |
-| 热池 | provider 维护预热实例，`acquire` 只做 `materialize`，冷启动从分钟级降到秒级 |
-| 换 provider | 事件日志不变，只换 `provider` 参数；本机调试用 `local`，上云用 `firecracker` |
-| 无 sandbox | 纯问答 / 只读 workspace（通过 git remote 直接读）都不租 |
+| one session across many sandboxes | suspend/resume does it naturally; you can also explicitly `release` and `acquire` with a different image/provider |
+| many sessions on one sandbox | a review-session and a fix-session on the same workspace use the same `affinity`; the provider returns the same instance, each session using its own cwd or a git worktree |
+| a warm pool | the provider keeps prewarmed instances; `acquire` only `materialize`s, cutting cold start from minutes to seconds |
+| swap provider | the event log is unchanged; only the `provider` argument changes — `local` for local dev, `firecracker` for the cloud |
+| no sandbox | pure Q&A / read-only workspace (read straight from the git remote) rents nothing |
 
-并发写同一 sandbox 的保护不放在 core：由 materializer 用 worktree 隔离，或 provider 拒绝重复 `affinity`。
+Protecting against concurrent writes to one sandbox is not in core: the materializer isolates via worktrees,
+or the provider rejects a duplicate `affinity`.
 
-## 6. Control plane 保持薄
+## 6. Keeping the control plane thin
 
 ```
 POST /sessions                { workspace, model }         → { id }
 POST /sessions/:id/messages   { text }                     → 202
-GET  /sessions/:id/events     (SSE / WS, 支持 since=)
+GET  /sessions/:id/events     (SSE / WS, supports since=)
 POST /sessions/:id/fork       { atEventId }
 POST /sessions/:id/suspend    → capture + release
 ```
 
-没有 sandbox 相关 API。想看 sandbox 就看事件流里的 `sandbox` 事件。
-控制面本身无状态，session 日志放对象存储或 SQLite，多实例横向扩就是复制 loop 进程。
+No sandbox-related API. To see the sandbox, look at the `sandbox` events in the stream. The control plane is
+itself stateless; session logs go to object storage or SQLite, and scaling out is just replicating loop
+processes.
 
-## 7. 扩展点（全是普通模块）
+## 7. Extension points (all plain modules)
 
 ```ts
 export default {
   tools: [myTool],
-  systemPrompt: (ctx) => "...",           // 片段拼接，不替换
-  onEvent: (ev, session) => {},           // 审计 / 遥测 / 审批拦截
+  systemPrompt: (ctx) => "...",           // fragment concatenation, not replacement
+  onEvent: (ev, session) => {},           // audit / telemetry / approval interception
   providers: { myCloud: myProvider },
   materializers: { git: gitMaterializer },
 } satisfies Extension;
 ```
 
-审批流的实现方式：`onEvent` 在 `tool_call` 时抛 `NeedsApproval`，loop 把事件写成 `pending` 并挂起 session；用户批准后 append `approved` 事件再继续。core 只需要知道"挂起/继续"，不知道什么是审批。
+How an approval flow is implemented: `onEvent` throws `NeedsApproval` on `tool_call`, the loop writes the
+event as `pending` and suspends the session; after the user approves, an `approved` event is appended and it
+continues. Core only needs to know "suspend/continue" — it doesn't know what approval is.
 
-## 8. 与厚 harness 的对比
+## 8. Comparison with a thick harness
 
-| | Managed Agent 式 | 本设计 |
+| | Managed-Agent style | This design |
 |---|---|---|
-| session 恢复 | 恢复容器 | 重放日志 + 重新 materialize |
-| 换运行环境 | 不可 | 换 provider 参数 |
-| 增加工具 | 改平台 | 写一个函数 |
-| 挂起成本 | 容器占资源或快照 | 一个 git diff |
-| 多 session 同工作区 | 通常不支持 | affinity + worktree |
-| core 规模 | 平台级 | ~1500 行 |
+| session resume | restore the container | replay the log + re-materialize |
+| swap runtime | not possible | change the provider argument |
+| add a tool | change the platform | write a function |
+| suspend cost | a running container or a snapshot | a git diff |
+| many sessions, one workspace | usually unsupported | affinity + worktree |
+| core size | platform-scale | ~1500 lines |
 
-## 9. 取舍与已知代价
+## 9. Tradeoffs and known costs
 
-- **冷启动**：不绑定容器意味着每次恢复要 materialize。用热池和 snapshot provider 缓解，但比"容器一直活着"慢。
-- **非 git 状态**：安装的依赖、跑着的服务、数据库不在 git 里。靠 `snapshot` capability 或在 materializer 里跑 `setup` 脚本（写在 workspace 的配置文件里，例如 `.agent/setup.sh`）。
-- **secrets**：只在 `acquire` 时注入，绝不进事件日志；日志要脱敏 tool_result。
-- **共享 sandbox 的并发**：core 不做锁，交给 provider/materializer，需要明确文档化。
-- **大输出**：tool_result 需要截断并把全文存 blob，日志只留引用，否则重放成本失控。
+- **Cold start**: not binding a container means every resume has to materialize. Warm pools and snapshot
+  providers mitigate it, but it's slower than "keep the container alive".
+- **Non-git state**: installed deps, running services, databases are not in git. Handle via the `snapshot`
+  capability or a `setup` script run by the materializer (a config file in the workspace, e.g. `.agent/setup.sh`).
+- **Secrets**: injected only at `acquire`, never in the event log; tool_result must be redacted.
+- **Concurrency on a shared sandbox**: core does no locking; it's delegated to the provider/materializer and
+  must be documented clearly.
+- **Large outputs**: tool_result must be truncated with the full text spilled to a blob, keeping only a
+  reference in the log, or replay cost explodes.
 
-## 10. MVP 路线
+## 10. MVP roadmap
 
-1. `core/`：EventLog(JSONL)、AgentLoop、ToolRegistry、4 个内置工具。
-2. `sandbox/local`：直接跑子进程；`materializer/git`。
-3. CLI：本机跑通，session 可挂起、fork、恢复。
-4. `sandbox/docker`：验证"同一日志换 provider"。
-5. 薄 control plane（HTTP + SSE）。
-6. 热池 + `sandbox/firecracker` 或 e2b provider。
-7. 扩展：子 agent 工具、审批 hook。
+1. `core/`: EventLog (JSONL), AgentLoop, ToolRegistry, the 4 builtin tools.
+2. `sandbox/local`: run subprocesses directly; `materializer/git`.
+3. CLI: end-to-end locally, with session suspend, fork, resume.
+4. `sandbox/docker`: prove "same log, different provider".
+5. A thin control plane (HTTP + SSE).
+6. Warm pool + `sandbox/firecracker` or an e2b provider.
+7. Extensions: sub-agent tool, approval hook.
 
-每一步都应保持 core 不长。如果某个功能让 core 变厚，先问它能不能是 extension。
+Every step should keep core from growing. If a feature thickens core, first ask whether it can be an extension.
 
-## 11. 会话与沙箱 N:N（定稿）
+## 11. Sessions and sandboxes are N:N (finalized)
 
-早期实现里 session 对 workspace 一对一，sandbox 由 workspace 的 affinity 决定，一个会话同一时刻只有一个沙箱。这一节把关系定为 N:N，并且仍然守住两条原则：events 是唯一真相；sandbox 只是租约。
+An early implementation had a session 1:1 with a workspace, the sandbox determined by the workspace affinity,
+and one session with at most one sandbox at a time. This section fixes the relationship as N:N while still
+holding the two principles: events are the only truth; the sandbox is only a lease.
 
-### 11.1 模型
+### 11.1 Model
 
 ```
 session ──1:N── session_environments(key, environment, workspace)
-                       │  key = "main" 是主环境（工具默认目标，capture 的主体）
-                       │  其余 key 是附加环境，如 "browser"、"gpu"
+                       │  key = "main" is the primary environment (default tool target, subject of capture)
+                       │  other keys are attached environments, e.g. "browser", "gpu"
                        ▼
-workspace ──N:1 sandbox lease（affinity = workspace.id，同一时刻至多一个活跃租约）
+workspace ──N:1 sandbox lease (affinity = workspace.id, at most one active lease at a time)
 ```
 
-- **一个会话多个沙箱**：会话挂多个环境，每个环境各自租沙箱。内置工具增加可选参数 `env`，默认 `main`。事件 `sandbox.acquired` 带 `env`，`workspace.captured` 带 `workspace_id` 和 `env`，多个并存不需要新的事件模型。
-- **多个会话一个沙箱**：不变，同一 workspace 的会话靠 affinity 复用，活跃租约互斥。
-- **子会话**：`sessions.parent_id`。子会话拥有从父会话 fork 出来的 workspace（git 类型复制 base 加 patch，dir 类型复制目录），因此有自己的沙箱，和父会话并行互不踩文件。子会话结束时父会话收到 `agent.thread_message_received`，内容是报告加 patch；父会话决定是否 apply。事件名对齐 Managed Agents 的 multiagent。
+- **One session, many sandboxes**: a session attaches several environments, each renting its own sandbox.
+  The builtin tools take an optional `env` argument, defaulting to `main`. The `sandbox.acquired` event
+  carries `env`, and `workspace.captured` carries `workspace_id` and `env`; several coexisting needs no new
+  event model.
+- **Many sessions, one sandbox**: unchanged — sessions on the same workspace reuse via affinity, with the
+  active lease mutually exclusive.
+- **Sub-sessions**: `sessions.parent_id`. A sub-session owns a workspace forked from the parent (git: copy
+  base + patch; dir: copy the directory), so it has its own sandbox and runs in parallel without stepping on
+  the parent's files. When a sub-session ends, the parent receives `agent.thread_message_received` carrying
+  the report plus a patch; the parent decides whether to apply it. Event names align with the Managed Agents
+  multiagent shape.
 
-### 11.2 运行时
+### 11.2 Runtime
 
-- run-turn 持有 `Map<envKey, lease>`，懒租；结束时逐个 capture 和 release。
-- 插件的 `ctx.sandbox` 也接受 `env`；`ctx.agent.run(task, { isolated: true })` 创建子会话并等待其结束，而不是在同一沙箱里跑嵌套 loop。
-- runner 有并发度（`RUNNER_CONCURRENCY`），否则父会话等待子会话会死锁在单消费者上。
+- run-turn holds a `Map<envKey, lease>`, leasing lazily; on finish it captures and releases each one.
+- A plugin's `ctx.sandbox` also takes `env`; `ctx.agent.run(task, { isolated: true })` creates a sub-session
+  and waits for it, rather than running a nested loop in the same sandbox.
+- The runner has a concurrency degree (`RUNNER_CONCURRENCY`), or a parent waiting on a sub-session would
+  deadlock on a single consumer.
 
-### 11.3 明确不做的
+### 11.3 Explicit non-goals
 
-- 不在一个沙箱里跑多个会话的并发写：仍由 affinity 互斥保证。
-- 不做跨会话共享租约的"沙箱池"语义：沙箱复用只发生在同一 workspace 内。
-- 不支持一个 workspace 同时挂到两个环境，附加环境要么自带 workspace，要么 fork 主 workspace。
+- No concurrent writes from multiple sessions in one sandbox: still guaranteed by affinity mutual exclusion.
+- No cross-session "sandbox pool" lease sharing: sandbox reuse only happens within one workspace.
+- No mounting one workspace onto two environments at once: an attached environment either brings its own
+  workspace or forks the main one.
 
-## 12. 沙箱 idle / pause / resume
+## 12. Sandbox idle / pause / resume
 
-租约释放后沙箱不立即销毁，而是分两级退役，两个阈值都可配：
+After a lease is released, the sandbox is not destroyed immediately but retired in two tiers, both thresholds
+configurable:
 
 ```
 busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paused ──idle > SANDBOX_PAUSED_TTL_MS──► destroyed
                     ▲                                     │
-                    └──────────── 下次 acquire 自动 resume ─┘
+                    └──────────── next acquire auto-resumes ─┘
 ```
 
-- **ready**：容器还在跑，命中同一 workspace 的会话秒级接上（`origin: reused`）。
-- **paused**：docker 用 `pause`(freezer cgroup 冻结进程,内存态保留、CPU 释放),下次 `unpause` 原地恢复,连后台进程都还活着;e2b 用 SDK 的 `pause` 快照,同样保留内存态。语义统一:pause 这一层保状态(文件+进程),destroy 才真正回收。下次 acquire 时 manager 先 `resume` 再 `connect`(`origin: resumed`)。没有 pause 能力的 provider(local)直接销毁。
-- **destroyed**：之后再来就是从 workspace ref 重建（`origin: created`）。
+- **ready**: the container is still running; a session hitting the same workspace reconnects in seconds
+  (`origin: reused`).
+- **paused**: docker uses `pause` (the freezer cgroup freezes processes, keeping memory state and releasing
+  CPU); the next `unpause` resumes in place with even background processes still alive. e2b uses the SDK's
+  `pause` snapshot, likewise preserving memory state. Uniform semantics: the pause tier keeps state (files +
+  processes), and only destroy actually reclaims. On the next acquire the manager `resume`s then `connect`s
+  (`origin: resumed`). A provider without pause (local) is destroyed directly.
+- **destroyed**: a later arrival rebuilds from the workspace ref (`origin: created`).
 
-运维入口：`POST /v1/sandboxes/:id/pause` 和 `DELETE`，都由 runner 的 reaper 在下一轮执行，API 进程不直接碰容器。`sandbox.acquired` 事件带 `origin` 字段，能看出每次是新建、复用还是恢复。
+Ops entry points: `POST /v1/sandboxes/:id/pause` and `DELETE`, both executed by the runner's reaper on its
+next pass; the API process never touches containers directly. The `sandbox.acquired` event carries an
+`origin` field, so you can see whether each acquire was a create, a reuse, or a resume.
 
-## 13. BYOC 与 BYOK
+## 13. BYOC and BYOK
 
-- **BYOC**：`byoc` provider 的沙箱在用户自己跑的 `pma worker` 上。worker 只发起出站长轮询，runner 的 exec / read / write / capture 经 Redis 列表和 API 中转到 worker，结果原路返回。每个环境一把 worker key，创建时返回一次。同一 workspace 的沙箱靠 worker 心跳判断是否还在，非 git 工作区以 `{kind:"byoc", worker, path}` 留在 worker 磁盘上。这是 Managed Agents 的 self-hosted 形态在本设计里的对应物，harness 和事件模型完全不变。
-- **BYOK**：provider 的凭证多一种 `{type:"key"}` 输入，API 用 `PMA_SECRET_KEY` 做 AES-256-GCM 封存后落库，读取永不返回密文，runner 解封后注册 provider。运营方的 key 仍用 `{type:"env"}` 引用。
+- **BYOC**: a `byoc` provider's sandbox runs on the user's own `pma worker`. The worker only makes outbound
+  long-polls; the runner's exec / read / write / capture are relayed to the worker via Redis lists and the
+  API, with results returning the same way. One worker key per environment, returned once at creation. A
+  sandbox on the same workspace is judged alive by the worker heartbeat, and a non-git workspace stays on the
+  worker's disk as `{kind:"byoc", worker, path}`. This is the self-hosted form of Managed Agents in this
+  design; the harness and event model are entirely unchanged.
+- **BYOK**: a provider's credential gains a `{type:"key"}` input; the API seals it with AES-256-GCM under
+  `PMA_SECRET_KEY` before storing it, never returns the ciphertext on read, and the runner unseals it to
+  register the provider. An operator's own key still uses the `{type:"env"}` reference.
 
-## 14. 多 Agent
+## 14. Multi-agent
 
-参考 pi 生态（tintinweb/pi-subagents、nicobailon/pi-subagents、pi-dynamic-workflows）：它们都是"多实例"，子 agent 是独立会话，隔离靠 git worktree，编排是一段确定性 JS 脚本，子对父通过 intercom 通信。本设计里对应物已经存在，只是换了名字：
+Referencing the pi ecosystem (tintinweb/pi-subagents, nicobailon/pi-subagents, pi-dynamic-workflows): they
+are all "multi-instance" — a sub-agent is an independent session, isolation is by git worktree, orchestration
+is a deterministic JS script, and child-to-parent communication is via intercom. The counterparts already
+exist here, just renamed:
 
-| pi 生态 | 本设计 |
+| pi ecosystem | This design |
 |---|---|
-| 子 agent 独立会话 | 子 session（`parent_id`），任意 runner 并发执行 |
-| git worktree 隔离 | workspace fork，各自沙箱 |
-| `agent()` / `parallel()` / `pipeline()` 脚本 | `plugins/workflow` 的 `run_workflow`，脚本形状相同 |
-| intercom `contact_supervisor` | 内置 `report_to_parent`，问题会结束子会话的 turn，父的 reply 作为子的下一条用户消息 |
-| agent types / frontmatter | `plugins/team` 的角色（store 里可改） |
+| sub-agent as an independent session | a sub-session (`parent_id`), run concurrently on any runner |
+| git worktree isolation | workspace fork, each with its own sandbox |
+| `agent()` / `parallel()` / `pipeline()` scripts | `plugins/workflow`'s `run_workflow`, same script shape |
+| intercom `contact_supervisor` | builtin `report_to_parent`; a question ends the sub-session's turn and the parent's reply arrives as the sub's next user message |
+| agent types / frontmatter | `plugins/team`'s roles (editable in the store) |
 
-核心只加了 `ctx.agents.*` 六个能力和一个内置工具，事件对齐 Managed Agents 的 `session.thread_created`、`agent.thread_message_sent/received`。团队与工作流本身全是插件。
+Core only added the six `ctx.agents.*` capabilities and one builtin tool, with events aligned to Managed
+Agents' `session.thread_created` and `agent.thread_message_sent/received`. Teams and workflows are themselves
+entirely plugins.
 
-## 15. Principal 与归属（多租户 phase 1）
+## 15. Principals and ownership (multi-tenant, phase 1)
 
-不引入 `user_id`，而是一个多态主体 `principals(id, kind, ...)`：用户、组织、服务账号都是它的一种 `kind`。每个顶层资源（agents / environments / workspaces / providers / files / skills / memory_stores / sessions）加一列 `owner_id → principals(id)`。今天 `owner_id` 一律指向 `kind='user'` 的主体;将来指向 `kind='org'` 即可，资源表一列都不用改——扩展到组织是加行加表，不是全表迁移。
+Rather than introducing `user_id`, use a polymorphic subject `principals(id, kind, ...)`: a user, an org, and
+a service account are all a `kind` of it. Every top-level resource (agents / environments / workspaces /
+providers / files / skills / memory_stores / sessions) gains an `owner_id → principals(id)` column. Today
+`owner_id` always points at a `kind='user'` subject; tomorrow it points at a `kind='org'` one — no resource
+table changes. Extending to orgs is adding rows and a table, not a whole-schema migration.
 
-- **actor 与 owner 分离**：actor 是认证后的调用方(一个 principal);owner scope 是资源归属的边界。phase 1 里 owner == actor;有组织后由 `X-Org` 头选定、经 membership 校验后换成 org 主体。
-- **认证**：`api_keys(token_sha256 → principal)`,`Authorization: Bearer <token>`。`AUTH_REQUIRED=false`(默认)时无 token 回落到 `PMA_DEFAULT_PRINCIPAL`(即 schema 里种子的 `prc_local`),单机流程零改动;`=true` 时强制校验。BYOC worker 走 `x-worker-key`,不经主体认证。
-- **归属贯穿**：API 中间件把 `{actor, owner}` 放进 context;create 路由 stamp `owner_id`,list/get/update/delete 传入 owner scope 后加 `WHERE owner_id=$n`,集中在 `src/infra/db.ts` 的 repo 里。runner / harness 以系统身份读(不带 scope),因为它要处理任意 owner 的会话;子 session 和 fork 的 workspace 继承父的 `owner_id`。
-- **授权 seam**：留一个函数式判断点,phase 1 就是 `resource.owner_id === actor.id`;有组织后换成"actor 是该 org 成员且角色允许",调用点不变。
+- **actor vs owner**: the actor is the authenticated caller (a principal); the owner scope is the resource's
+  ownership boundary. In phase 1 owner == actor; with orgs, an `X-Org` header selects it after a membership
+  check and it becomes the org subject.
+- **auth**: `api_keys(token_sha256 → principal)`, `Authorization: Bearer <token>`. With `AUTH_REQUIRED=false`
+  (default), a request with no token falls back to `PMA_DEFAULT_PRINCIPAL` (the schema-seeded `prc_local`), so
+  the single-machine flow needs zero changes; `=true` enforces auth. The BYOC worker uses `x-worker-key` and
+  bypasses principal auth.
+- **ownership threaded through**: the API middleware puts `{actor, owner}` on the context; create routes
+  stamp `owner_id`, and list/get/update/delete take the owner scope and add `WHERE owner_id=$n`, centralized
+  in the repos in `src/infra/db.ts`. The runner/harness read as the system (no scope), because they process
+  sessions of any owner; a sub-session and a forked workspace inherit the parent's `owner_id`.
+- **authorization seam**: keep a functional check point — in phase 1 it's `resource.owner_id === actor.id`;
+  with orgs it becomes "actor is a member of that org and the role allows it", with the call site unchanged.
 
-**扩展到组织(增量)**:加 `principals` 里 `kind='org'` 的行 + `memberships(member_id, org_id, role)` + `X-Org` 解析,资源表和 repo 逻辑不动。
+**Extending to orgs (incremental)**: add `kind='org'` rows in `principals` + `memberships(member_id, org_id,
+role)` + `X-Org` parsing, with resource tables and repo logic untouched.
 
-**phase 2(已完成):按 owner 收口隔离**
-- **容器不跨主体**:`container_key` 前缀加 `owner_id`(`${owner}/${container_group}/${env}`),所以 manager 找同 key 复用容器时永远不会把两个主体的 mount 并进同一个容器;共享容器只在同一 owner 内成立。
-- **sandbox 归属**:`sandboxes.owner_id`(临时行,可空、无 FK),acquire 时写入;`/v1/sandboxes` 运维视图(list/get/delete/pause)按调用方 owner 过滤,跨主体查不到。reaper 仍以系统身份按 provider 扫描。
-- **plugin_store 主体隔离已天然成立**:`owner`(agent_id / workspace_id)由服务端按会话上下文绑定,插件只能传 `key`+`scope`,而 agent/workspace 各属唯一主体,所以插件访问不到别的主体的数据。phase 2 额外加了 `scope="principal"`(owner = `session.owner_id`),给插件一份租户级存储。
-- **fetch 白名单按主体**:`principals.fetch_allow`(逗号列表或 `*`),每次运行取该主体策略,缺省回落到部署级 `PLUGIN_FETCH_ALLOW`。
+**Phase 2 (done): owner-keyed isolation**
+- **Containers never cross subjects**: `container_key` is prefixed with `owner_id`
+  (`${owner}/${container_group}/${env}`), so when the manager reuses a container by key it never merges two
+  subjects' mounts into one; shared containers only hold within one owner.
+- **Sandbox ownership**: `sandboxes.owner_id` (ephemeral rows, nullable, no FK), written on acquire; the
+  `/v1/sandboxes` ops view (list/get/delete/pause) filters by the caller's owner, invisible across subjects.
+  The reaper still scans by provider as the system.
+- **plugin_store subject isolation holds naturally**: `owner` (agent_id / workspace_id) is bound server-side
+  from the session context; a plugin can only pass `key` + `scope`, and since each agent/workspace belongs to
+  a unique subject, a plugin cannot reach another subject's data. Phase 2 additionally adds `scope="principal"`
+  (owner = `session.owner_id`) for a tenant-wide plugin store.
+- **Per-subject fetch allowlist**: `principals.fetch_allow` (a comma list or `*`); each run takes that
+  subject's policy, falling back to the deployment-level `PLUGIN_FETCH_ALLOW`.
 
-**身份是可插拔的接缝(隔离留在平台,身份交给业务侧)**。rethink 只拥有*隔离*边界(每个资源带 `owner_id`,仓储层强制),不规定"用户/组织"是什么。一个凭证如何变成 principal 由 `PrincipalResolver`(`src/api/principal-resolver.ts`)决定:部署方用 `PRINCIPAL_RESOLVER` 指向一个默认导出该 resolver 的模块,业务侧把自己的身份接进来(校验过的 JWT/OIDC、可信网关头、mTLS、每租户 key)。resolver 返回 `{actor, owner?}`,系统其余部分只看 `owner`;当 resolver 返回的 `owner` 不等于 `actor` 时,就是组织 scope 的接入点。内置默认是 Bearer→`api_keys`;`src/api/resolvers/trusted-header.ts` 是现成示例(信任上游网关的 `x-principal-id`,`x-org-id` 选 owner)。据此对外可讲两档:一套部署内 principals 做**软隔离**服务大量租户;要**硬隔离**的单独起一套栈。
+**Identity is a pluggable seam (isolation stays in the platform, identity goes to the business side)**. rethink
+owns only the *isolation* boundary (every resource carries `owner_id`, enforced in the repos); it doesn't
+define what "user"/"org" means. How a credential becomes a principal is decided by a `PrincipalResolver`
+(`src/api/principal-resolver.ts`): the deployment points `PRINCIPAL_RESOLVER` at a module that default-exports
+one, and the consuming business plugs its own identity in (a verified JWT/OIDC, a trusted gateway header,
+mTLS, a per-tenant key). The resolver returns `{actor, owner?}`, and everything downstream sees only `owner`;
+returning an `owner` different from `actor` is the org-scope slot. The built-in default is Bearer→`api_keys`;
+`src/api/resolvers/trusted-header.ts` is a ready example (trusts an upstream gateway's `x-principal-id`, with
+`x-org-id` selecting the owner). So there are two tiers to offer: principals for **soft isolation** of many
+tenants in one deployment, and a separate stack for those who need **hard isolation**.
 
-**仍留给后续**:
-- provider id 是全局主键,跨 owner 同名会 409(providers 偏基础设施,BYOK 密钥按行封存)。
-- `AUTH_REQUIRED=true` 下的 API key 铸造仍对已认证 actor 开放,真实部署应再加 admin 门槛。
-- 组织(`kind='org'` + `memberships` + 角色判断)是 phase 3,且应尽量薄、藏在 resolver 后面。
+**Still deferred**:
+- provider id is a global primary key, so a cross-owner name collides with 409 (providers are more like
+  infrastructure; BYOK keys are sealed per row).
+- API-key minting under `AUTH_REQUIRED=true` is still open to any authenticated actor; a real deployment
+  should add an admin gate.
+- Orgs (`kind='org'` + `memberships` + a role check) are phase 3, and should stay thin, hidden behind the
+  resolver.
 
-## 16. OpenAI Agents API 兼容层
+## 16. OpenAI Agents API compatibility layer
 
-一个薄适配器让 rethink 讲 OpenAI Agents API 的 session 方言,使 showcase 级代码(如 SRE "sev-bot")指到 rethink 的 base URL 就能跑,且**不绑任何云厂商**:模型解析到 rethink 的 provider 行(BYOK),环境解析到可插拔沙箱 provider(local/docker/e2b/byoc)。适配器挂在 `/agents-api/v1`,是对原生引擎的纯翻译;引擎唯一新增的是**客户端/函数工具**。
+A thin adapter makes rethink speak the OpenAI Agents API session dialect, so showcase-grade code (like the
+SRE "sev-bot") runs by pointing at rethink's base URL, and **binds to no cloud vendor**: the model resolves
+to a rethink provider row (BYOK), the environment to a pluggable sandbox provider (local/docker/e2b/byoc).
+The adapter is mounted at `/agents-api/v1` and is pure translation over the native engine; the one engine
+addition is **client/function tools**.
 
-- **端点**:`POST /sessions`(create,`{agent, environment, input?, stream?}`)、`GET /sessions/:id`(retrieve,含 `info.required_actions`)、`POST /sessions/:id`(continue)、`POST /sessions/:id/tool_result`、`DELETE`、`GET /sessions/:id/events/stream`。挂在与原生 `/v1` 并列的独立前缀下,各自 `auth()`。
-- **客户端/函数工具(核心机制)**:`{type:'function',name,parameters}` 由**调用方**执行,不进沙箱。agent 调用它时,这一轮保持存活,execute 在一个**按 call_id 的持久结果通道**(Redis 列表,非有损 pub/sub)上阻塞;调用方 POST `tool_result` 后同轮恢复,超时(`CLIENT_TOOL_WAIT_MS`,默认 5 分钟,< `RUN_TIMEOUT_MS`)则以一条超时错误结果结束该调用。
-  - **引擎不含"待答/审批"概念(pi 理念)**:客户端工具在日志里就是一次结果晚到的普通 `agent.tool_use`。`required_action` 完全由适配器从日志推导——`agent.tool_use` 中名字属于该 session `client_tools`、且无后续 `agent.tool_result` 者——经 retrieve 和 `agent.session.action_required` 流事件暴露。要真正的审批/权限用 pi 式插件 `tool_call` 钩子(`block`/`reason`),那是它该待的层,不是 core。
-  - **为什么不是"永不 settle 的 promise + abort"**:pi 的循环对 `tool.execute` 是裸 `await`、不对 signal 做 race,那样会**死锁**且沙箱租约永不释放(对抗校验发现的关键坑)。所以照搬仓库里已验证的 `report_to_parent` 模式:execute 总是返回一个真实结果,循环正常展开,历史对 LLM 合法。
-- **工具类型**:内置名(`bash/read/write/edit`)透传进沙箱;`{type:'mcp'}` 由 runner 端的 MCP-over-HTTP 客户端(`src/harness/mcp.ts`,Streamable HTTP,受 fetch 白名单约束、失败软降级)真实连接、列出并调用其工具;`web_search` 映射到现成的 `plugins/web-search` pi 插件(`COMPAT_WEBSEARCH_PACKAGE`,需环境 `plugin_host=sandbox`+`network=bridge`);`multi_agent` 映射到团队插件(`COMPAT_TEAM_PACKAGE`,`max_concurrent_subagents` 为 advisory);`programmatic_tool_calling` 仍 accepted-and-ignored。
-- **流事件**:原生 delta/event 重编码成 OpenAI 名字(`response.output_text.delta`、`session.turn.item.added` 带 `function_call`、`agent.session.action_required`、`agent.session.turn.completed`、`turn.failed/cancelled`)。
-- **SDK**:`src/api/routes/compat/sdk/` 提供零依赖的 `client.beta.agents.sessions.*` 客户端,自动跑有 handler 的函数工具并回传结果;没 handler 的调用作为 `required_action` 交回调用方(sev-bot 的审批门)。
-- **MVP 边界**:webhook 投递 `action_required` 未做(SSE + retrieve 覆盖);真正的 MCP client、programmatic tool calling 未做(接受并映射/留接口);`input` 仅字符串;跨 idle 的冷恢复靠 keep-alive 长轮询覆盖(审批在窗口内完成)。
+- **Endpoints**: `POST /sessions` (create, `{agent, environment, input?, stream?}`), `GET /sessions/:id`
+  (retrieve, with `info.required_actions`), `POST /sessions/:id` (continue), `POST /sessions/:id/tool_result`,
+  `DELETE`, `GET /sessions/:id/events/stream`. Mounted under a prefix parallel to the native `/v1`, each with
+  its own `auth()`.
+- **Client/function tools (the core mechanism)**: `{type:'function',name,parameters}` is executed by the
+  **caller**, not the sandbox. When the agent calls it, the turn stays alive and execute blocks on a
+  **durable per-call result channel** (a Redis list, not lossy pub/sub); the caller POSTs `tool_result` and
+  the same turn resumes, or on timeout (`CLIENT_TOOL_WAIT_MS`, default 5 min, < `RUN_TIMEOUT_MS`) it ends the
+  call with a timeout error.
+  - **The engine has no "pending"/"approval" concept (the pi philosophy)**: a client tool is just an ordinary
+    `agent.tool_use` in the log whose result arrives late. `required_action` is derived entirely by the
+    adapter from the log — an `agent.tool_use` whose name is one of the session's `client_tools` with no later
+    `agent.tool_result` — surfaced via retrieve and the `agent.session.action_required` stream event. For real
+    approval/permission, use the pi-style plugin `tool_call` hook (`block`/`reason`); that is the layer it
+    belongs to, not core.
+  - **Why not "a never-settling promise + abort"**: pi's loop bare-`await`s `tool.execute` with no signal
+    race, so that would **deadlock** and leak the sandbox lease (the key trap found by adversarial review).
+    So it mirrors the repo's proven `report_to_parent` pattern: execute always returns a real result, the
+    loop unwinds normally, and the history stays valid for the LLM.
+- **Tool types**: builtin names (`bash/read/write/edit`) pass through into the sandbox; `{type:'mcp'}` is
+  connected for real by a server-side MCP-over-HTTP client (`src/harness/mcp.ts`, Streamable HTTP, gated by
+  the fetch allowlist, failing soft), which lists and calls its tools; `web_search` maps to the existing
+  `plugins/web-search` pi plugin (`COMPAT_WEBSEARCH_PACKAGE`, needs `plugin_host=sandbox`+`network=bridge`);
+  `multi_agent` maps to the team plugin (`COMPAT_TEAM_PACKAGE`, with `max_concurrent_subagents` advisory);
+  `programmatic_tool_calling` stays accepted-and-ignored.
+- **Stream events**: native deltas/events are re-encoded to OpenAI names (`response.output_text.delta`,
+  `session.turn.item.added` with `function_call`, `agent.session.action_required`,
+  `agent.session.turn.completed`, `turn.failed/cancelled`).
+- **SDK**: `src/api/routes/compat/sdk/` provides a zero-dependency `client.beta.agents.sessions.*` client
+  that auto-runs handler-backed function tools and returns the result; a call with no handler is handed back
+  to the caller as a `required_action` (sev-bot's approval gate).
+- **MVP boundaries**: webhook delivery of `action_required` is not built (SSE + retrieve cover it);
+  `programmatic_tool_calling` is not built (accepted-and-ignored); `input` is string-only; cold resume across
+  idle is covered by the keep-alive long-poll (approval completes within the window).
