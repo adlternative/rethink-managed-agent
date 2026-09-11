@@ -468,3 +468,38 @@ addition is **client/function tools**.
 - **MVP boundaries**: webhook delivery of `action_required` is not built (SSE + retrieve cover it);
   `programmatic_tool_calling` is not built (accepted-and-ignored); `input` is string-only; cold resume across
   idle is covered by the keep-alive long-poll (approval completes within the window).
+
+## 17. The three layers, and who owns each
+
+The system is three layers, each an independent isolation domain that can be operator-run or
+tenant-owned. This is the reference mental model; the plugin "placements" of §16 live *inside* it.
+
+| Layer | Role | In the code | Anthropic split | Can be owned by |
+|---|---|---|---|---|
+| **1. Operator service** (control plane) | API, run queue, event log (truth), DB, provider registry, tenancy/auth, wake, sandbox provisioning policy | `src/api/*`, `src/infra/{queue,pubsub,db,events}.ts` | control-plane (`wake`/`getSession`/`emitEvent`/`provision`) | the operator |
+| **2. Brain** (runner / harness) | runs the agent loop, folds events → context, dispatches tools, hosts **agent-behavior plugins** | `src/runner/*`, `src/harness/*`, the runner-mode plugin host | the harness | operator (shared) **or the tenant** |
+| **3. Hands** (sandbox) | executes commands/tools; pluggable provider | `src/sandbox/*` (local/docker/e2b/byoc) | agent-behavior `execute` | operator or the tenant (BYOC) |
+
+Boundaries between the layers are already interfaces, so each is separately deployable:
+
+- **Service ↔ Brain**: the event log + run queue (`RunQueue`/`Bus`, redis/postgres/memory backends).
+  The brain never shares memory with the service; it consumes jobs and appends events.
+- **Brain ↔ Hands**: the `SandboxProvider` interface. The brain holds only `ctx.sandbox`; the hands
+  can be a sibling container, a cloud sandbox, or the tenant's own worker (BYOC).
+
+**Each layer, independently ownable:**
+
+- **Hands**: done — `byoc` provider runs the sandbox on the tenant's own worker.
+- **Brain**: the runner is already a stateless process that can be deployed separately and scaled by
+  running more of them (they share one consumer group). The one missing piece for a *tenant-owned*
+  brain is **per-tenant run routing**: a runner scoped to a set of owners so a tenant's own runner only
+  handles that tenant's sessions (`RUNNER_OWNERS`, with the job tagged by `owner_id`). The Postgres
+  queue makes this a `WHERE owner_id = ANY(...)` filter; Redis would use a per-owner stream. With that,
+  a tenant runs their own brain runner (their own agent-behavior plugins, their own model keys) against
+  the operator's service, executing on their own hands sandbox — "the brain belongs to the user".
+- **Service**: the operator's control plane; multi-tenant via principals + owner-scoped data.
+
+**Plugin placement is a property of the brain**, not a fourth layer: an agent-behavior plugin runs in
+the brain (runner-mode host, operator-curated via `PLUGIN_ALLOW`) or is pushed down into the hands
+(sandbox-mode host, isolated in the tenant's sandbox, `PLUGIN_ALLOW_SANDBOX`). A future
+`plugin_host=service` is the brain's plugin host as its own per-tenant service — still layer 2.
