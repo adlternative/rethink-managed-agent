@@ -40,8 +40,10 @@ export const env = {
   PI_AGENT_ROOT: process.env.PI_AGENT_ROOT ?? "./data/pi-agents",
   /** Hostnames plugins may fetch through ctx.fetch ("*" = any). Empty denies all. */
   PLUGIN_FETCH_ALLOW: process.env.PLUGIN_FETCH_ALLOW ?? "*",
-  /** Operator allowlist of installable plugin package sources: "*" = any (default), or a comma list of prefixes an agent's packages must match (e.g. "npm:@acme/,/app/plugins/"). Empty denies all packages. Governs whose code runs on the runner. */
+  /** Allowlist of plugin packages that may run on the SHARED runner (operator-curated): "*" = any (default), a comma list of prefixes, or empty = none. */
   PLUGIN_ALLOW: process.env.PLUGIN_ALLOW ?? "*",
+  /** Allowlist of plugin packages that may run in an ISOLATED sandbox host (plugin_host=sandbox). Default "*": the code runs in the user's own environment, so users can bring their own brain plugins. */
+  PLUGIN_ALLOW_SANDBOX: process.env.PLUGIN_ALLOW_SANDBOX ?? "*",
   /** When true the API rejects requests without a valid bearer token; when false, unauthenticated requests act as PMA_DEFAULT_PRINCIPAL. */
   AUTH_REQUIRED: (process.env.AUTH_REQUIRED ?? "false") === "true",
   /** The principal unauthenticated (dev) requests act as. Seeded by the schema. */

@@ -1,4 +1,4 @@
-import { disallowedPackages } from "./allow.ts";
+import { disallowedEverywhere } from "./allow.ts";
 /**
  * Installs package sources into a per-agent dir and reads their manifests.
  * Sources: "npm:<spec>", "git:<url>[@ref]", or a local path (used in place).
@@ -65,8 +65,8 @@ async function readManifest(dir: string, source: string): Promise<PackageManifes
 
 /** Install (cached by source list) and return manifests. */
 export async function ensurePackages(agentId: string, sources: string[]): Promise<PackageManifest[]> {
-  const blocked = disallowedPackages(sources); // defense in depth: never run a package the operator hasn't allowed
-  if (blocked.length) throw new Error(`plugin packages blocked by PLUGIN_ALLOW: ${blocked.join(", ")}`);
+  const blocked = disallowedEverywhere(sources); // fail fast only if a package can run in NO placement
+  if (blocked.length) throw new Error(`plugin packages allowed in no placement: ${blocked.join(", ")}`);
   const root = agentDirFor(agentId);
   await mkdir(root, { recursive: true });
   const cache = path.join(root, "packages.json");

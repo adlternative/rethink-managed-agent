@@ -66,3 +66,34 @@ out of scope until a concrete need appears.
 - **Body limit**: JSON bodies over `API_MAX_BODY_BYTES` (default 4 MB) get 413; the multipart
   `/v1/files` route keeps its own 32 MB cap.
 - **Errors**: uniform `{type:"error", error:{type, message}}`; statuses 400/401/404/413/500.
+
+## Plugin placement, governance & the getEvents capability
+
+Server-side plugins are **agent-behavior** ("the brain wears a hat"), and — like the sandbox that
+holds the "hands" — the plugin host is a *runtime with a placement*, not something only the operator
+can own. What matters is **where the plugin code executes**, not who authored it:
+
+| Placement | Where it runs | Isolation | Governance | Whose plugins |
+|---|---|---|---|---|
+| `runner` (default) | the operator's shared runner process | Node `--permission` + network lockdown | `PLUGIN_ALLOW` (curated; docker-compose sets `/app/plugins/`) | operator / trusted |
+| `sandbox` (`plugin_host=sandbox`) | inside the user's own session sandbox | the sandbox is the boundary | `PLUGIN_ALLOW_SANDBOX` (default `*`) | **the user can bring their own brain plugins** |
+
+Enforcement is placement-aware: a package is accepted at agent-create if it is runnable in *at least
+one* placement (`disallowedEverywhere`), and checked again at host start for the actual placement
+(`disallowedFor(pkgs, "runner"|"sandbox")`). So a user-authored orchestration plugin that the shared
+runner would reject runs fine when the session uses an isolated sandbox host — the code executes in
+the user's own environment, capability-mediated and network-governed.
+
+**Roadmap — the plugin host as its own service.** Today the host is a child process of the runner
+(runner mode) or of the sandbox (sandbox mode). The natural next step is a third placement: a
+dedicated **per-tenant plugin-host service** (a "brain sandbox") — the same `PluginHost` protocol over
+a network transport instead of stdio, so a tenant's agent-behavior plugins run in their own isolated
+service (even their own cloud, BYOC-style), fully decoupled from the operator's runner. The seam is
+already there (PluginHost + the RPC protocol); only the transport and a `plugin_host=service` option
+are new.
+
+**Control-plane vs agent-behavior** (matching Anthropic's split): `wake` / `getSession` / `emitEvent`
+/ `provision` are control-plane mechanisms — they live in the runner/API/queue/SandboxProvider, not
+as plugins. Their agent-behavior counterpart, reading the event log, is exposed to plugins as
+`ctx.events.get({sessionId?, since?, limit?})` (owner-scoped), with `recall_history` (in
+`plugins/memory`) as the model-facing tool on top.

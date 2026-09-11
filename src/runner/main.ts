@@ -3,6 +3,7 @@ import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { closeBus, onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, takeToolResult } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun, queueDepth } from "../infra/queue.ts";
+import { disallowedFor } from "../plugins/allow.ts";
 import { createServer } from "node:http";
 import { counter, gauge, histogram, onScrape, render as renderMetrics } from "../infra/metrics.ts";
 import { log } from "../infra/log.ts";
@@ -57,12 +58,16 @@ function pluginsFor(agent: Parameters<RunDeps["pluginsFor"]>[0]): Promise<AgentP
       return {
         manifests,
         ...content,
-        runnerHost: () => (runner ??= PluginHost.start(manifests, { agentId: agent.id, repoRoot: REPO_ROOT, extraReadDirs: [env.PI_AGENT_ROOT] }).then((host) => {
+        runnerHost: () => (runner ??= (async () => {
+          const blocked = disallowedFor(packages, "runner");
+          if (blocked.length) throw new Error(`packages ${blocked.join(", ")} are not allowed on the shared runner (PLUGIN_ALLOW); attach an environment with plugin_host=sandbox to run them isolated in the user's own sandbox`);
+          return PluginHost.start(manifests, { agentId: agent.id, repoRoot: REPO_ROOT, extraReadDirs: [env.PI_AGENT_ROOT] });
+        })().then((host) => {
           for (const w of host.warnings) console.warn(`[plugins] ${agent.id}: ${w}`);
           console.log(`[plugins] ${agent.id} (runner host): tools=${host.tools.map((t) => t.name).join(",") || "-"} hooks=${[...host.hooks].join(",") || "-"} skills=${content.skills.map((s) => s.name).join(",") || "-"}`);
           return host;
         })),
-        bundle: () => buildHostBundle(manifests, REPO_ROOT),
+        bundle: () => { const blocked = disallowedFor(packages, "sandbox"); if (blocked.length) throw new Error(`packages ${blocked.join(", ")} are not allowed even in an isolated sandbox host (PLUGIN_ALLOW_SANDBOX)`); return buildHostBundle(manifests, REPO_ROOT); },
       };
     })();
     pluginCache.set(key, p);
