@@ -19,18 +19,21 @@ from `BLOB_BACKEND` (or auto):
 Callers (`files`, memory mounts) use the stable `putBlob/getBlob/deleteBlob/ensureBucket` wrappers
 and never see the backend.
 
-## Queue & pub/sub — interface next
+## Queue & pub/sub — implemented
 
-Today `src/infra/queue.ts` (Redis Streams consumer group: at-least-once, `XAUTOCLAIM` reclaim of a
-dead runner's work) and `src/infra/pubsub.ts` (Redis pub/sub for SSE deltas + Redis lists for steer
-and per-call tool results) are Redis-only. The plan is to lift them behind two interfaces:
+`src/infra/queue.ts` (`RunQueue`) and `src/infra/pubsub.ts` (`Bus`) are behind interfaces, selected
+by `MESSAGING_BACKEND`:
 
-- `RunQueue { enqueue(job); consume(handler, {concurrency, signal}); depth() }` — backends: `redis`
-  (current), `memory` (single-process dev/test), and room for SQS/NATS/JetStream.
-- `Bus { publish/subscribe; list push/take }` — backends: `redis` (current), `memory`.
+| Backend | Select | Notes |
+|---|---|---|
+| `redis` (default) | `MESSAGING_BACKEND=redis` | Streams consumer group (at-least-once, `XAUTOCLAIM` reclaims a dead runner's work) + pub/sub + Redis lists. The only backend that works across the split api/runner processes. |
+| `memory` | `MESSAGING_BACKEND=memory` | in-process `EventEmitter` + Maps; single-process dev/test, no Redis, no cross-process reclaim. |
 
-Redis stays the default; the interfaces make "multi-backend" structural and let a single-node
-deployment run without Redis (in-memory) for dev.
+`RunQueue { enqueue; consume(handler,{concurrency,signal}); depth }` and `Bus { publish/subscribe;
+interrupt; steer push/pop; tool-result push/take; providers-changed }` keep the same module exports,
+so callers are unchanged. Room remains for SQS/NATS/JetStream (queue) and a Postgres LISTEN/NOTIFY
+backend (a cross-process no-Redis option). **BYOC still needs Redis** (its worker relay uses Redis
+lists across processes).
 
 ## Database — wire-swappable now; repo layer is the seam
 

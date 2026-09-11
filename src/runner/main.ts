@@ -1,7 +1,7 @@
 import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfig, skills, toolOutputs } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
-import { onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, redis, takeToolResult } from "../infra/pubsub.ts";
+import { closeBus, onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, takeToolResult } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun, queueDepth } from "../infra/queue.ts";
 import { createServer } from "node:http";
 import { counter, gauge, histogram, onScrape, render as renderMetrics } from "../infra/metrics.ts";
@@ -300,6 +300,6 @@ try {
   clearInterval(reaper);
   metricsServer?.close();
   await stopProvidersWatch();
-  await Promise.allSettled([pool.end(), redis.quit()]);
+  await Promise.allSettled([pool.end(), closeBus()]);
   log.info("runner.stopped");
 }
