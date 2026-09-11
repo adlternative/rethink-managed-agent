@@ -42,6 +42,10 @@ export const env = {
   AUTH_REQUIRED: (process.env.AUTH_REQUIRED ?? "false") === "true",
   /** The principal unauthenticated (dev) requests act as. Seeded by the schema. */
   PMA_DEFAULT_PRINCIPAL: process.env.PMA_DEFAULT_PRINCIPAL ?? "prc_local",
+  /** Module (default-exporting a PrincipalResolver) that maps a credential to a principal. Empty = built-in Bearer/api_keys. This is the seam for bringing your own identity (JWT/OIDC, a trusted gateway header, per-tenant key). */
+  PRINCIPAL_RESOLVER: process.env.PRINCIPAL_RESOLVER ?? "",
+  /** trusted-header resolver only: the header an upstream (already-authenticated) gateway sets to the principal id. */
+  TRUSTED_PRINCIPAL_HEADER: process.env.TRUSTED_PRINCIPAL_HEADER ?? "x-principal-id",
   /** Experimental: host pi-coding-agent's AgentSession instead of the pma plugin host. */
   EXPERIMENTAL_PI_PACKAGES: process.env.EXPERIMENTAL_PI_PACKAGES === "1",
   /** Runs a runner handles concurrently (sub-agent sessions need > 1). */

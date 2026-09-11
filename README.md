@@ -50,6 +50,8 @@ GET  /v1/me                                               -> the calling princip
 
 Then call the API with `Authorization: Bearer pma_...`. The BYOC worker endpoints authenticate with `x-worker-key` instead and bypass principal auth.
 
+**Bring your own identity.** rethink owns the *isolation* boundary (every resource carries `owner_id`, enforced in the repos) but not what a "user"/"org" means. *How* a credential becomes a principal is a pluggable resolver: point `PRINCIPAL_RESOLVER` at a module that default-exports a `PrincipalResolver` (`src/api/principal-resolver.ts`) and the consuming business plugs in its own auth — a verified JWT/OIDC, a trusted gateway header, mTLS, a per-tenant key. The resolver returns `{actor, owner?}`; everything downstream sees only `owner`, and returning an `owner` different from `actor` is where org scoping slots in later. The built-in default is Bearer→`api_keys`; `src/api/resolvers/trusted-header.ts` is a ready example (trusts an upstream gateway's `x-principal-id`, with `x-org-id` selecting the owner). So run many tenants in one deployment with principal isolation, or give a tenant that needs physical separation its own stack.
+
 ## API
 
 All bodies and responses are JSON. Errors are `{type:"error", error:{type, message}}` with 400/401/404/500. Every `/v1/*` route (except the BYOC worker) runs behind principal auth and is scoped to the caller.
@@ -153,6 +155,8 @@ Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sand
 | `DATABASE_URL` | `postgres://pi:pi@localhost:5432/pi` | Postgres (PolarDB-PG is wire compatible) |
 | `AUTH_REQUIRED` | `false` | Require a valid `Authorization: Bearer` key on `/v1/*`; when false, unauthenticated requests act as `PMA_DEFAULT_PRINCIPAL` |
 | `PMA_DEFAULT_PRINCIPAL` | `prc_local` | Principal that unauthenticated (dev) requests act as; seeded by the schema |
+| `PRINCIPAL_RESOLVER` | | Module that default-exports a `PrincipalResolver` (credential → principal); empty uses the built-in Bearer/`api_keys` resolver |
+| `TRUSTED_PRINCIPAL_HEADER` | `x-principal-id` | Header the `trusted-header` example resolver reads (only safe behind a trusted gateway) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue, pub/sub, steering lists |
 | `QODER_BASE_URL` | `http://127.0.0.1:4141/v1` | OpenAI-compatible proxy for the `qoder` provider |
 | `QODER_API_KEY` | `qoder` | Bearer token sent to the proxy; the proxy ignores it but pi-ai refuses to send requests without one |

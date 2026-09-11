@@ -1,33 +1,39 @@
 import type { Context, MiddlewareHandler } from "hono";
-import { apiKeys, principals, type Scope } from "../infra/db.ts";
+import { principals, type Scope } from "../infra/db.ts";
 import { env } from "../shared/env.ts";
 import { ApiError } from "./errors.ts";
 import type { Principal } from "../shared/types.ts";
+import { loadResolver } from "./principal-resolver.ts";
 
 /**
- * Resolves the request's actor (the authenticated principal) and owner scope, and stashes them on
- * the context. Phase 1: owner == actor (no orgs yet). A bearer token is resolved via api_keys;
- * with AUTH_REQUIRED=false an unauthenticated request acts as the default (dev) principal so the
- * single-machine flow needs no tokens.
+ * Turns a request into `{actor, owner}` on the context. *How* a credential becomes a principal is a
+ * pluggable resolver (PRINCIPAL_RESOLVER; built-in default is Bearer -> api_keys) — that is the seam
+ * a consuming business uses to bring its own identity (JWT/OIDC, a trusted gateway header, mTLS, a
+ * per-tenant key). This middleware only owns the *policy* around a missing credential and the owner
+ * scoping the rest of the system depends on. Everything downstream sees just `owner`.
  */
 export function auth(): MiddlewareHandler {
   return async (c, next) => {
-    // BYOC worker endpoints authenticate machine-to-machine with x-worker-key, not a principal token.
+    // BYOC worker endpoints authenticate machine-to-machine with x-worker-key, not a principal.
     if (/\/worker(\/|$)/.test(c.req.path)) return next();
-    const header = c.req.header("authorization");
-    const token = header?.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : null;
 
-    let actor: Principal | null = null;
-    if (token) {
-      actor = await apiKeys.resolve(token);
-      if (!actor) throw new ApiError(401, "authentication_error", "invalid or expired API key");
+    const resolver = await loadResolver();
+    const identity = await resolver.resolve({ header: (n) => c.req.header(n), method: c.req.method, path: c.req.path });
+
+    let actor: Principal;
+    let owner: string;
+    if (identity) {
+      actor = identity.actor;
+      owner = identity.owner ?? identity.actor.id; // a resolver that supports orgs sets owner to the org principal
     } else if (env.AUTH_REQUIRED) {
-      throw new ApiError(401, "authentication_error", "missing Authorization: Bearer <token>");
+      throw new ApiError(401, "authentication_error", "authentication required");
     } else {
+      // dev / single-tenant: act as the default principal so the local flow needs no credentials
       actor = (await principals.get(env.PMA_DEFAULT_PRINCIPAL)) ?? (await principals.upsert({ id: env.PMA_DEFAULT_PRINCIPAL, handle: "local", display_name: "Local User" }));
+      owner = actor.id;
     }
     c.set("actor", actor);
-    c.set("owner", actor.id); // phase 1: the owning scope is the actor itself; an X-Org header will select an org later
+    c.set("owner", owner);
     await next();
   };
 }

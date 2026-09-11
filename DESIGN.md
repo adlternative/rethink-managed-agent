@@ -331,7 +331,9 @@ busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paus
 - **plugin_store 主体隔离已天然成立**:`owner`(agent_id / workspace_id)由服务端按会话上下文绑定,插件只能传 `key`+`scope`,而 agent/workspace 各属唯一主体,所以插件访问不到别的主体的数据。phase 2 额外加了 `scope="principal"`(owner = `session.owner_id`),给插件一份租户级存储。
 - **fetch 白名单按主体**:`principals.fetch_allow`(逗号列表或 `*`),每次运行取该主体策略,缺省回落到部署级 `PLUGIN_FETCH_ALLOW`。
 
+**身份是可插拔的接缝(隔离留在平台,身份交给业务侧)**。rethink 只拥有*隔离*边界(每个资源带 `owner_id`,仓储层强制),不规定"用户/组织"是什么。一个凭证如何变成 principal 由 `PrincipalResolver`(`src/api/principal-resolver.ts`)决定:部署方用 `PRINCIPAL_RESOLVER` 指向一个默认导出该 resolver 的模块,业务侧把自己的身份接进来(校验过的 JWT/OIDC、可信网关头、mTLS、每租户 key)。resolver 返回 `{actor, owner?}`,系统其余部分只看 `owner`;当 resolver 返回的 `owner` 不等于 `actor` 时,就是组织 scope 的接入点。内置默认是 Bearer→`api_keys`;`src/api/resolvers/trusted-header.ts` 是现成示例(信任上游网关的 `x-principal-id`,`x-org-id` 选 owner)。据此对外可讲两档:一套部署内 principals 做**软隔离**服务大量租户;要**硬隔离**的单独起一套栈。
+
 **仍留给后续**:
 - provider id 是全局主键,跨 owner 同名会 409(providers 偏基础设施,BYOK 密钥按行封存)。
 - `AUTH_REQUIRED=true` 下的 API key 铸造仍对已认证 actor 开放,真实部署应再加 admin 门槛。
-- 组织(`kind='org'` + `memberships` + 角色判断)是 phase 3。
+- 组织(`kind='org'` + `memberships` + 角色判断)是 phase 3,且应尽量薄、藏在 resolver 后面。
