@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { repos } from "../../infra/db.ts";
 import { appendIn, listEvents, withSession } from "../../infra/events.ts";
-import { publish, publishInterrupt, pushSteer, subscribe } from "../../infra/pubsub.ts";
+import { publish, publishInterrupt, publishToolResult, pushSteer, subscribe } from "../../infra/pubsub.ts";
 import { enqueueRun } from "../../infra/queue.ts";
 import type { SessionEvent, SessionId, SessionResource, UserEventInput } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
@@ -13,6 +13,12 @@ export function validateUserEvents(events: unknown): UserEventInput[] {
   if (!Array.isArray(events) || events.length === 0) throw invalid("events must be a non-empty array");
   for (const e of events) {
     if (e?.type === "user.interrupt") continue;
+    if (e?.type === "tool_result") {
+      if (typeof e.tool_use_id !== "string" || !e.tool_use_id) throw invalid("tool_result requires a tool_use_id (the call id)");
+      if (!Array.isArray(e.content) || e.content.length === 0) throw invalid("tool_result requires a non-empty content array");
+      e.is_error = !!e.is_error;
+      continue;
+    }
     if (e?.type === "user.message" && Array.isArray(e.content) && e.content.length > 0) {
       e.content = e.content.map((b: any) => {
         if (b?.type === "text" && typeof b.text === "string") return b;
@@ -35,8 +41,13 @@ export function validateUserEvents(events: unknown): UserEventInput[] {
  * Shared with session creation.
  */
 export async function sendUserEvents(session: SessionResource, inputs: UserEventInput[]): Promise<SessionEvent[]> {
-  const { appended, status } = await withSession(session.id, async (c, s) => ({ appended: await appendIn(c, session.id, inputs), status: s.status }));
+  // tool_result is a control signal for an in-flight client tool, not a persisted user event: deliver
+  // it on the per-call channel; the running loop records the real agent.tool_result when the tool returns.
+  const toolResults = inputs.filter((i): i is Extract<UserEventInput, { type: "tool_result" }> => i.type === "tool_result");
+  const rest = inputs.filter((i) => i.type !== "tool_result");
+  const { appended, status } = await withSession(session.id, async (c, s) => ({ appended: rest.length ? await appendIn(c, session.id, rest) : [], status: s.status }));
   for (const event of appended) await publish({ type: "event", event });
+  for (const tr of toolResults) await publishToolResult(session.id, tr.tool_use_id, { content: tr.content, isError: !!tr.is_error });
   const messages = appended.filter((e) => e.payload.type === "user.message");
   if (status === "running") {
     // The runner drains these between turns; anything it never pops is caught by finishRun (seq > consumed).

@@ -13,6 +13,7 @@ import { filesRoute } from "./routes/files.ts";
 import { skillsRoute } from "./routes/skills.ts";
 import { memoryStoresRoute } from "./routes/memories.ts";
 import { principalsRoute } from "./routes/principals.ts";
+import { agentsApi } from "./routes/compat/agents-api.ts";
 import { auth } from "./auth.ts";
 import { ensureBucket } from "../infra/blobs.ts";
 
@@ -21,6 +22,8 @@ export const app = new Hono()
   .notFound((c) => errorResponse(c, new ApiError(404, "not_found_error", `no route ${c.req.method} ${c.req.path}`)))
   .get("/healthz", (c) => c.json({ ok: true }))
   .use("/v1/*", auth())
+  .use("/agents-api/v1/*", auth())
+  .route("/agents-api/v1", agentsApi)
   .route("/v1", principalsRoute)
   .route("/v1/agents", agents)
   .route("/v1/environments", environments)

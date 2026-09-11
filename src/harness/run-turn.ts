@@ -8,11 +8,12 @@ import {
   type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import type { Message, Models, UserMessage } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import { env } from "../shared/env.ts";
 import type {
   ContentBlock,
   EnvironmentResource,
+  FunctionToolDecl,
   SandboxLease,
   SandboxProviderName,
   SandboxService,
@@ -87,6 +88,8 @@ export interface RunDeps {
   pluginStore: { get(scope: string, owner: string, key: string): Promise<unknown>; set(scope: string, owner: string, key: string, value: unknown): Promise<void> };
   /** The owning principal's plugin fetch allowlist (comma list or "*"); null/absent -> deployment default. */
   principalFetchAllow?(ownerId: string): Promise<string | null>;
+  /** Wait for a client/function tool result posted by the API caller; null on timeout. Honors the signal (interrupt). */
+  awaitToolResult(sessionId: SessionId, callId: string, signal: AbortSignal, timeoutMs: number): Promise<{ content: ContentBlock[]; isError: boolean } | null>;
   /** Append events (seq assigned by the store). Must NOT publish; runSession publishes each appended event. */
   appendEvents(sessionId: SessionId, payloads: SessionEventPayload[]): Promise<SessionEvent[]>;
   /** The whole log, untruncated. */
@@ -172,6 +175,35 @@ function reportToParentTool(parentId: SessionId, emit: (p: SessionEventPayload) 
       await emit({ type: "agent.thread_message_sent", to_session_id: parentId, kind, content: [{ type: "text", text }], question_id });
       if (kind === "question") { setTimeout(endTurn, 50); return { content: [{ type: "text", text: `question ${question_id} sent; this turn ends here — the parent's reply will arrive as your next message.` }], details: {} }; }
       return { content: [{ type: "text", text: kind === "report" ? "report delivered; you may stop now." : "update delivered." }], details: {} };
+    },
+  };
+}
+
+/**
+ * A client/function tool (OpenAI Agents API style): the agent calls it, but the result is supplied
+ * by the API caller, not the sandbox. execute() records the pending call (so retrieve/SSE can show a
+ * required_action) then blocks in-turn on a durable per-call result channel until the caller POSTs a
+ * tool_result, the wait times out, or the run is interrupted. Modeled on report_to_parent: it always
+ * returns a real AgentToolResult, so pi's loop stays valid and the sandbox lease unwinds normally —
+ * never the deadlocking "never-settle + abort" pattern.
+ */
+function clientTool(
+  decl: FunctionToolDecl,
+  emit: (p: SessionEventPayload) => Promise<void>,
+  turnId: () => string,
+  awaitResult: (callId: string, signal: AbortSignal) => Promise<{ content: ContentBlock[]; isError: boolean } | null>,
+): AgentTool {
+  return {
+    name: decl.name,
+    label: decl.name,
+    description: decl.description ?? `Client tool ${decl.name}; its result is supplied by the calling application.`,
+    parameters: decl.parameters as TSchema,
+    executionMode: "sequential",
+    execute: async (toolCallId, params, signal) => {
+      await emit({ type: "agent.client_tool_pending", tool_use_id: toolCallId, name: decl.name, input: params, turn_id: turnId() });
+      const r = await awaitResult(toolCallId, signal ?? new AbortController().signal);
+      if (r) { const t = textBlocks(r.content); return { content: t.length ? t : [{ type: "text", text: JSON.stringify(r.content) }], details: { client_tool: decl.name } }; }
+      return { content: [{ type: "text", text: `No tool_result received for ${decl.name} (call ${toolCallId}) within the wait window.` }], details: { client_tool: decl.name, timed_out: true } };
     },
   };
 }
@@ -473,6 +505,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
 
     const tools: AgentTool[] = [...builtinTools, ...(host?.agentTools(info) ?? [])];
     if (session.parent_id) tools.push(reportToParentTool(session.parent_id, emit, () => { stopReason = "end_turn"; abort.abort(); }));
+    // Client/function tools (OpenAI Agents API): results supplied by the API caller via tool_result.
+    for (const decl of session.agent.client_tools ?? []) {
+      tools.push(clientTool(decl, emit, () => `turn_${turns}`, (callId, sig) => deps.awaitToolResult(sessionId, callId, sig, env.CLIENT_TOOL_WAIT_MS)));
+    }
     const allSkills = [...plugins.skills, ...dbSkills];
     const st = skillTool(allSkills, plugins.prompts);
     if (st) tools.push(st);

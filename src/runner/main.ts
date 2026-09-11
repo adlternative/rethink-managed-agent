@@ -1,7 +1,7 @@
 import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfig, skills, toolOutputs } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
-import { onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, redis } from "../infra/pubsub.ts";
+import { onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, redis, takeToolResult } from "../infra/pubsub.ts";
 import { consumeRuns, enqueueRun } from "../infra/queue.ts";
 import { claimRun, findStrandedSessions, finishRun, heartbeat, HEARTBEAT_MS, recordUsage } from "../infra/runs.ts";
 import { runSession, type AgentPlugins, type ChildSpawn, type RunDeps } from "../harness/run-turn.ts";
@@ -154,6 +154,16 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     pluginsFor,
     pluginStore,
     principalFetchAllow: async (ownerId) => (await principals.get(ownerId))?.fetch_allow ?? null,
+    awaitToolResult: async (sessionId, callId, signal, timeoutMs) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (signal.aborted) return null;
+        const r = await takeToolResult(sessionId, callId);
+        if (r) return r;
+        await new Promise((res) => setTimeout(res, 200));
+      }
+      return null;
+    },
     sandboxFor: (name) => sandboxManager.bind(name),
     children,
     // runSession publishes each event itself (so deltas and events interleave in order).

@@ -56,6 +56,25 @@ export async function popSteer(sessionId: string): Promise<Steer[]> {
   return items.map((s) => JSON.parse(s) as Steer);
 }
 
+/** Result for a client/function tool call, delivered from the API process to the runner. */
+export interface ToolResultMsg {
+  content: ContentBlock[];
+  isError: boolean;
+}
+/**
+ * A durable per-call result channel (a Redis list, not lossy pub/sub): a result pushed before the
+ * runner starts polling is still there, so there is no subscribe-before-publish race. The awaiting
+ * tool execute drains it with takeToolResult.
+ */
+export async function publishToolResult(sessionId: string, callId: string, msg: ToolResultMsg): Promise<void> {
+  await redis.rpush(`toolresult:${sessionId}:${callId}`, JSON.stringify(msg));
+  await redis.pexpire(`toolresult:${sessionId}:${callId}`, 3_600_000);
+}
+export async function takeToolResult(sessionId: string, callId: string): Promise<ToolResultMsg | null> {
+  const s = await redis.lpop(`toolresult:${sessionId}:${callId}`);
+  return s ? (JSON.parse(s) as ToolResultMsg) : null;
+}
+
 const PROVIDERS_CHANNEL = "providers:changed";
 export async function publishProvidersChanged(): Promise<void> {
   await redis.publish(PROVIDERS_CHANNEL, String(Date.now()));

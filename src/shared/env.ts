@@ -69,4 +69,15 @@ export const env = {
   BASH_MAX_TIMEOUT_MS: Number(process.env.BASH_MAX_TIMEOUT_MS ?? 900000),
   /** Wall-clock cap for one run (all turns); exceeding it aborts with a session.error. */
   RUN_TIMEOUT_MS: Number(process.env.RUN_TIMEOUT_MS ?? 1800000),
+  /** How long a client/function tool call waits in-turn for the caller's tool_result before returning a timeout error. Must be < RUN_TIMEOUT_MS. */
+  CLIENT_TOOL_WAIT_MS: Number(process.env.CLIENT_TOOL_WAIT_MS ?? 300000),
+  // ---- OpenAI Agents API compatibility layer (/agents-api/v1) ----
+  /** Default rethink provider for an OpenAI model string with no explicit "provider/" prefix. */
+  COMPAT_DEFAULT_PROVIDER: process.env.COMPAT_DEFAULT_PROVIDER ?? "qoder",
+  /** JSON map of OpenAI model string -> "provider/id" (or bare id), e.g. {"sev-astra":"qoder/ultimate"}. */
+  COMPAT_MODEL_MAP: process.env.COMPAT_MODEL_MAP ?? "{}",
+  /** Environment id backing OpenAI environment.type when no environment_id is given (self_hosted / openai_hosted). */
+  COMPAT_DEFAULT_ENVIRONMENT: process.env.COMPAT_DEFAULT_ENVIRONMENT ?? "",
+  /** Package added when agent.multi_agent.enabled is set (e.g. a team plugin path); empty = advisory no-op. */
+  COMPAT_TEAM_PACKAGE: process.env.COMPAT_TEAM_PACKAGE ?? "",
 };

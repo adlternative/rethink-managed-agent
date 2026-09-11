@@ -30,6 +30,14 @@ export interface Principal {
   created_at: string;
 }
 
+/** A tool whose result is supplied by the API caller (OpenAI Agents API "function" tool), not executed in the sandbox. */
+export interface FunctionToolDecl {
+  type: "function";
+  name: string;
+  description?: string;
+  /** JSON Schema for the arguments */
+  parameters: Record<string, unknown>;
+}
 export interface AgentResource {
   id: AgentId;
   /** owning principal (user/org/service) */
@@ -45,6 +53,8 @@ export interface AgentResource {
   packages: string[];
   /** skill resources available in addition to package skills */
   skills: SkillRef[];
+  /** client/function tools executed by the API caller (OpenAI Agents API style), not run in the sandbox */
+  client_tools?: FunctionToolDecl[];
   created_at: string;
 }
 
@@ -354,7 +364,9 @@ export interface MemoryMount { memory_store_id: string; mount_path: string }
 
 export type UserEventInput =
   | { type: "user.message"; content: ContentBlock[] }
-  | { type: "user.interrupt" };
+  | { type: "user.interrupt" }
+  /** result for a client/function tool the agent called (OpenAI Agents API tool_result); tool_use_id is the call id */
+  | { type: "tool_result"; tool_use_id: string; content: ContentBlock[]; is_error?: boolean };
 
 /** Persisted event payloads. `seq` is per-session, monotonic. */
 export type SessionEventPayload =
@@ -363,6 +375,8 @@ export type SessionEventPayload =
   | { type: "agent.message"; content: ContentBlock[]; /** full pi message for lossless refold */ pi: AgentMessage; /** matches the deltas that previewed this message */ stream_id?: string; /** reasoning text, when the model produced any */ thinking?: string }
   | { type: "agent.tool_use"; tool_use_id: string; name: string; input: unknown }
   | { type: "agent.tool_result"; tool_use_id: string; content: ContentBlock[]; is_error: boolean; /** full pi toolResult message */ pi: AgentMessage }
+  /** a client/function tool call is waiting on a result supplied by the API caller (drives OpenAI required_actions) */
+  | { type: "agent.client_tool_pending"; tool_use_id: string; name: string; input: unknown; turn_id: string }
   | { type: "session.status_running" }
   | { type: "session.status_idle"; stop_reason: StopReason }
   | { type: "session.status_terminated"; reason?: string }

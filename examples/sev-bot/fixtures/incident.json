@@ -1,0 +1,11 @@
+{
+  "fingerprint": "checkout-api-5xx-spike",
+  "service": "checkout-api",
+  "severity": "SEV2",
+  "started_at": "2026-09-11T14:02:00Z",
+  "summary": "5xx error rate on checkout-api jumped from 0.2% to 18% after deploy v482.",
+  "recent_deploys": [
+    { "version": "v482", "at": "2026-09-11T13:58:00Z", "change": "switch payment client to connection pool" },
+    { "version": "v481", "at": "2026-09-11T09:10:00Z", "change": "copy tweak" }
+  ]
+}

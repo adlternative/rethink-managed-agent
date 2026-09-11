@@ -337,3 +337,15 @@ busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paus
 - provider id 是全局主键,跨 owner 同名会 409(providers 偏基础设施,BYOK 密钥按行封存)。
 - `AUTH_REQUIRED=true` 下的 API key 铸造仍对已认证 actor 开放,真实部署应再加 admin 门槛。
 - 组织(`kind='org'` + `memberships` + 角色判断)是 phase 3,且应尽量薄、藏在 resolver 后面。
+
+## 16. OpenAI Agents API 兼容层
+
+一个薄适配器让 rethink 讲 OpenAI Agents API 的 session 方言,使 showcase 级代码(如 SRE "sev-bot")指到 rethink 的 base URL 就能跑,且**不绑任何云厂商**:模型解析到 rethink 的 provider 行(BYOK),环境解析到可插拔沙箱 provider(local/docker/e2b/byoc)。适配器挂在 `/agents-api/v1`,是对原生引擎的纯翻译;引擎唯一新增的是**客户端/函数工具**。
+
+- **端点**:`POST /sessions`(create,`{agent, environment, input?, stream?}`)、`GET /sessions/:id`(retrieve,含 `info.required_actions`)、`POST /sessions/:id`(continue)、`POST /sessions/:id/tool_result`、`DELETE`、`GET /sessions/:id/events/stream`。挂在与原生 `/v1` 并列的独立前缀下,各自 `auth()`。
+- **客户端/函数工具(核心机制)**:`{type:'function',name,parameters}` 由**调用方**执行,不进沙箱。agent 调用它时,这一轮保持存活,execute 在一个**按 call_id 的持久结果通道**(Redis 列表,非有损 pub/sub)上阻塞;调用方 POST `tool_result`(或人审批)后同轮恢复。未答的调用在 `CLIENT_TOOL_WAIT_MS`(默认 5 分钟,< `RUN_TIMEOUT_MS`)内表现为 `required_action`(retrieve + `agent.session.action_required` 流事件),超时则以一条超时错误结果结束该调用。
+  - **为什么不是"永不 settle 的 promise + abort"**:pi 的循环对 `tool.execute` 是裸 `await`、不对 signal 做 race,那样会**死锁**且沙箱租约永不释放(对抗校验发现的关键坑)。所以照搬仓库里已验证的 `report_to_parent` 模式:execute 总是返回一个真实结果,循环正常展开,历史对 LLM 合法。
+- **工具类型**:内置名(`bash/read/write/edit`)透传进沙箱;`mcp`/`web_search`/`programmatic_tool_calling` 接受并记为 ignored,除非注册了对应插件(留接口)。`multi_agent` 映射到团队插件包(`COMPAT_TEAM_PACKAGE`),`max_concurrent_subagents` 目前为 advisory。
+- **流事件**:原生 delta/event 重编码成 OpenAI 名字(`response.output_text.delta`、`session.turn.item.added` 带 `function_call`、`agent.session.action_required`、`agent.session.turn.completed`、`turn.failed/cancelled`)。
+- **SDK**:`src/api/routes/compat/sdk/` 提供零依赖的 `client.beta.agents.sessions.*` 客户端,自动跑有 handler 的函数工具并回传结果;没 handler 的调用作为 `required_action` 交回调用方(sev-bot 的审批门)。
+- **MVP 边界**:webhook 投递 `action_required` 未做(SSE + retrieve 覆盖);真正的 MCP client、programmatic tool calling 未做(接受并映射/留接口);`input` 仅字符串;跨 idle 的冷恢复靠 keep-alive 长轮询覆盖(审批在窗口内完成)。

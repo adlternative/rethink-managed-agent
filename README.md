@@ -291,6 +291,25 @@ pma sessions create --environments "main=$LOCAL_ENV,dk=$DOCKER_ENV"     # two sa
 pma sessions attach sess_x browser=$E2B_ENV:fork                         # later, on a fork of main's workspace
 ```
 
+## OpenAI Agents API compatibility (`/agents-api/v1`)
+
+A thin adapter makes rethink speak the OpenAI Agents API session surface, so showcase-style code (e.g. the SRE "sev-bot") runs against a rethink base URL with no cloud vendor bound: the model resolves to a rethink provider row (BYOK), and the environment to a pluggable sandbox provider (local/docker/e2b/byoc). The adapter is pure translation over the native engine; the only engine addition is **client/function tools**.
+
+| Method | Path | OpenAI analog |
+|---|---|---|
+| POST | `/agents-api/v1/sessions` | `sessions.create({agent, environment, input?, stream?})` |
+| GET | `/agents-api/v1/sessions/:id` | `sessions.retrieve` — `info.required_actions`, `info.environment.environment_id` |
+| POST | `/agents-api/v1/sessions/:id` | continue / `session.stream({input})` |
+| POST | `/agents-api/v1/sessions/:id/tool_result` | `session.tool_result({call_id, success, output})` |
+| DELETE | `/agents-api/v1/sessions/:id` | delete |
+| GET | `/agents-api/v1/sessions/:id/events/stream` | SSE reattach |
+
+**Client/function tools** are the core novelty: a tool declared `{type:"function", name, parameters}` is executed by the *caller*, not the sandbox. When the agent calls one, the turn stays alive and blocks on a durable per-call result channel; the caller POSTs `tool_result` (or a human approves) and the turn resumes in place. A call left unanswered surfaces as a `required_action` (retrieve + the `agent.session.action_required` stream event) until `CLIENT_TOOL_WAIT_MS` (default 5 min, < `RUN_TIMEOUT_MS`) elapses. Builtin tool names (`bash`/`read`/`write`/`edit`) pass through to the sandbox; `mcp`/`web_search`/`programmatic_tool_calling` are accepted and reported as ignored unless a plugin is registered.
+
+SSE events are re-encoded to OpenAI names (`response.output_text.delta`, `session.turn.item.added` with `function_call`, `agent.session.action_required`, `agent.session.turn.completed`, `turn.failed`/`cancelled`). A dependency-free TS client that mirrors `client.beta.agents.sessions.*` lives at `src/api/routes/compat/sdk/`.
+
+Config: `COMPAT_DEFAULT_PROVIDER`, `COMPAT_MODEL_MAP` (JSON: OpenAI model string → `provider/id`), `COMPAT_DEFAULT_ENVIRONMENT` (backs `environment.type` when no `environment_id` is given), `COMPAT_TEAM_PACKAGE` (for `multi_agent`). Runnable example: `examples/sev-bot/` (see its README) — a vendor-neutral incident-response bot with read-only function tools and one human-approved rollback, needing no GitHub/AWS/OpenAI credentials.
+
 ## Plugins
 
 Two independent plugin surfaces: **agent plugins** (server side, below) and **UI plugins** for the pma terminal

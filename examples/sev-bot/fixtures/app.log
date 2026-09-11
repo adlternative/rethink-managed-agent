@@ -1,0 +1,6 @@
+14:01:59 INFO  checkout-api v481 healthy rps=320 p99=140ms
+14:02:10 ERROR checkout-api v482 PaymentClient: connection pool exhausted (max=8) waiters=64
+14:02:11 ERROR checkout-api v482 upstream 503 from payment-gateway after 30000ms timeout
+14:02:30 ERROR checkout-api v482 PaymentClient: connection pool exhausted (max=8) waiters=120
+14:03:00 WARN  checkout-api v482 p99=31000ms rps=95 back-pressure shedding
+14:03:20 ERROR checkout-api v482 5xx rate 18% (was 0.2% on v481)
