@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-memory", "version": "0.1.0", "type": "module", "description": "Cross-session memory: remember/recall tools over the principal-scoped plugin store, auto-injected into the system prompt. The substrate Dreaming refines.", "pma": { "plugins": ["./index.ts"] } }
