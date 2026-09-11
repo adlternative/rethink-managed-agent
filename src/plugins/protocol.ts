@@ -22,6 +22,7 @@ export interface RunnerMethods {
   "sandbox.readFile": { params: { session: SessionInfo; path: string; env?: string }; result: string };
   "sandbox.writeFile": { params: { session: SessionInfo; path: string; content: string; env?: string }; result: null };
   "sandbox.envs": { params: { session: SessionInfo }; result: string[] };
+  "events.get": { params: { session: SessionInfo; sessionId?: string; since?: number; limit?: number }; result: { seq: number; type: string; payload: unknown }[] };
   "store.get": { params: { session: SessionInfo; key: string; scope: "agent" | "workspace" }; result: unknown };
   "store.set": { params: { session: SessionInfo; key: string; scope: "agent" | "workspace"; value: unknown }; result: null };
   "model.complete": { params: { session: SessionInfo; prompt: string; system?: string; maxTokens?: number }; result: string };

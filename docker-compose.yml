@@ -22,6 +22,7 @@ services:
     environment:
       DATABASE_URL: postgres://pi:pi@postgres:5432/pi
       REDIS_URL: redis://redis:6379
+      PLUGIN_ALLOW: /app/plugins/   # deployed default: only bundled plugins may run on the runner
       COMPAT_TEAM_PACKAGE: /app/plugins/team
       COMPAT_WEBSEARCH_PACKAGE: /app/plugins/web-search
       API_PORT: "8080"
@@ -40,6 +41,7 @@ services:
     environment:
       DATABASE_URL: postgres://pi:pi@postgres:5432/pi
       REDIS_URL: redis://redis:6379
+      PLUGIN_ALLOW: /app/plugins/   # deployed default: only bundled plugins may run on the runner
       QODER_BASE_URL: http://host.docker.internal:4141/v1
       QODER_API_KEY: ${QODER_API_KEY:-qoder}   # placeholder; the proxy ignores it, pi-ai requires a non-empty key
       BLOB_ENDPOINT: http://minio:9000

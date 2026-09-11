@@ -20,6 +20,7 @@ export interface Capabilities {
   sandboxEnvs(): string[];
   storeGet(key: string, scope: "agent" | "workspace" | "principal"): Promise<unknown>;
   storeSet(key: string, scope: "agent" | "workspace" | "principal", value: unknown): Promise<void>;
+  eventsGet(opts: { sessionId?: string; since?: number; limit?: number }): Promise<{ seq: number; type: string; payload: unknown }[]>;
   modelComplete(prompt: string, opts: { system?: string; maxTokens?: number }): Promise<string>;
   agentRun(task: string, opts: { system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }): Promise<string | { report: string; patch?: string; sessionId: string }>;
   fetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
@@ -156,6 +157,7 @@ export class PluginHost {
       case "sandbox.readFile": { const p = params as RunnerMethods["sandbox.readFile"]["params"]; return caps.sandboxRead(p.path, p.env); }
       case "sandbox.writeFile": { const p = params as RunnerMethods["sandbox.writeFile"]["params"]; await caps.sandboxWrite(p.path, p.content, p.env); return null; }
       case "sandbox.envs": return caps.sandboxEnvs();
+      case "events.get": { const p = params as RunnerMethods["events.get"]["params"]; return caps.eventsGet({ sessionId: p.sessionId, since: p.since, limit: p.limit }); }
       case "store.get": { const p = params as RunnerMethods["store.get"]["params"]; return caps.storeGet(p.key, p.scope); }
       case "store.set": { const p = params as RunnerMethods["store.set"]["params"]; await caps.storeSet(p.key, p.scope, p.value); return null; }
       case "model.complete": { const p = params as RunnerMethods["model.complete"]["params"]; return caps.modelComplete(p.prompt, { system: p.system, maxTokens: p.maxTokens }); }

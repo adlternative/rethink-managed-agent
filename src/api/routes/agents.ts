@@ -3,6 +3,7 @@ import { repos } from "../../infra/db.ts";
 import type { BuiltinToolName, ModelRef } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
 import { validateSkillRefs } from "./skills.ts";
+import { disallowedPackages } from "../../plugins/allow.ts";
 import { scope, ownerId } from "../auth.ts";
 
 const TOOLS: BuiltinToolName[] = ["bash", "read", "write", "edit"];
@@ -24,6 +25,8 @@ export function validatePackages(packages: unknown): string[] {
   if (!Array.isArray(packages) || !packages.every((p) => typeof p === "string" && p.trim() && !/\s/.test(p))) {
     throw invalid("packages must be an array of package sources (npm:<pkg>, git:<url>, or a path)");
   }
+  const blocked = disallowedPackages(packages as string[]);
+  if (blocked.length) throw invalid(`these plugin packages are not allowed by this deployment (PLUGIN_ALLOW): ${blocked.join(", ")}`);
   return packages as string[];
 }
 

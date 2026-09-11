@@ -93,6 +93,9 @@ function makeContext(session: SessionInfo, plugin = "plugin"): PluginContext {
       get: (key, scope = "agent") => call("store.get", { key, scope }) as Promise<never>,
       set: (key, value, scope = "agent") => call("store.set", { key, scope, value }).then(() => undefined),
     },
+    events: {
+      get: (opts) => call("events.get", { ...(opts ?? {}) }) as Promise<never>,
+    },
     model: { complete: (prompt, opts) => call("model.complete", { prompt, ...opts }) },
     agent: { run: (task, opts) => call("agent.run", { task, ...opts }) },
     agents: {

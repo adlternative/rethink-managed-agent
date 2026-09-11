@@ -36,6 +36,25 @@ export default function (p: PluginAPI) {
     },
   });
 
+  p.registerTool({
+    name: "recall_history",
+    description: "Look back at this session's own event log (past user asks, your messages, tool calls/results). Use to recover earlier context.",
+    parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+    async execute({ limit }, ctx) {
+      const evs = await ctx.events.get({ limit: limit ?? 30 });
+      const line = (e: { type: string; payload: any }) => {
+        const p = e.payload;
+        if (p.type === "user.message") return `user: ${(p.content ?? []).map((b: any) => b.text ?? "").join("").slice(0, 200)}`;
+        if (p.type === "agent.message") return `assistant: ${(p.content ?? []).map((b: any) => b.text ?? "").join("").slice(0, 200)}`;
+        if (p.type === "agent.tool_use") return `tool_call ${p.name}(${JSON.stringify(p.input).slice(0, 120)})`;
+        if (p.type === "agent.tool_result") return `tool_result${p.is_error ? " (error)" : ""}`;
+        return null;
+      };
+      const out = evs.map(line).filter(Boolean);
+      return out.length ? out.join("\n") : "(no history)";
+    },
+  });
+
   // Surface the most recent memories to the model automatically, so it "remembers as it works".
   p.on("context", async (_ev, ctx) => {
     const notes = (await ctx.store.get<Note[]>(KEY, "principal")) ?? [];

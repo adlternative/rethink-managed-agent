@@ -461,6 +461,18 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       async sandboxWrite(p, content, envKey) { await (await ctx.sandbox(envKey)).writeFile(p, new TextEncoder().encode(content)); },
       storeGet: (key, scope) => deps.pluginStore.get(scope, storeOwner(scope), key),
       storeSet: (key, scope, value) => deps.pluginStore.set(scope, storeOwner(scope), key, value),
+      // Read a slice of the durable event log — this session, or another owned by the same principal.
+      eventsGet: async (opts) => {
+        const sid = opts.sessionId ?? sessionId;
+        if (sid !== sessionId) {
+          const other = await deps.getSession(sid);
+          if (!other || other.owner_id !== session.owner_id) throw new Error(`session ${sid} not found for this owner`);
+        }
+        let evs = await deps.listEvents(sid);
+        if (typeof opts.since === "number") evs = evs.filter((e) => e.seq > opts.since!);
+        if (typeof opts.limit === "number") evs = evs.slice(-opts.limit);
+        return evs.map((e) => ({ seq: e.seq, type: e.type, payload: e.payload }));
+      },
       async modelComplete(prompt, opts) {
         const user: UserMessage = { role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() };
         const r = await deps.models.complete(model, { systemPrompt: opts.system, messages: [user] }, { maxTokens: opts.maxTokens, signal: abort.signal });

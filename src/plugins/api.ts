@@ -90,6 +90,10 @@ export interface StoreCapability {
   get<T = unknown>(key: string, scope?: "agent" | "workspace" | "principal"): Promise<T | null>;
   set(key: string, value: unknown, scope?: "agent" | "workspace" | "principal"): Promise<void>;
 }
+export interface EventsCapability {
+  /** Read a slice of the durable event log (this session by default, or another session owned by the same principal). The agent-behavior read side of getSession/agentEvents. */
+  get(opts?: { sessionId?: string; since?: number; limit?: number }): Promise<{ seq: number; type: string; payload: unknown }[]>;
+}
 export interface ModelCapability {
   /** One-shot completion with the session's model (no tools). */
   complete(prompt: string, opts?: { system?: string; maxTokens?: number }): Promise<string>;
@@ -163,6 +167,7 @@ export interface PluginContext {
   session: SessionCapability;
   sandbox: SandboxCapability;
   store: StoreCapability;
+  events: EventsCapability;
   model: ModelCapability;
   agent: AgentCapability;
   agents: AgentsCapability;
