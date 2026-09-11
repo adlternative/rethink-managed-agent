@@ -10,19 +10,26 @@ export interface RequiredAction {
 }
 
 /**
- * Fold the event log into pending required actions: a client_tool_pending call with no later
- * agent.tool_result for the same id is still awaiting the caller's tool_result.
+ * Derive pending required actions purely from the log — the engine has no "pending"/"approval"
+ * concept. A required action is a client/function tool call (an agent.tool_use whose name is one of
+ * the session's client tools) with no later agent.tool_result for the same id.
  */
-export function requiredActions(events: SessionEvent[]): RequiredAction[] {
+export function requiredActions(events: SessionEvent[], clientToolNames: Iterable<string>): RequiredAction[] {
+  const clientTools = new Set(clientToolNames);
   const answered = new Set<string>();
   for (const e of events) if (e.payload.type === "agent.tool_result") answered.add(e.payload.tool_use_id);
   const out: RequiredAction[] = [];
   for (const e of events) {
-    if (e.payload.type === "agent.client_tool_pending" && !answered.has(e.payload.tool_use_id)) {
-      out.push({ turn_id: e.payload.turn_id, call_id: e.payload.tool_use_id, type: "function_call", name: e.payload.name, arguments: e.payload.input });
+    if (e.payload.type === "agent.tool_use" && clientTools.has(e.payload.name) && !answered.has(e.payload.tool_use_id)) {
+      out.push({ turn_id: `turn_${e.seq}`, call_id: e.payload.tool_use_id, type: "function_call", name: e.payload.name, arguments: e.payload.input });
     }
   }
   return out;
+}
+
+/** Names of a session's client/function tools (used to tell them apart from sandbox tools in the log). */
+export function clientToolNames(session: SessionResource): string[] {
+  return (session.agent.client_tools ?? []).map((t) => t.name);
 }
 
 export type OpenAiStatus = "idle" | "running" | "requires_action" | "terminated";
@@ -30,7 +37,7 @@ export type OpenAiStatus = "idle" | "running" | "requires_action" | "terminated"
 /** OpenAI-facing session status: required_action takes precedence over running while a call is pending. */
 export function openaiStatus(session: SessionResource, events: SessionEvent[]): OpenAiStatus {
   if (session.status === "terminated") return "terminated";
-  if (requiredActions(events).length > 0) return "requires_action";
+  if (requiredActions(events, clientToolNames(session)).length > 0) return "requires_action";
   return session.status === "running" ? "running" : "idle";
 }
 
@@ -42,7 +49,7 @@ export function toOpenAiSession(session: SessionResource, events: SessionEvent[]
     status: openaiStatus(session, events),
     info: {
       environment: { environment_id: environmentId },
-      required_actions: requiredActions(events),
+      required_actions: requiredActions(events, clientToolNames(session)),
     },
   };
 }

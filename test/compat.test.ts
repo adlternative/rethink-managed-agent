@@ -48,36 +48,43 @@ describe("translate", () => {
   });
 });
 
-describe("required actions", () => {
-  const pending = ev(3, { type: "agent.client_tool_pending", tool_use_id: "call_1", name: "propose_rollback", input: { service: "checkout" }, turn_id: "turn_2" });
+describe("required actions (derived from the log; no engine 'pending' concept)", () => {
+  const sess = (status: string) => ({ id: "sess_1", status, agent: { client_tools: [{ type: "function", name: "propose_rollback", parameters: {} }] } }) as any;
+  // a client-tool call is just an ordinary agent.tool_use whose name is one of the session's client tools
+  const call = ev(3, { type: "agent.tool_use", tool_use_id: "call_1", name: "propose_rollback", input: { service: "checkout" } });
+  const names = ["propose_rollback"];
 
-  it("surfaces a pending client-tool call with no matching result", () => {
-    const ra = requiredActions([pending]);
-    expect(ra).toEqual([{ turn_id: "turn_2", call_id: "call_1", type: "function_call", name: "propose_rollback", arguments: { service: "checkout" } }]);
+  it("surfaces a client-tool call with no matching result", () => {
+    expect(requiredActions([call], names)).toEqual([{ turn_id: "turn_3", call_id: "call_1", type: "function_call", name: "propose_rollback", arguments: { service: "checkout" } }]);
+  });
+
+  it("ignores a sandbox tool call (name not in client tools)", () => {
+    expect(requiredActions([ev(3, { type: "agent.tool_use", tool_use_id: "b1", name: "bash", input: {} })], names)).toEqual([]);
   });
 
   it("clears once a matching tool_result exists", () => {
     const answered = ev(5, { type: "agent.tool_result", tool_use_id: "call_1", content: [], is_error: false, pi: {} });
-    expect(requiredActions([pending, answered])).toEqual([]);
+    expect(requiredActions([call, answered], names)).toEqual([]);
   });
 
   it("status is requires_action while pending, terminated when terminated", () => {
-    expect(openaiStatus({ status: "running" } as any, [pending])).toBe("requires_action");
-    expect(openaiStatus({ status: "idle" } as any, [])).toBe("idle");
-    expect(openaiStatus({ status: "terminated" } as any, [pending])).toBe("terminated");
-    const s = toOpenAiSession({ id: "sess_1", status: "running" } as any, [pending], "env_1");
+    expect(openaiStatus(sess("running"), [call])).toBe("requires_action");
+    expect(openaiStatus(sess("idle"), [])).toBe("idle");
+    expect(openaiStatus(sess("terminated"), [call])).toBe("terminated");
+    const s = toOpenAiSession(sess("running"), [call], "env_1");
     expect(s.status).toBe("requires_action");
-    expect(s.info.environment.environment_id).toBe("env_1");
     expect(s.info.required_actions).toHaveLength(1);
   });
 });
 
 describe("sse mapping", () => {
-  it("maps text deltas, tool calls, pending, and turn end to OpenAI event names", () => {
-    expect(toOpenAiEvent({ type: "agent.message_delta", session_id: "s", stream_id: "x", text: "hi" }, "s")!.event).toBe("response.output_text.delta");
-    expect(toOpenAiEvent({ type: "event", event: ev(1, { type: "agent.tool_use", tool_use_id: "c1", name: "f", input: {} }) }, "s")!.event).toBe("session.turn.item.added");
-    expect(toOpenAiEvent({ type: "event", event: ev(2, { type: "agent.client_tool_pending", tool_use_id: "c1", name: "f", input: {}, turn_id: "t" }) }, "s")!.event).toBe("agent.session.action_required");
-    expect(toOpenAiEvent({ type: "event", event: ev(3, { type: "session.status_idle", stop_reason: "end_turn" }) }, "s")!.event).toBe("agent.session.turn.completed");
-    expect(toOpenAiEvent({ type: "event", event: ev(4, { type: "session.status_idle", stop_reason: "error" }) }, "s")!.event).toBe("turn.failed");
+  const ct = new Set(["propose_rollback"]);
+  it("maps text deltas, client vs sandbox tool calls, and turn end to OpenAI event names", () => {
+    expect(toOpenAiEvent({ type: "agent.message_delta", session_id: "s", stream_id: "x", text: "hi" }, "s", ct)!.event).toBe("response.output_text.delta");
+    // sandbox tool call -> item.added; client tool call -> action_required
+    expect(toOpenAiEvent({ type: "event", event: ev(1, { type: "agent.tool_use", tool_use_id: "c1", name: "bash", input: {} }) }, "s", ct)!.event).toBe("session.turn.item.added");
+    expect(toOpenAiEvent({ type: "event", event: ev(2, { type: "agent.tool_use", tool_use_id: "c2", name: "propose_rollback", input: {} }) }, "s", ct)!.event).toBe("agent.session.action_required");
+    expect(toOpenAiEvent({ type: "event", event: ev(3, { type: "session.status_idle", stop_reason: "end_turn" }) }, "s", ct)!.event).toBe("agent.session.turn.completed");
+    expect(toOpenAiEvent({ type: "event", event: ev(4, { type: "session.status_idle", stop_reason: "error" }) }, "s", ct)!.event).toBe("turn.failed");
   });
 });

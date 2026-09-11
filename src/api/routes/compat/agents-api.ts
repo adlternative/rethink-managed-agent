@@ -7,7 +7,7 @@ import { scope, ownerId } from "../../auth.ts";
 import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
 import { openaiAgentToRethink, openaiEnvToEnvironmentId, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
-import { toOpenAiSession } from "./required-actions.ts";
+import { toOpenAiSession, clientToolNames } from "./required-actions.ts";
 import { streamOpenAiEvents } from "./sse.ts";
 
 /**
@@ -43,7 +43,7 @@ export const agentsApi = new Hono()
     if (typeof body.input === "string" && body.input.length > 0) {
       await sendUserEvents(session, [{ type: "user.message", content: [{ type: "text", text: body.input }] }]);
     }
-    if (body.stream) return streamOpenAiEvents(c, session.id, since, { synthCreated: { environment: { environment_id: environmentId }, ignored: draft.ignored } });
+    if (body.stream) return streamOpenAiEvents(c, session.id, since, { synthCreated: { environment: { environment_id: environmentId }, ignored: draft.ignored }, clientTools: draft.client_tools.map((t) => t.name) });
     return c.json(toOpenAiSession(session, await listEvents(session.id), environmentId), 201);
   })
   .get("/sessions/:id", async (c) => {
@@ -61,7 +61,7 @@ export const agentsApi = new Hono()
     } else if (body.input !== undefined) {
       throw invalid("input must be a string");
     }
-    if (body.stream) return streamOpenAiEvents(c, session.id, since);
+    if (body.stream) return streamOpenAiEvents(c, session.id, since, { clientTools: clientToolNames(session) });
     return c.json(toOpenAiSession(await loadSession(c), await listEvents(session.id), envIdOf(session)));
   })
   /** Submit a client/function tool result (or a human approval decision). */
@@ -81,5 +81,5 @@ export const agentsApi = new Hono()
   /** Reattach an SSE stream (resume after action_required), from a cursor. */
   .get("/sessions/:id/events/stream", async (c) => {
     const session = await loadSession(c);
-    return streamOpenAiEvents(c, session.id, Number(c.req.query("since") ?? 0));
+    return streamOpenAiEvents(c, session.id, Number(c.req.query("since") ?? 0), { clientTools: clientToolNames(session) });
   });

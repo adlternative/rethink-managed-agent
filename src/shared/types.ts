@@ -375,8 +375,6 @@ export type SessionEventPayload =
   | { type: "agent.message"; content: ContentBlock[]; /** full pi message for lossless refold */ pi: AgentMessage; /** matches the deltas that previewed this message */ stream_id?: string; /** reasoning text, when the model produced any */ thinking?: string }
   | { type: "agent.tool_use"; tool_use_id: string; name: string; input: unknown }
   | { type: "agent.tool_result"; tool_use_id: string; content: ContentBlock[]; is_error: boolean; /** full pi toolResult message */ pi: AgentMessage }
-  /** a client/function tool call is waiting on a result supplied by the API caller (drives OpenAI required_actions) */
-  | { type: "agent.client_tool_pending"; tool_use_id: string; name: string; input: unknown; turn_id: string }
   | { type: "session.status_running" }
   | { type: "session.status_idle"; stop_reason: StopReason }
   | { type: "session.status_terminated"; reason?: string }

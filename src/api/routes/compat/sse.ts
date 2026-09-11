@@ -6,8 +6,12 @@ import type { ContentBlock, SessionId, StreamDelta } from "../../../shared/types
 
 const blocksText = (content: ContentBlock[]) => content.map((b) => (b.type === "text" ? b.text : "")).join("");
 
-/** Map one rethink StreamDelta to an OpenAI Agents API stream event, or null to skip it. */
-export function toOpenAiEvent(delta: StreamDelta, sessionId: string): { event: string; data: Record<string, unknown> } | null {
+/**
+ * Map one rethink StreamDelta to an OpenAI Agents API stream event, or null to skip it. `clientTools`
+ * is the set of the session's client/function tool names, used to tell a caller-fulfilled tool call
+ * (-> action_required) from a sandbox tool call (-> item.added). The engine carries no such flag.
+ */
+export function toOpenAiEvent(delta: StreamDelta, sessionId: string, clientTools: Set<string>): { event: string; data: Record<string, unknown> } | null {
   const base = (type: string, extra: Record<string, unknown>) => ({ event: type, data: { type, session_id: sessionId, ...extra } });
   if (delta.type === "agent.message_delta") return base("response.output_text.delta", { output_text_delta: delta.text, delta: delta.text });
   if (delta.type === "agent.thinking_delta") return base("response.reasoning.delta", { delta: delta.text });
@@ -15,8 +19,9 @@ export function toOpenAiEvent(delta: StreamDelta, sessionId: string): { event: s
   const p = delta.event.payload;
   switch (p.type) {
     case "session.status_running": return base("session.turn.created", { turn_id: `turn_${delta.event.seq}` });
-    case "agent.tool_use": return base("session.turn.item.added", { item: { type: "function_call", call_id: p.tool_use_id, name: p.name, arguments: p.input }, function_call: { call_id: p.tool_use_id, name: p.name, arguments: p.input } });
-    case "agent.client_tool_pending": return base("agent.session.action_required", { required_action: { turn_id: p.turn_id, call_id: p.tool_use_id, type: "function_call", name: p.name, arguments: p.input } });
+    case "agent.tool_use":
+      if (clientTools.has(p.name)) return base("agent.session.action_required", { required_action: { turn_id: `turn_${delta.event.seq}`, call_id: p.tool_use_id, type: "function_call", name: p.name, arguments: p.input } });
+      return base("session.turn.item.added", { item: { type: "function_call", call_id: p.tool_use_id, name: p.name, arguments: p.input }, function_call: { call_id: p.tool_use_id, name: p.name, arguments: p.input } });
     case "agent.message": return base("session.turn.item.done", { item: { type: "message", role: "assistant", text: blocksText(p.content) } });
     case "agent.tool_result": return base("session.turn.item.done", { item: { type: "function_call_output", call_id: p.tool_use_id, is_error: p.is_error } });
     case "session.status_idle":
@@ -38,7 +43,8 @@ function isTurnEnd(delta: StreamDelta): boolean {
  * SSE stream of OpenAI-named events for one session turn: replay stored events after `since`, then
  * live deltas, closing when the turn ends. A thin re-encode over the native event stream.
  */
-export function streamOpenAiEvents(c: Context, sessionId: SessionId, since: number, opts: { synthCreated?: Record<string, unknown> } = {}) {
+export function streamOpenAiEvents(c: Context, sessionId: SessionId, since: number, opts: { synthCreated?: Record<string, unknown>; clientTools?: Iterable<string> } = {}) {
+  const clientTools = new Set(opts.clientTools ?? []);
   return streamSSE(c, async (stream) => {
     let last = since;
     let done = false;
@@ -51,7 +57,7 @@ export function streamOpenAiEvents(c: Context, sessionId: SessionId, since: numb
       chain = chain.then(async () => {
         if (done) return;
         if (delta.type === "event") { if (delta.event.seq <= last) return; last = delta.event.seq; }
-        await send(toOpenAiEvent(delta, sessionId));
+        await send(toOpenAiEvent(delta, sessionId, clientTools));
         if (isTurnEnd(delta)) { done = true; }
       }).catch((e) => console.error("[compat sse] send failed", e));
     };
