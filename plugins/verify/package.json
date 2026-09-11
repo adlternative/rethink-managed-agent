@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-verify", "version": "0.1.0", "type": "module", "description": "After the agent edits files, run a verify command in the sandbox; on failure, feed the output back so it self-corrects. Brain tool hooks + steer + hands exec.", "pma": { "plugins": ["./index.ts"] } }

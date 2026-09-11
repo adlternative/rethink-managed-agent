@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-setup", "version": "0.1.0", "type": "module", "description": "Bootstrap the sandbox once before the agent works (install deps, etc.). Brain before_agent_start hook + agent-scope config + hands exec with a marker file.", "pma": { "plugins": ["./index.ts"] } }

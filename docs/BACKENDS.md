@@ -99,3 +99,19 @@ are new.
 as plugins. Their agent-behavior counterpart, reading the event log, is exposed to plugins as
 `ctx.events.get({sessionId?, since?, limit?})` (owner-scoped), with `recall_history` (in
 `plugins/memory`) as the model-facing tool on top.
+
+### Example plugins that span both layers (brain + hands)
+
+Some of the most useful plugins coordinate the brain (hooks/model/store/events) *and* the hands
+(sandbox exec/files) at once — proof that the plugin surface reaches both without leaving core:
+
+- **`plugins/checkpoint`** — a `turn_end` hook snapshots the workspace into a *shadow* git dir
+  (`.agent/ckpt.git`, separate GIT_DIR so it never touches the user's git or the capture); `/checkpoints`
+  lists them and a `revert` tool restores one. Brain turn-hooks + commands/tool driving git in the sandbox.
+- **`plugins/verify`** — a `tool_result` hook marks the workspace dirty on edits; at `turn_end` it runs a
+  configured command in the sandbox and, on failure, `session.send`s the output so the model self-corrects.
+  Brain tool/turn hooks + steer + hands exec. (`/verify <cmd>`.)
+- **`plugins/setup`** — a `before_agent_start` hook bootstraps a fresh sandbox once (install deps, etc.),
+  guarded by a marker file. Brain hook + agent-scope config + hands exec. (`/setup <cmd>`.)
+
+All three are ordinary packages under `PLUGIN_ALLOW`; they need no core change.

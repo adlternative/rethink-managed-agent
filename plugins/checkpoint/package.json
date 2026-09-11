@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-checkpoint", "version": "0.1.0", "type": "module", "description": "Snapshot the workspace (shadow git) at each turn so the agent/user can revert. Brain turn hooks + commands drive git in the hands sandbox.", "pma": { "plugins": ["./index.ts"] } }
