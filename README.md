@@ -26,6 +26,8 @@ Read `DESIGN.md` for the rationale and `ARCHITECTURE.md` for the module contract
    scripts/e2e.sh
    ```
 
+Open **http://localhost:8080/** in a browser for a read-only dashboard: the session list, each session's event timeline (messages, tool calls + results, status), and a live tail over SSE.
+
 Talking to it by hand with the bundled CLI (`PI_API` defaults to `http://localhost:8080`):
 
 ```sh
