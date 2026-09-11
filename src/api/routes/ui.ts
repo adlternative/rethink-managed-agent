@@ -46,8 +46,8 @@ function renderEvent(tl,e){
   else if(t==="session.error"){const d=el("div","ev ra");d.append(el("div","role","error"));d.append(Object.assign(el("pre"),{textContent:JSON.stringify(p.error)}));tl.append(d)}
 }
 async function loadSessions(){
-  const d=await j("/v1/sessions");const box=$("#sessions");box.innerHTML="";
-  d.data.slice().reverse().forEach(s=>{
+  const d=await j("/v1/sessions?limit=200");const box=$("#sessions");box.innerHTML="";
+  d.data.forEach(s=>{
     const row=el("div","s"+(s.id===sel?" sel":""));
     row.append(Object.assign(el("div","id"),{textContent:s.id}));
     const m=el("div","meta");m.append(el("span","badge",s.status));m.append(document.createTextNode(" "+(s.agent&&s.agent.name||"")));row.append(m);

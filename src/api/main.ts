@@ -17,11 +17,40 @@ import { agentsApi } from "./routes/compat/agents-api.ts";
 import { ui } from "./routes/ui.ts";
 import { auth } from "./auth.ts";
 import { ensureBucket } from "../infra/blobs.ts";
+import { counter, histogram, render as renderMetrics } from "../infra/metrics.ts";
+import { log } from "../infra/log.ts";
+import { newId } from "../shared/ids.ts";
 
-export const app = new Hono()
+const httpReqs = counter("http_requests_total", "HTTP requests by method, route and status");
+const httpDur = histogram("http_request_duration_seconds", "HTTP request duration");
+
+export const app = new Hono<{ Variables: { requestId: string } }>()
   .onError((err, c) => errorResponse(c, err))
   .notFound((c) => errorResponse(c, new ApiError(404, "not_found_error", `no route ${c.req.method} ${c.req.path}`)))
+  // request-id + structured access log + request metrics
+  .use("*", async (c, next) => {
+    const rid = c.req.header("x-request-id") || newId("req");
+    c.set("requestId", rid);
+    c.header("x-request-id", rid);
+    const started = performance.now();
+    await next();
+    const seconds = (performance.now() - started) / 1000;
+    const route = c.req.routePath || c.req.path;
+    const labels = { method: c.req.method, route, status: String(c.res.status) };
+    httpReqs.inc(labels);
+    httpDur.observe(seconds, { route });
+    if (c.req.path !== "/healthz" && c.req.path !== "/metrics") log.info("http", { rid, ...labels, ms: Math.round(seconds * 1000) });
+  })
+  // reject oversized JSON bodies early (the multipart /v1/files route streams and caps itself)
+  .use("*", async (c, next) => {
+    if (!c.req.path.startsWith("/v1/files") && (c.req.method === "POST" || c.req.method === "PATCH" || c.req.method === "PUT")) {
+      const len = Number(c.req.header("content-length") ?? 0);
+      if (len > env.API_MAX_BODY_BYTES) return errorResponse(c, new ApiError(413, "payload_too_large", `request body exceeds ${env.API_MAX_BODY_BYTES} bytes`));
+    }
+    await next();
+  })
   .get("/healthz", (c) => c.json({ ok: true }))
+  .get("/metrics", async (c) => c.text(await renderMetrics(), 200, { "content-type": "text/plain; version=0.0.4" }))
   .route("/", ui)
   .use("/v1/*", auth())
   .use("/agents-api/v1/*", auth())

@@ -16,6 +16,14 @@ export async function enqueueRun(job: RunJob): Promise<void> {
   await redis.xadd(STREAM, "*", "job", JSON.stringify(job));
 }
 
+/** Backlog for the queue-depth metric: entries delivered to the group but not yet acked (real pending work). */
+export async function queueDepth(): Promise<number> {
+  try {
+    const r = (await redis.xpending(STREAM, GROUP)) as [number, ...unknown[]] | null;
+    return Array.isArray(r) ? Number(r[0] ?? 0) : 0;
+  } catch { return 0; } // group not created yet
+}
+
 async function ensureGroup(r: Redis): Promise<void> {
   try {
     await r.xgroup("CREATE", STREAM, GROUP, "0", "MKSTREAM");

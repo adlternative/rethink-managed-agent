@@ -180,7 +180,11 @@ export const sessions = new Hono()
     await repos.sessions.attachEnvironment(id, e);
     return c.json({ ...s, environments: [...s.environments, e] }, 201);
   })
-  .get("/", async (c) => c.json({ data: await repos.sessions.list(scope(c)) }))
+  .get("/", async (c) => {
+    const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
+    const cursor = c.req.query("cursor") || undefined;
+    return c.json(await repos.sessions.listPage(scope(c), { limit, cursor })); // { data, has_more, next_cursor }
+  })
   /** Full text of a tool result that was truncated for the model. */
   .get("/:id/tool-outputs/:toolUseId", async (c) => {
     if (!(await repos.sessions.get(c.req.param("id"), scope(c)))) throw notFound("session", c.req.param("id"));

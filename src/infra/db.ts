@@ -233,6 +233,20 @@ export const repos = {
       const envs = await many<SessionEnvironment & { session_id: string }>(pool, `SELECT session_id, key, environment_id, workspace_id FROM session_environments ORDER BY (key <> 'main'), created_at`);
       return rows.map((r) => ({ ...r, environments: envs.filter((e) => e.session_id === r.id).map(({ key, environment_id, workspace_id }) => ({ key, environment_id, workspace_id })) }));
     },
+    /** Cursor-paginated, newest first. cursor = the previous page's next_cursor (a created_at ISO). */
+    async listPage(scope: Scope, opts: { limit?: number; cursor?: string } = {}): Promise<{ data: SessionResource[]; has_more: boolean; next_cursor: string | null }> {
+      const lim = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+      const params: unknown[] = []; const where: string[] = [];
+      if (scope) { params.push(scope.owner); where.push(`owner_id=$${params.length}`); }
+      if (opts.cursor) { params.push(opts.cursor); where.push(`created_at < $${params.length}::timestamptz`); }
+      const rows = isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT ${lim + 1}`, params));
+      const has_more = rows.length > lim;
+      const page = rows.slice(0, lim);
+      const ids = page.map((r) => r.id);
+      const envs = ids.length ? await many<SessionEnvironment & { session_id: string }>(pool, `SELECT session_id, key, environment_id, workspace_id FROM session_environments WHERE session_id = ANY($1::text[]) ORDER BY (key <> 'main'), created_at`, [ids]) : [];
+      const data = page.map((r) => ({ ...r, environments: envs.filter((e) => e.session_id === r.id).map(({ key, environment_id, workspace_id }) => ({ key, environment_id, workspace_id })) }));
+      return { data, has_more, next_cursor: has_more ? (page[page.length - 1]!.created_at as string) : null };
+    },
     async setStatus(id: string, status: SessionStatus): Promise<void> {
       await pool.query(`UPDATE sessions SET status=$2, updated_at=now() WHERE id=$1`, [id, status]);
     },

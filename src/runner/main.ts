@@ -2,7 +2,10 @@ import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfi
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, redis, takeToolResult } from "../infra/pubsub.ts";
-import { consumeRuns, enqueueRun } from "../infra/queue.ts";
+import { consumeRuns, enqueueRun, queueDepth } from "../infra/queue.ts";
+import { createServer } from "node:http";
+import { counter, gauge, histogram, onScrape, render as renderMetrics } from "../infra/metrics.ts";
+import { log } from "../infra/log.ts";
 import { claimRun, findStrandedSessions, finishRun, heartbeat, HEARTBEAT_MS, recordUsage } from "../infra/runs.ts";
 import { runSession, type AgentPlugins, type ChildSpawn, type RunDeps } from "../harness/run-turn.ts";
 import { workspaceRoot } from "../sandbox/workspace.ts";
@@ -202,25 +205,43 @@ async function providerFor(sessionId: string): Promise<SandboxProviderName> {
   return environment?.provider ?? env.SANDBOX_DEFAULT_PROVIDER;
 }
 
+const runsTotal = counter("runner_runs_total", "Runs handled, by outcome");
+const runDuration = histogram("runner_run_duration_seconds", "Run wall-clock duration");
+const activeRuns = gauge("runner_active_runs", "Runs currently executing on this runner");
+let active = 0;
+
 async function handleJob(job: RunJob): Promise<"done" | "retry"> {
   const started = Date.now();
-  console.log(`[runner] run ${job.session_id} (trigger_seq=${job.trigger_seq})`);
+  const jlog = log.child({ session: job.session_id, trigger_seq: job.trigger_seq });
+  jlog.info("run.start");
+  activeRuns.set(++active);
   // Heartbeat while running so a re-examined job can tell a live run from a dead runner's.
   const hb = setInterval(() => void heartbeat(job.session_id).catch(() => {}), HEARTBEAT_MS);
+  let outcomeLabel = "done";
   try {
     const outcome = await runSession(job.session_id, makeDeps(await providerFor(job.session_id)));
     if (outcome.status === "busy") {
-      console.log(`[runner] ${job.session_id} is running elsewhere; leaving job pending`);
+      jlog.info("run.busy_elsewhere");
+      outcomeLabel = "busy";
       return "retry";
     }
     if (outcome.unconsumedSeq !== null) {
-      console.log(`[runner] ${job.session_id}: user message seq=${outcome.unconsumedSeq} arrived after the last steer pop; enqueueing follow-up`);
+      jlog.info("run.followup", { unconsumed_seq: outcome.unconsumedSeq });
       await enqueueRun({ session_id: job.session_id, trigger_seq: outcome.unconsumedSeq });
     }
+    outcomeLabel = outcome.status === "done" ? outcome.stopReason : "done";
     return "done";
+  } catch (e) {
+    outcomeLabel = "error";
+    jlog.error("run.error", { error: (e as Error)?.message ?? String(e) });
+    throw e;
   } finally {
     clearInterval(hb);
-    console.log(`[runner] done ${job.session_id} in ${Date.now() - started}ms`);
+    activeRuns.set(--active);
+    const seconds = (Date.now() - started) / 1000;
+    runsTotal.inc({ outcome: outcomeLabel });
+    runDuration.observe(seconds);
+    jlog.info("run.done", { outcome: outcomeLabel, ms: Date.now() - started });
   }
 }
 
@@ -260,12 +281,25 @@ const shutdown = (sig: string) => {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
-console.log(`[runner] consuming runs (concurrency=${env.RUNNER_CONCURRENCY}, default provider=${env.SANDBOX_DEFAULT_PROVIDER}, idle ttl=${env.SANDBOX_IDLE_TTL_MS}ms)`);
+// Prometheus metrics endpoint (per-process; the runner has no HTTP API otherwise).
+const queueGauge = gauge("runner_queue_depth", "Pending entries in the run stream");
+onScrape(async () => queueGauge.set(await queueDepth()));
+let metricsServer: ReturnType<typeof createServer> | null = null;
+if (env.RUNNER_METRICS_PORT > 0) {
+  metricsServer = createServer((req, res) => {
+    if (req.url === "/healthz") { res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}'); return; }
+    if (req.url === "/metrics") { void renderMetrics().then((t) => res.writeHead(200, { "content-type": "text/plain; version=0.0.4" }).end(t)); return; }
+    res.writeHead(404).end();
+  }).listen(env.RUNNER_METRICS_PORT, () => log.info("runner.metrics_listening", { port: env.RUNNER_METRICS_PORT }));
+}
+
+log.info("runner.consuming", { concurrency: env.RUNNER_CONCURRENCY, default_provider: env.SANDBOX_DEFAULT_PROVIDER, idle_ttl_ms: env.SANDBOX_IDLE_TTL_MS });
 try {
   await consumeRuns(handleJob, { signal: stopping.signal, concurrency: env.RUNNER_CONCURRENCY });
 } finally {
   clearInterval(reaper);
+  metricsServer?.close();
   await stopProvidersWatch();
   await Promise.allSettled([pool.end(), redis.quit()]);
-  console.log("[runner] stopped");
+  log.info("runner.stopped");
 }
