@@ -22,6 +22,7 @@ services:
     environment:
       DATABASE_URL: postgres://pi:pi@postgres:5432/pi
       REDIS_URL: redis://redis:6379
+      COMPAT_TEAM_PACKAGE: /app/plugins/team
       API_PORT: "8080"
       QODER_BASE_URL: http://host.docker.internal:4141/v1   # seeded provider must be reachable from the runner
       QODER_API_KEY: ${QODER_API_KEY:-qoder}
