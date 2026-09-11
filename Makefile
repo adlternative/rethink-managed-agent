@@ -1,7 +1,8 @@
-.PHONY: help up down logs e2e test typecheck cli-build install uninstall diagram demo
+.PHONY: help up up-min down logs e2e test typecheck cli-build install uninstall diagram demo
 
 help:
-	@echo "make up          start postgres/redis/api/runner (docker compose up --build -d)"
+	@echo "make up          start the full stack (postgres/redis/minio/api/runner)"
+	@echo "make up-min      minimal stack: Postgres only (no redis/minio) via docker-compose.pg.yml"
 	@echo "make down        stop the stack"
 	@echo "make logs        tail api + runner logs"
 	@echo "make e2e         run scripts/e2e.sh against the running stack"
@@ -51,3 +52,6 @@ diagram:
 
 demo:
 	bash demos/run.sh
+
+up-min:
+	docker compose -f docker-compose.yml -f docker-compose.pg.yml up --build -d postgres api runner

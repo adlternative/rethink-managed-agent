@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { env } from "../shared/env.ts";
 import type { RunJob } from "../shared/types.ts";
 import { redis } from "./pubsub.ts";
+import { pool } from "./db.ts";
 
 /**
  * The run queue behind a pluggable backend (MESSAGING_BACKEND):
@@ -85,7 +86,53 @@ function memoryQueue(): RunQueue {
   };
 }
 
-const queue: RunQueue = env.MESSAGING_BACKEND === "memory" ? memoryQueue() : redisQueue();
+/** Postgres run queue: FOR UPDATE SKIP LOCKED claiming + LISTEN/NOTIFY wakeups + a stale-reclaim sweep. No Redis. */
+function pgQueue(): RunQueue {
+  const STALE_MS = 120_000;
+  return {
+    async enqueue(job) { await pool.query("INSERT INTO run_jobs (session_id, trigger_seq) VALUES ($1,$2)", [job.session_id, job.trigger_seq]); await pool.query("SELECT pg_notify('pma_jobs','1')").catch(() => {}); },
+    async depth() { const r = await pool.query<{ n: number }>("SELECT count(*)::int AS n FROM run_jobs WHERE status='pending'"); return r.rows[0]?.n ?? 0; },
+    async consume(handler, opts) {
+      const consumer = opts.consumer ?? `runner-${process.pid}`;
+      const concurrency = Math.max(1, opts.concurrency ?? 1);
+      const inflight = new Set<Promise<void>>();
+      let wake: (() => void) | null = null;
+      const lc = await pool.connect(); // dedicated LISTEN connection
+      lc.on("notification", () => wake?.());
+      lc.on("error", (e) => console.error("[pg-queue] listener error", e));
+      await lc.query("LISTEN pma_jobs");
+      const claim = async () => (await pool.query<{ id: string; session_id: string; trigger_seq: string }>(
+        `UPDATE run_jobs SET status='running', claimed_by=$1, claimed_at=now()
+         WHERE id = (SELECT id FROM run_jobs WHERE status='pending' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+         RETURNING id, session_id, trigger_seq`, [consumer])).rows[0];
+      const runOne = (row: { id: string; session_id: string; trigger_seq: string }) => {
+        const p = (async () => {
+          let outcome: "done" | "retry" = "done";
+          try { outcome = await handler({ session_id: row.session_id, trigger_seq: Number(row.trigger_seq) }); } catch (e) { console.error("[queue] handler failed", row.id, e); }
+          if (outcome === "done") await pool.query("DELETE FROM run_jobs WHERE id=$1", [row.id]).catch(() => {});
+          else await pool.query("UPDATE run_jobs SET status='pending', claimed_by=null, claimed_at=null WHERE id=$1", [row.id]).catch(() => {});
+        })();
+        inflight.add(p); void p.finally(() => inflight.delete(p));
+      };
+      const sweep = setInterval(() => { void pool.query(`UPDATE run_jobs SET status='pending', claimed_by=null WHERE status='running' AND claimed_at < now() - ($1::bigint * interval '1 millisecond')`, [STALE_MS]).catch(() => {}); }, 30_000);
+      try {
+        while (!opts.signal?.aborted) {
+          let claimed = false;
+          while (inflight.size < concurrency) { const row = await claim(); if (!row) break; runOne(row); claimed = true; }
+          if (inflight.size >= concurrency) { await Promise.race(inflight); continue; }
+          if (claimed) continue; // just claimed some; loop to claim more before sleeping
+          await new Promise<void>((res) => { // sleep until a NOTIFY or a 2s poll or abort
+            let done = false; const finish = () => { if (done) return; done = true; wake = null; clearTimeout(t); opts.signal?.removeEventListener("abort", finish); res(); };
+            wake = finish; const t = setTimeout(finish, 2000); opts.signal?.addEventListener("abort", finish, { once: true });
+          });
+        }
+        await Promise.allSettled(inflight);
+      } finally { clearInterval(sweep); lc.release(); }
+    },
+  };
+}
+
+const queue: RunQueue = env.MESSAGING_BACKEND === "memory" ? memoryQueue() : env.MESSAGING_BACKEND === "postgres" ? pgQueue() : redisQueue();
 
 export const enqueueRun = (job: RunJob) => queue.enqueue(job);
 export const queueDepth = () => queue.depth();

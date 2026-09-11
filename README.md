@@ -50,6 +50,8 @@ It is the same good idea, decoupled and made portable. See `docs/POSITIONING.md`
    scripts/e2e.sh
    ```
 
+**Minimal deploy (Postgres only).** `make up-min` runs the whole stack on Postgres alone — no Redis, no MinIO (`MESSAGING_BACKEND=postgres`, blobs on a local dir). One datastore to operate; the easiest way to fork and self-host. `make up` is the full stack (Redis for the queue/bus, MinIO for blobs) when you want them.
+
 Open **http://localhost:8080/** in a browser for a read-only dashboard: the session list, each session's event timeline (messages, tool calls + results, status), and a live tail over SSE.
 
 Talking to it by hand with the bundled CLI (`PI_API` defaults to `http://localhost:8080`):

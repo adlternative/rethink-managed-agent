@@ -1,0 +1,21 @@
+# Minimal deployment: the whole stack on Postgres alone — no Redis, no MinIO.
+#   docker compose -f docker-compose.yml -f docker-compose.pg.yml up -d --build postgres api runner
+# Messaging (run queue + event bus) uses Postgres LISTEN/NOTIFY; blobs use a local dir.
+services:
+  api:
+    environment:
+      MESSAGING_BACKEND: postgres
+      BLOB_ENDPOINT: ""          # disable S3
+      BLOB_BACKEND: fs
+      BLOB_DIR: /data/blobs
+    volumes: ["blobs:/data/blobs"]
+    depends_on: { postgres: { condition: service_healthy } }
+  runner:
+    environment:
+      MESSAGING_BACKEND: postgres
+      BLOB_ENDPOINT: ""
+      BLOB_BACKEND: fs
+      BLOB_DIR: /data/blobs
+    volumes: ["blobs:/data/blobs"]
+    depends_on: { postgres: { condition: service_healthy } }
+volumes: { blobs: {} }

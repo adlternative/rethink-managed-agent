@@ -1,7 +1,8 @@
 import { Redis } from "ioredis";
 import { EventEmitter } from "node:events";
 import { env } from "../shared/env.ts";
-import type { ContentBlock, StreamDelta } from "../shared/types.ts";
+import type { ContentBlock, SessionEvent, StreamDelta } from "../shared/types.ts";
+import { pool } from "./db.ts";
 
 /** A user message persisted while the session was running; `seq` lets the runner dedupe against the log. */
 export interface Steer { seq: number; content: ContentBlock[] }
@@ -82,7 +83,53 @@ function memoryBus(): Bus {
   };
 }
 
-const bus: Bus = env.MESSAGING_BACKEND === "memory" ? memoryBus() : redisBus();
+/**
+ * Postgres event bus: one process-level LISTEN connection fanned out to in-process handlers, plus
+ * steer/tool-result as small tables. Large `event` deltas are sent as a `{sid,seq}` signal and read
+ * back from the events table (Postgres NOTIFY payloads are capped at 8000 bytes); small streaming
+ * deltas ride in the payload directly. No Redis.
+ */
+function pgBus(): Bus {
+  const local = new EventEmitter(); local.setMaxListeners(0);
+  let listener: Promise<void> | null = null;
+  let client: import("pg").PoolClient | null = null;
+  const ensure = () => (listener ??= (async () => {
+    const c = await pool.connect(); client = c;
+    c.on("notification", (n) => { try { local.emit(n.channel, JSON.parse(n.payload || "{}")); } catch { /* ignore bad payload */ } });
+    c.on("error", (e) => console.error("[pg-bus] listener error", e));
+    await c.query("LISTEN pma_bus");
+    await c.query("LISTEN pma_ctl");
+  })());
+  const notify = (channel: string, payload: unknown) => pool.query("SELECT pg_notify($1,$2)", [channel, JSON.stringify(payload)]).then(() => {});
+  const onLocal = async (channel: string, filter: (m: Record<string, unknown>) => void): Promise<() => void> => {
+    await ensure(); const h = (m: Record<string, unknown>) => filter(m); local.on(channel, h); return () => local.off(channel, h);
+  };
+  return {
+    async publish(delta) {
+      if (delta.type === "event") return notify("pma_bus", { sid: delta.event.session_id, seq: delta.event.seq });
+      const p = JSON.stringify(delta); if (p.length < 7500) await notify("pma_bus", { sid: delta.session_id, d: delta }); // else drop: previews are best-effort, the event is the truth
+    },
+    subscribe(sessionId, cb) {
+      return onLocal("pma_bus", (m) => {
+        if (m.sid !== sessionId) return;
+        if (m.d) { cb(m.d as StreamDelta); return; }
+        if (typeof m.seq === "number") void pool.query<SessionEvent>("SELECT id, session_id, seq, type, payload, created_at FROM events WHERE session_id=$1 AND seq=$2", [sessionId, m.seq])
+          .then((r) => { const ev = r.rows[0]; if (ev) { const ca = ev.created_at as unknown; cb({ type: "event", event: { ...ev, seq: Number(ev.seq), created_at: ca instanceof Date ? ca.toISOString() : String(ca) } }); } });
+      });
+    },
+    async publishInterrupt(sessionId) { await notify("pma_ctl", { k: "int", sid: sessionId }); },
+    onInterrupt(sessionId, cb) { return onLocal("pma_ctl", (m) => { if (m.k === "int" && m.sid === sessionId) cb(); }); },
+    async pushSteer(sessionId, ev) { await pool.query("INSERT INTO steer_msgs (session_id, payload) VALUES ($1,$2)", [sessionId, JSON.stringify(ev)]); },
+    async popSteer(sessionId) { const r = await pool.query<{ payload: Steer }>("WITH d AS (DELETE FROM steer_msgs WHERE session_id=$1 RETURNING id, payload) SELECT payload FROM d ORDER BY id", [sessionId]); return r.rows.map((x) => x.payload); },
+    async publishToolResult(sessionId, callId, msg) { await pool.query("INSERT INTO tool_result_msgs (session_id, call_id, payload) VALUES ($1,$2,$3)", [sessionId, callId, JSON.stringify(msg)]); },
+    async takeToolResult(sessionId, callId) { const r = await pool.query<{ payload: ToolResultMsg }>("DELETE FROM tool_result_msgs WHERE id = (SELECT id FROM tool_result_msgs WHERE session_id=$1 AND call_id=$2 ORDER BY id LIMIT 1) RETURNING payload", [sessionId, callId]); return r.rows[0]?.payload ?? null; },
+    async publishProvidersChanged() { await notify("pma_ctl", { k: "prov" }); },
+    onProvidersChanged(cb) { return onLocal("pma_ctl", (m) => { if (m.k === "prov") cb(); }); },
+    async close() { client?.release(); client = null; },
+  };
+}
+
+const bus: Bus = env.MESSAGING_BACKEND === "memory" ? memoryBus() : env.MESSAGING_BACKEND === "postgres" ? pgBus() : redisBus();
 
 // Stable module API (callers unchanged): delegate to the selected backend.
 export const publish = (delta: StreamDelta) => bus.publish(delta);

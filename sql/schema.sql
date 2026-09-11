@@ -198,3 +198,37 @@ ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS owner_id TEXT;
 CREATE INDEX IF NOT EXISTS sandboxes_owner ON sandboxes(owner_id) WHERE status <> 'destroyed';
 -- Per-principal plugin fetch allowlist (comma list of hosts, or '*'); NULL falls back to PLUGIN_FETCH_ALLOW.
 ALTER TABLE principals ADD COLUMN IF NOT EXISTS fetch_allow TEXT;
+
+-- ============================================================================
+-- Postgres messaging backend (MESSAGING_BACKEND=postgres): run the whole stack on
+-- Postgres alone, with no Redis. Queue via FOR UPDATE SKIP LOCKED + LISTEN/NOTIFY;
+-- steer + per-call tool results as small tables. (Redis stays the default.)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS run_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  trigger_seq BIGINT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending | running
+  claimed_by TEXT,
+  claimed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS run_jobs_pending ON run_jobs(id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS run_jobs_running ON run_jobs(claimed_at) WHERE status = 'running';
+
+CREATE TABLE IF NOT EXISTS steer_msgs (
+  id BIGSERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS steer_msgs_session ON steer_msgs(session_id, id);
+
+CREATE TABLE IF NOT EXISTS tool_result_msgs (
+  id BIGSERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  call_id TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS tool_result_msgs_key ON tool_result_msgs(session_id, call_id, id);

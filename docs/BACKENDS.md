@@ -27,6 +27,7 @@ by `MESSAGING_BACKEND`:
 | Backend | Select | Notes |
 |---|---|---|
 | `redis` (default) | `MESSAGING_BACKEND=redis` | Streams consumer group (at-least-once, `XAUTOCLAIM` reclaims a dead runner's work) + pub/sub + Redis lists. The only backend that works across the split api/runner processes. |
+| `postgres` | `MESSAGING_BACKEND=postgres` | **cross-process, no Redis** — queue via `FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY`, bus via `LISTEN/NOTIFY` (large events sent as a `{sid,seq}` signal, read back from the events table), steer/tool-results as small tables. Run the whole stack on Postgres alone (`make up-min`). |
 | `memory` | `MESSAGING_BACKEND=memory` | in-process `EventEmitter` + Maps; single-process dev/test, no Redis, no cross-process reclaim. |
 
 `RunQueue { enqueue; consume(handler,{concurrency,signal}); depth }` and `Bus { publish/subscribe;

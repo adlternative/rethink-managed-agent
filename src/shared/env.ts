@@ -1,8 +1,8 @@
 export const env = {
   DATABASE_URL: process.env.DATABASE_URL ?? "postgres://pi:pi@localhost:5432/pi",
   REDIS_URL: process.env.REDIS_URL ?? "redis://localhost:6379",
-  /** Messaging backend for the run queue + event bus: "redis" (default; cross-process) or "memory" (single-process dev/test, no Redis). BYOC needs "redis". */
-  MESSAGING_BACKEND: (process.env.MESSAGING_BACKEND ?? "redis") as "redis" | "memory",
+  /** Messaging backend for the run queue + event bus: "redis" (default; cross-process), "postgres" (cross-process, no Redis — the whole stack on Postgres alone), or "memory" (single-process dev/test). BYOC needs "redis". */
+  MESSAGING_BACKEND: (process.env.MESSAGING_BACKEND ?? "redis") as "redis" | "postgres" | "memory",
   QODER_BASE_URL: process.env.QODER_BASE_URL ?? "http://127.0.0.1:4141/v1",
   /** The qoder proxy ignores the bearer token, but pi-ai refuses to send a request without one. */
   QODER_API_KEY: process.env.QODER_API_KEY || "qoder",
