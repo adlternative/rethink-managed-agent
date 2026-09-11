@@ -1,6 +1,6 @@
 import { env } from "../../../shared/env.ts";
 import { invalid } from "../../errors.ts";
-import type { BuiltinToolName, FunctionToolDecl, ModelRef } from "../../../shared/types.ts";
+import type { BuiltinToolName, FunctionToolDecl, McpServerDecl, ModelRef } from "../../../shared/types.ts";
 
 /**
  * Translate an OpenAI Agents API agent/environment spec into rethink's shapes. This is the ONLY
@@ -19,26 +19,36 @@ export function mapModel(model: string): ModelRef {
   return { provider: env.COMPAT_DEFAULT_PROVIDER, id: target };
 }
 
-export interface OpenAiToolDecl { type: string; name?: string; description?: string; parameters?: Record<string, unknown>; [k: string]: unknown }
+export interface OpenAiToolDecl { type: string; name?: string; description?: string; parameters?: Record<string, unknown>; server_label?: string; transport?: Record<string, unknown>; allowed_tools?: string[]; [k: string]: unknown }
 
 export interface SplitTools {
   builtins: BuiltinToolName[];
   clientTools: FunctionToolDecl[];
-  /** accepted-but-not-run tool types (mcp / web_search / programmatic_tool_calling) surfaced to the caller as a note */
+  mcpServers: McpServerDecl[];
+  /** a {type:'web_search'} tool was declared */
+  webSearch: boolean;
+  /** accepted-but-not-run tool types (programmatic_tool_calling, or web_search with no package) surfaced as a note */
   ignored: { type: string; label?: string }[];
 }
 
 /** Split OpenAI tool decls into rethink builtin tools, client/function tools, and accepted-and-ignored types. */
 export function splitTools(tools: OpenAiToolDecl[] | undefined): SplitTools {
-  const out: SplitTools = { builtins: [], clientTools: [], ignored: [] };
+  const out: SplitTools = { builtins: [], clientTools: [], mcpServers: [], webSearch: false, ignored: [] };
   for (const t of tools ?? []) {
     if (t.type === "function") {
       if (!t.name || typeof t.name !== "string") throw invalid("function tool requires a name");
       out.clientTools.push({ type: "function", name: t.name, description: t.description, parameters: t.parameters ?? { type: "object", properties: {} } });
     } else if (BUILTINS.has(t.type as BuiltinToolName)) {
       out.builtins.push(t.type as BuiltinToolName);
-    } else if (t.type === "mcp" || t.type === "web_search" || t.type === "programmatic_tool_calling") {
-      out.ignored.push({ type: t.type, label: typeof t.server_label === "string" ? t.server_label : undefined });
+    } else if (t.type === "mcp") {
+      const tr = (t.transport ?? {}) as { type?: string; server_url?: string; authorization?: string; headers?: Record<string, string> };
+      const label = typeof t.server_label === "string" ? t.server_label : "mcp";
+      if (!tr.server_url || typeof tr.server_url !== "string") throw invalid(`mcp tool ${label} requires transport.server_url`);
+      out.mcpServers.push({ label, url: tr.server_url, authorization: tr.authorization, headers: tr.headers, allowed_tools: Array.isArray(t.allowed_tools) ? (t.allowed_tools as string[]) : undefined });
+    } else if (t.type === "web_search") {
+      out.webSearch = true;
+    } else if (t.type === "programmatic_tool_calling") {
+      out.ignored.push({ type: t.type });
     } else {
       throw invalid(`unsupported tool type ${JSON.stringify(t.type)}`);
     }
@@ -61,6 +71,7 @@ export interface AgentSnapshotDraft {
   tools: BuiltinToolName[];
   packages: string[];
   client_tools: FunctionToolDecl[];
+  mcp_servers: McpServerDecl[];
   ignored: { type: string; label?: string }[];
 }
 
@@ -70,6 +81,8 @@ export function openaiAgentToRethink(spec: OpenAiAgentSpec): AgentSnapshotDraft 
   const split = splitTools(spec.tools);
   const packages: string[] = [];
   if (spec.multi_agent?.enabled && env.COMPAT_TEAM_PACKAGE) packages.push(env.COMPAT_TEAM_PACKAGE);
+  const ignored = [...split.ignored];
+  if (split.webSearch) { if (env.COMPAT_WEBSEARCH_PACKAGE) packages.push(env.COMPAT_WEBSEARCH_PACKAGE); else ignored.push({ type: "web_search" }); }
   return {
     name: "openai-compat",
     model: mapModel(spec.model),
@@ -77,7 +90,8 @@ export function openaiAgentToRethink(spec: OpenAiAgentSpec): AgentSnapshotDraft 
     tools: split.builtins,
     packages,
     client_tools: split.clientTools,
-    ignored: split.ignored,
+    mcp_servers: split.mcpServers,
+    ignored,
   };
 }
 

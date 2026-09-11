@@ -14,6 +14,7 @@ import type {
   ContentBlock,
   EnvironmentResource,
   FunctionToolDecl,
+  McpServerDecl,
   SandboxLease,
   SandboxProviderName,
   SandboxService,
@@ -42,6 +43,7 @@ import { DEFAULT_SYSTEM_PROMPT, renderSystemPrompt, type PromptSections } from "
 import { compactMessages, contextTokens, needsCompaction, settingsFromEnv } from "./compaction.ts";
 import { resolveModel } from "./models.ts";
 import { createTools, truncateOutput, type ToolContext } from "./tools.ts";
+import { McpHttpClient } from "./mcp.ts";
 
 export type Unsubscribe = () => void | Promise<void>;
 
@@ -206,6 +208,39 @@ function clientTool(
       return { content: [{ type: "text", text: `No tool_result received for ${decl.name} (call ${toolCallId}) within the wait window.` }], details: { client_tool: decl.name, timed_out: true } };
     },
   };
+}
+
+/** One tool from a remote MCP server, namespaced by server label. Runs server-side (runner). */
+function mcpTool(label: string, info: { name: string; description?: string; inputSchema: Record<string, unknown> }, client: McpHttpClient): AgentTool {
+  return {
+    name: `${label}__${info.name}`,
+    label: `${label}.${info.name}`,
+    description: info.description ?? `MCP tool ${info.name} from ${label}`,
+    parameters: info.inputSchema as TSchema,
+    executionMode: "sequential",
+    execute: async (_id, params) => {
+      const r = await client.callTool(info.name, params);
+      const t = textBlocks(r.content);
+      return { content: t.length ? t : [{ type: "text", text: JSON.stringify(r.content) }], details: { mcp: label, isError: r.isError } };
+    },
+  };
+}
+
+/** Connect to each declared MCP server (fetch-allowlist gated, fails soft) and return its tools. */
+async function mcpTools(servers: McpServerDecl[], fetchAllow: string[], allowUrl: (u: string, a: string[]) => boolean, emit: (p: SessionEventPayload) => Promise<void>): Promise<AgentTool[]> {
+  const out: AgentTool[] = [];
+  for (const server of servers) {
+    if (!allowUrl(server.url, fetchAllow)) { await emit({ type: "plugin.message", plugin: `mcp:${server.label}`, content: [{ type: "text", text: `MCP server ${server.label} (${server.url}) blocked by the fetch allowlist` }] }); continue; }
+    const client = new McpHttpClient(server.url, { authorization: server.authorization, headers: server.headers });
+    try {
+      await client.connect();
+      const allow = server.allowed_tools ? new Set(server.allowed_tools) : null;
+      for (const t of await client.listTools()) if (!allow || allow.has(t.name)) out.push(mcpTool(server.label, t, client));
+    } catch (e) {
+      await emit({ type: "plugin.message", plugin: `mcp:${server.label}`, content: [{ type: "text", text: `MCP server ${server.label} unavailable: ${(e as Error)?.message ?? e}` }] });
+    }
+  }
+  return out;
 }
 
 /** Skills/prompt templates are listed in the system prompt and fetched on demand with the `skill` tool. */
@@ -509,6 +544,8 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     for (const decl of session.agent.client_tools ?? []) {
       tools.push(clientTool(decl, (callId, sig) => deps.awaitToolResult(sessionId, callId, sig, env.CLIENT_TOOL_WAIT_MS)));
     }
+    // Remote MCP servers: connect and register their tools (server-side; gated by the fetch allowlist).
+    if (session.agent.mcp_servers?.length) tools.push(...(await mcpTools(session.agent.mcp_servers, fetchAllow, isAllowedUrl, emit)));
     const allSkills = [...plugins.skills, ...dbSkills];
     const st = skillTool(allSkills, plugins.prompts);
     if (st) tools.push(st);

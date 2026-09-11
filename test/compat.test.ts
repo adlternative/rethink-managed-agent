@@ -16,22 +16,31 @@ describe("translate", () => {
     expect(mapModel("ultimate")).toEqual({ provider: "qoder", id: "ultimate" }); // default provider
   });
 
-  it("splits tools into builtins, client tools, and accepted-and-ignored types", () => {
+  it("splits tools into builtins, client tools, mcp servers, web_search, and ignored", () => {
     const s = splitTools([
       { type: "function", name: "get_incident", parameters: { type: "object", properties: {} } },
       { type: "bash" },
       { type: "web_search" },
-      { type: "mcp", server_label: "github" },
+      { type: "mcp", server_label: "github", transport: { type: "http", server_url: "https://api.example/mcp", authorization: "Bearer x" }, allowed_tools: ["list_commits"] },
       { type: "programmatic_tool_calling", enabled: true },
     ]);
     expect(s.builtins).toEqual(["bash"]);
     expect(s.clientTools.map((t) => t.name)).toEqual(["get_incident"]);
-    expect(s.ignored.map((i) => i.type).sort()).toEqual(["mcp", "programmatic_tool_calling", "web_search"]);
+    expect(s.webSearch).toBe(true);
+    expect(s.mcpServers).toEqual([{ label: "github", url: "https://api.example/mcp", authorization: "Bearer x", headers: undefined, allowed_tools: ["list_commits"] }]);
+    expect(s.ignored.map((i) => i.type)).toEqual(["programmatic_tool_calling"]);
   });
 
-  it("rejects an unknown tool type and a nameless function tool", () => {
+  it("rejects an unknown tool type, a nameless function tool, and an mcp tool without server_url", () => {
     expect(() => splitTools([{ type: "nonsense" }])).toThrow();
     expect(() => splitTools([{ type: "function" }])).toThrow(/name/);
+    expect(() => splitTools([{ type: "mcp", server_label: "x", transport: { type: "http" } }])).toThrow(/server_url/);
+  });
+
+  it("carries mcp_servers into the agent draft; web_search with no package falls to ignored", () => {
+    const d = openaiAgentToRethink({ model: "x", tools: [{ type: "mcp", server_label: "docs", transport: { type: "http", server_url: "https://developers.openai.com/mcp" } }, { type: "web_search" }] });
+    expect(d.mcp_servers).toEqual([{ label: "docs", url: "https://developers.openai.com/mcp", authorization: undefined, headers: undefined, allowed_tools: undefined }]);
+    expect(d.ignored.map((i) => i.type)).toContain("web_search"); // COMPAT_WEBSEARCH_PACKAGE unset in tests
   });
 
   it("builds an agent draft: instructions->system, function tools->client_tools", () => {

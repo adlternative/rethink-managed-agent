@@ -36,7 +36,7 @@ export const agentsApi = new Hono()
     const spec = environment.workspace;
     const workspace = await repos.workspaces.create(spec, initialRef(spec) as WorkspaceRef, owner);
     const agentRow = await repos.agents.create({ owner_id: owner, name: draft.name, model: draft.model, system: draft.system, tools: draft.tools, packages: draft.packages, skills: [] });
-    const { created_at: _c, ...snapshot } = { ...agentRow, client_tools: draft.client_tools };
+    const { created_at: _c, ...snapshot } = { ...agentRow, client_tools: draft.client_tools, mcp_servers: draft.mcp_servers };
     const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot });
 
     const since = 0;

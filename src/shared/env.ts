@@ -80,4 +80,6 @@ export const env = {
   COMPAT_DEFAULT_ENVIRONMENT: process.env.COMPAT_DEFAULT_ENVIRONMENT ?? "",
   /** Package added when agent.multi_agent.enabled is set (e.g. a team plugin path); empty = advisory no-op. */
   COMPAT_TEAM_PACKAGE: process.env.COMPAT_TEAM_PACKAGE ?? "",
+  /** Package added when a {type:'web_search'} tool is declared (e.g. the web-search plugin path); empty = accepted-and-ignored. */
+  COMPAT_WEBSEARCH_PACKAGE: process.env.COMPAT_WEBSEARCH_PACKAGE ?? "",
 };

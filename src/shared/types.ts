@@ -38,6 +38,15 @@ export interface FunctionToolDecl {
   /** JSON Schema for the arguments */
   parameters: Record<string, unknown>;
 }
+/** A remote MCP server whose tools the agent can call (OpenAI Agents API "mcp" tool). Connected server-side. */
+export interface McpServerDecl {
+  label: string;
+  url: string;
+  authorization?: string;
+  headers?: Record<string, string>;
+  /** if set, only these tool names are exposed to the model */
+  allowed_tools?: string[];
+}
 export interface AgentResource {
   id: AgentId;
   /** owning principal (user/org/service) */
@@ -55,6 +64,8 @@ export interface AgentResource {
   skills: SkillRef[];
   /** client/function tools executed by the API caller (OpenAI Agents API style), not run in the sandbox */
   client_tools?: FunctionToolDecl[];
+  /** remote MCP servers whose tools the agent can call (connected server-side by the runner) */
+  mcp_servers?: McpServerDecl[];
   created_at: string;
 }
 
