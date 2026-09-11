@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { findCut, contextTokens, needsCompaction } from "../src/harness/compaction.ts";
+import { describe, it, expect, vi } from "vitest";
+import { findCut, contextTokens, needsCompaction, compactMessages } from "../src/harness/compaction.ts";
 
 const u = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }], timestamp: 1 });
 const a = (text: string, usage?: any) => ({ role: "assistant" as const, content: [{ type: "text" as const, text }], timestamp: 1, stopReason: "stop" as const, ...(usage ? { usage } : {}) }) as any;
@@ -28,6 +28,19 @@ describe("compaction cut point", () => {
     expect(findCut([u(big), a(big)], 100_000)).toBe(-1);
     expect(findCut([u(big), tr2(), tr2()], 10)).toBe(-1);
   });
+  it("uses a plugin-supplied summary verbatim and skips the built-in summarizer (before_compact override)", async () => {
+    const msgs = [u(big), a(big), u(big), a(big), u(big), a(big)];
+    const streamFn = vi.fn(); // must NOT be called when a summary override is given
+    const r = await compactMessages({
+      messages: msgs, model: { contextWindow: 2000 } as any, streamFn: streamFn as any,
+      settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 2000 }, summaryOverride: "PLUGIN SUMMARY",
+    });
+    expect(streamFn).not.toHaveBeenCalled();
+    expect(r?.summary).toBe("PLUGIN SUMMARY");
+    expect(r?.firstKeptIndex).toBe(3); // the cut stays the harness's, keeping tool pairs intact
+    expect(r?.messages[0]).toMatchObject({ role: "user" }); // the summary is prepended as a user message
+  });
+
   it("uses the last reported usage plus an estimate of trailing messages", () => {
     const msgs = [u("hi"), a("there", { input: 500, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 520 }), u(big)];
     const t = contextTokens(msgs);

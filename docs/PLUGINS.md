@@ -41,14 +41,19 @@ export default function (p: PluginAPI) {
 | `tool_call` | before a tool runs | `{block, reason}` · `{input}` rewrite |
 | `tool_result` | after a tool ran | `{content, isError}` rewrite |
 | `turn_start` / `turn_end` | per model turn; end carries `toolCalls` | `turn_end`: `{stop, reason}` |
-| `before_compact` / `after_compact` | around context compaction | `before`: `{cancel}` · `{instructions}` for the summarizer |
+| `before_compact` / `after_compact` | around context compaction | `before`: `{cancel}` · `{instructions}` steer the summarizer · **override:** `{summary}` replace it, `{keepRecentTokens}` change the keep budget |
 | `sandbox_acquired` / `sandbox_released` / `workspace_captured` | sandbox lifecycle | — |
 | `session_start` / `session_end` | per run; end carries `stopReason`, `turns` | — |
 | `error` | a run failed | — |
 
-Handlers run in registration order and see the event as modified by earlier handlers (`input.text`,
-`tool_call.input`), so plugins compose like middleware. Text results (`appendSystemPrompt`, `instructions`,
-`reason`) accumulate; decisions (`block`, `cancel`, `stop`) are final once made.
+**Two shapes of hook.** Most are **middleware**: handlers run in registration order, each sees the
+event as modified by earlier ones (`input.text`, `tool_call.input`), text results (`appendSystemPrompt`,
+`instructions`, `reason`) accumulate, and decisions (`block`, `cancel`, `stop`) are final once made —
+so plugins stack. A few carry **override** fields (`before_compact`'s `summary` / `keepRecentTokens`):
+these are single-owner — the *first* plugin to set one wins, a later one is ignored with a warning
+(`OVERRIDE_FIELDS` in `host.ts`), so two plugins never silently fight over the loop's strategy, and if
+none answer the built-in default runs. This is how loop *behavior* (compaction, and future retry /
+model-request points) is pluggable without a plugin owning the whole loop. See DESIGN.md §18.
 
 ### Commands
 
@@ -132,19 +137,23 @@ Hooks and tools are wired into the pi-agent-core loop in `src/harness/run-turn.t
 | `safety-net` | `tool_call` hook blocking `rm -rf /`, force push, hard reset, `DROP TABLE`, disk wipes |
 | `web-fetch` | `web_fetch` tool over `ctx.fetch` plus a `web-research` skill |
 | `team` | agent teams: roles (`explorer`, `planner`, `worker`, `reviewer`, custom via `/team set`), tools `spawn_agent` / `wait_agents` / `message_agent` / `list_agents` / `agent_patch`; children run in parallel on forked workspaces and talk back with `report_to_parent` |
-| `workflow` | `run_workflow` tool: a deterministic JS script with `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `args` (the pi-subagents / Claude Code `Workflow` shape) over child sessions; `Date.now` / `Math.random` throw |
+| `workflow` | `run_workflow` tool: a deterministic JS script with `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `args` (the pi-subagents / Claude Code `Workflow` shape) over child sessions; `Date.now` / `Math.random` throw. **See [docs/WORKFLOWS.md](./WORKFLOWS.md).** |
 | `outcome` | Managed-Agents-style outcomes: `/outcome <goal> \| rubric: … \| max: N`; at `session_end` a read-only sub-agent gathers evidence, the model judges it, and `needs_revision` feedback is sent back as a new turn until satisfied or the cap |
 | `webhook` | `/webhook set <url> [secret]`; POSTs `session.started` / `session.ended` / `session.error` through `ctx.fetch` with an HMAC-SHA256 `x-pma-signature` |
+| `compactor` | the reference **override-hook** plugin: a `before_compact` handler that reads `ctx.events`, writes a structured summary with `ctx.model`, and returns it as `summary` (skipping the built-in summarizer); the cut point stays the harness's |
+| `_template` | annotated starter — copy the directory, rename it, edit `index.ts`. Shows a tool, a command, a middleware hook, an override hook, and the full `ctx` cheat-sheet |
 
-All four, plus the pi fixture below, were exercised in a live session; see the commit message for the transcript summary.
+These were exercised in live sessions and by `test/plugin-host.test.ts`; see the commit messages for transcript summaries.
 
 ## pi compatibility (best effort)
 
 A package with a `pi` manifest is loaded through `src/plugins/pi-compat.ts`, which maps
-`registerTool` and `on(tool_call | tool_result | context | turn_* | session_start | session_shutdown)`
-onto the pma API and records everything else (`registerCommand`, shortcuts, renderers, providers,
-`ctx.ui.*`, `ctx.cwd`) as an ignored no-op / rejecting stub. Pure-tool and pure-hook pi packages
-work; anything that needs the TUI or the local filesystem does not, by design.
+`registerTool` and `on(tool_call | tool_result | context | turn_* | session_start | session_shutdown |
+session_before_compact)` onto the pma API and records everything else (`registerCommand`, shortcuts,
+renderers, providers, `ctx.ui.*`, `ctx.cwd`) as an ignored no-op / rejecting stub. A pi compaction
+extension's `{ compaction: CompactionResult }` maps to our `before_compact` `summary` override. Pure-tool
+and pure-hook pi packages work; anything that needs the TUI, a local provider credential, or the local
+filesystem does not — by design (see DESIGN.md §18.2 for the full support matrix and the rationale).
 
 The earlier experiment that hosted pi-coding-agent's own `AgentSession` (full pi extension API,
 extensions running unsandboxed in the runner) is kept behind `EXPERIMENTAL_PI_PACKAGES=1`; see

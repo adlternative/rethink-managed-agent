@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-template", "version": "0.1.0", "type": "module", "description": "Annotated starter plugin: copy this directory, rename it, and edit index.ts.", "pma": { "plugins": ["./index.ts"] } }

@@ -104,6 +104,11 @@ describe("plugin host", () => {
     expect(wf.content[0]!.text).toContain("── Review ──");
     expect(wf.content[0]!.text).toContain("two done");
     await expect(tools.run_workflow!.execute("3", { script: `return Date.now()` })).rejects.toThrow(/Date.now\(\) is not allowed/);
+    // pipeline(): each item flows through both stages; the mock returns "report from <child>"
+    const pl = await tools.run_workflow!.execute("4", { script: `export const meta = { name: "p" }
+      const out = await pipeline([1, 2], (n) => agent("draft " + n), (rep, n) => agent("verify " + n + ": " + rep))
+      return out.map((x) => String(x).slice(0, 11))`, args: undefined, max_agents: 10 });
+    expect(pl.content[0]!.text).toContain("report from");
   });
 
   it("host cannot touch the filesystem, spawn processes, or reach the network", async () => {
@@ -126,6 +131,50 @@ describe("plugin host", () => {
     expect(skills.map((s) => s.name)).toEqual(["web-research"]);
     expect(skills[0]!.body).toContain("primary sources");
   });
+});
+
+describe("starter template", () => {
+  it("loads and registers a tool, a command, and hooks", async () => {
+    const h = await PluginHost.start([pkg(path.join(ROOT, "plugins/_template"))], { agentId: "agent_tpl", repoRoot: ROOT });
+    h.attach(session, caps);
+    expect(h.warnings).toEqual([]);
+    expect(h.tools.map((t) => t.name)).toContain("template_echo");
+    expect(h.commands.map((c) => c.name)).toContain("template");
+    expect([...h.hooks].sort()).toEqual(["before_compact", "tool_call"]);
+    const t = Object.fromEntries(h.agentTools(session).map((x) => [x.name, x]));
+    expect((await t.template_echo!.execute("1", { message: "hi" })).content[0]).toMatchObject({ text: "echo: hi" });
+    h.stop();
+  }, 30_000);
+});
+
+describe("before_compact override hook (custom compaction)", () => {
+  it("lets a plugin supply the summary, and enforces single-owner (first plugin wins)", async () => {
+    const events = [
+      { seq: 1, type: "user.message", payload: { content: [{ type: "text", text: "build the thing" }] } },
+      { seq: 2, type: "agent.message", payload: { content: [{ type: "text", text: "done, edited app.ts" }] } },
+    ];
+    const capsC: Capabilities = { ...caps, eventsGet: async () => events, modelComplete: async (prompt) => `STRUCTURED[${prompt.length}]` };
+    // compactor is registered before pma-compact-two, so its summary must win.
+    const h = await PluginHost.start(
+      [pkg(path.join(ROOT, "plugins/compactor")), pkg(path.join(ROOT, "test/fixtures/pma-compact-two"))],
+      { agentId: "agent_c", repoRoot: ROOT },
+    );
+    h.attach(session, capsC);
+    expect([...h.hooks]).toContain("before_compact");
+    const r = await h.emit(session, { type: "before_compact", contextTokens: 9000, contextWindow: 10000, messageCount: 2 });
+    expect(r?.summary).toMatch(/^STRUCTURED\[/); // compactor's own model summary, not "SECOND-PLUGIN-SUMMARY"
+    expect(r?.summary).not.toBe("SECOND-PLUGIN-SUMMARY");
+    h.stop();
+  }, 30_000);
+
+  it("falls back to the built-in summarizer when the plugin cannot summarize", async () => {
+    const capsC: Capabilities = { ...caps, eventsGet: async () => [], modelComplete: async () => "" };
+    const h = await PluginHost.start([pkg(path.join(ROOT, "plugins/compactor"))], { agentId: "agent_c2", repoRoot: ROOT });
+    h.attach(session, capsC);
+    const r = await h.emit(session, { type: "before_compact", contextTokens: 9000, contextWindow: 10000, messageCount: 0 });
+    expect(r?.summary).toBeUndefined(); // no events -> undefined -> harness runs its own summarizer
+    h.stop();
+  }, 30_000);
 });
 
 describe("plugin host inside a sandbox", () => {

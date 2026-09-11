@@ -1,8 +1,11 @@
 /**
  * Best-effort adapter that lets a pi extension (`(pi: ExtensionAPI) => void`) run on the pma
  * plugin API. Supported: registerTool, on(tool_call | tool_result | context | turn_start | turn_end
- * | session_start | session_shutdown). Everything UI-, command-, keybinding- or cwd-related is a
- * recorded no-op so the package loads and its tools/hooks still work; calls into `ctx.ui.*` reject.
+ * | session_start | session_shutdown | session_before_compact). A pi compaction extension's
+ * `{ compaction: CompactionResult }` maps to our before_compact `summary` override (pi's
+ * `firstKeptEntryId` is a session-tree id with no meaning in our event log, so the cut stays ours).
+ * Everything UI-, command-, keybinding- or cwd-related is a recorded no-op so the package loads and
+ * its tools/hooks still work; calls into `ctx.ui.*` reject.
  */
 import type { HookEvent, PluginAPI, PluginContext } from "./api.ts";
 
@@ -38,10 +41,17 @@ export async function piCompatFactory(factory: (pi: Any) => unknown, api: Plugin
       const map: Record<string, HookEvent["type"]> = {
         tool_call: "tool_call", tool_result: "tool_result", context: "context",
         turn_start: "turn_start", turn_end: "turn_end", session_start: "session_start", session_shutdown: "session_end",
+        session_before_compact: "before_compact",
       };
       const ours = map[event];
       if (!ours) { unsupported(`on("${event}")`)(); return; }
       api.on(ours, async (ev: Any, ctx) => {
+        if (ours === "before_compact") {
+          const r = await handler({ type: "session_before_compact", contextTokens: ev.contextTokens, contextWindow: ev.contextWindow, messageCount: ev.messageCount, reason: "threshold", willRetry: false }, piCtx(ctx));
+          if (!r) return undefined;
+          // pi returns { cancel?, compaction?: CompactionResult }; carry the portable summary over.
+          return { cancel: r.cancel, summary: r.compaction?.summary, instructions: r.customInstructions };
+        }
         if (ours === "tool_call") {
           const r = await handler({ type: "tool_call", toolName: ev.toolName, toolCallId: ev.toolCallId, input: ev.input, args: ev.input }, piCtx(ctx));
           return r?.block ? { block: true, reason: r.reason } : undefined;

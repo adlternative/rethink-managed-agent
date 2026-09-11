@@ -373,7 +373,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       const pre = await hostRef.current?.emit(info, { type: "before_compact", contextTokens: contextTokens(msgs), contextWindow: model.contextWindow, messageCount: msgs.length });
       if (pre?.cancel) return msgs;
       console.log(`[compaction ${sessionId}] ${contextTokens(msgs)} tokens > ${model.contextWindow} - ${compaction.reserveTokens}; compacting ${msgs.length} messages`);
-      const r = await compactMessages({ messages: msgs, model, streamFn: deps.models.streamSimple.bind(deps.models), settings: compaction, previousSummary: lastSummary, signal: abort.signal, instructions: pre?.instructions }).catch((e) => {
+      // before_compact override: a plugin may supply the summary and/or the keep budget.
+      const settings = pre?.keepRecentTokens ? { ...compaction, keepRecentTokens: pre.keepRecentTokens } : compaction;
+      const r = await compactMessages({ messages: msgs, model, streamFn: deps.models.streamSimple.bind(deps.models), settings, previousSummary: lastSummary, signal: abort.signal, instructions: pre?.instructions, summaryOverride: pre?.summary }).catch((e) => {
         console.warn(`[compaction ${sessionId}] failed: ${e instanceof Error ? e.message : e}`);
         return null;
       });

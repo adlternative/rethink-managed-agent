@@ -1,0 +1,1 @@
+{ "name": "pma-plugin-compactor", "version": "0.1.0", "type": "module", "description": "Custom context compaction: a before_compact override that writes a structured summary with its own model call instead of the built-in summarizer.", "pma": { "plugins": ["./index.ts"] } }

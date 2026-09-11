@@ -47,7 +47,19 @@ export interface TurnEvent { type: "turn_start" | "turn_end"; turn: number; /** 
 export interface TurnEndResult { /** stop the run after this turn */ stop?: boolean; reason?: string }
 export interface SessionEvent { type: "session_start" | "session_end"; sessionId: string; stopReason?: string; turns?: number }
 export interface BeforeCompactEvent { type: "before_compact"; contextTokens: number; contextWindow: number; messageCount: number }
-export interface BeforeCompactResult { /** skip this compaction */ cancel?: boolean; /** extra focus for the summarizer */ instructions?: string }
+/**
+ * before_compact is an *override* hook (see host.ts OVERRIDE_FIELDS): a plugin may take over the
+ * compaction strategy instead of only observing it. Because our history is an event log, the cut
+ * point stays ours (it must keep tool_call/tool_result pairs intact), but a plugin owns the two
+ * parts that carry meaning in an event-sourced model:
+ *   - `summary`: the summary text itself (computed however the plugin likes — ctx.model.complete
+ *     over ctx.events.get, a structured format, a different model). Skips the built-in summarizer.
+ *   - `keepRecentTokens`: how much recent context to keep before the cut.
+ * `instructions` is the lighter case: keep the built-in summarizer but steer its focus.
+ * `summary` and `keepRecentTokens` are single-owner: the first plugin that sets each wins (a later
+ * one is ignored with a warning), so two plugins can never silently fight over the strategy.
+ */
+export interface BeforeCompactResult { /** skip this compaction */ cancel?: boolean; /** extra focus for the built-in summarizer */ instructions?: string; /** replace the summary entirely (skips the built-in summarizer) */ summary?: string; /** override how much recent context to keep before the cut */ keepRecentTokens?: number }
 export interface AfterCompactEvent { type: "after_compact"; summary: string; tokensBefore: number; tokensAfter: number }
 export interface SandboxEvent { type: "sandbox_acquired" | "sandbox_released"; sandboxId: string; provider: string; env: string; origin?: string }
 export interface WorkspaceCapturedEvent { type: "workspace_captured"; env: string; workspaceId: string; refKind: string }

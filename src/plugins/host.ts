@@ -16,6 +16,8 @@ import { piCompatFactory } from "./pi-compat.ts";
 if (process.env.PMA_HOST_LOCKDOWN !== "0") lockdown();
 
 type Handler = (event: HookEvent, ctx: PluginContext) => unknown;
+/** Hook result fields that are single-owner (first writer wins) instead of composable middleware tweaks. */
+const OVERRIDE_FIELDS: Partial<Record<HookName, string[]>> = { before_compact: ["summary", "keepRecentTokens"] };
 const tools = new Map<string, { spec: ToolSpec; source: string }>();
 const commands = new Map<string, { spec: CommandSpec; source: string }>();
 const hooks = new Map<HookName, { handler: Handler; source: string }[]>();
@@ -46,6 +48,10 @@ const rpc = new Rpc(
         // Handlers run in registration order; each sees the event as modified by earlier ones
         // (input.text, tool_call.input), so plugins compose like middleware.
         let event: Record<string, unknown> = { ...p.event };
+        // Override fields: a single-owner decision (a compaction strategy) rather than a composable
+        // tweak. The first handler to set one wins; a later one is ignored with a warning, so two
+        // plugins can never silently fight over the loop's behavior.
+        const overrides = OVERRIDE_FIELDS[p.event.type] ?? [];
         for (const h of hooks.get(p.event.type) ?? []) {
           const r = (await h.handler(event as unknown as HookEvent, makeContext(p.session, h.source))) as Record<string, unknown> | undefined | void;
           if (!r || typeof r !== "object") continue;
@@ -54,6 +60,7 @@ const rpc = new Rpc(
             if (v === undefined) continue;
             // accumulate text-ish fields, otherwise last writer wins
             if ((k === "appendSystemPrompt" || k === "instructions" || k === "reason") && typeof merged[k] === "string" && typeof v === "string") merged[k] = `${merged[k]}\n${v}`;
+            else if (overrides.includes(k) && merged[k] !== undefined) { console.warn(`[plugin ${h.source}] ${p.event.type}.${k} already provided by an earlier plugin; ignoring`); continue; }
             else merged[k] = v;
           }
           if (p.event.type === "input" && typeof r.text === "string") event = { ...event, text: r.text };

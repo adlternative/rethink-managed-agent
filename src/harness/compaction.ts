@@ -91,6 +91,8 @@ export async function compactMessages(opts: {
   signal?: AbortSignal;
   /** extra focus for the summarizer (from before_compact hooks) */
   instructions?: string;
+  /** a plugin-supplied summary (before_compact override): use it verbatim, skip the built-in summarizer */
+  summaryOverride?: string;
 }): Promise<CompactionOutcome | null> {
   const cut = findCut(opts.messages, opts.settings.keepRecentTokens);
   if (cut < 0) return null;
@@ -104,7 +106,7 @@ export async function compactMessages(opts: {
     previous ??= (first as UserMessage & { content: { text: string }[] }).content[0]!.text.slice(SUMMARY_PREFIX.length + 2);
     older = older.slice(1);
   }
-  const summary = await generateSummary(older, opts.model, opts.settings.reserveTokens, undefined, undefined, opts.signal, opts.instructions, previous, "off", opts.streamFn);
+  const summary = opts.summaryOverride ?? await generateSummary(older, opts.model, opts.settings.reserveTokens, undefined, undefined, opts.signal, opts.instructions, previous, "off", opts.streamFn);
   const messages: AgentMessage[] = [summaryMessage(summary), ...opts.messages.slice(cut)];
   return { messages, summary, firstKeptIndex: cut, tokensBefore, tokensAfter: contextTokens(messages) };
 }

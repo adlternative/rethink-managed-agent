@@ -503,3 +503,62 @@ Boundaries between the layers are already interfaces, so each is separately depl
 the brain (runner-mode host, operator-curated via `PLUGIN_ALLOW`) or is pushed down into the hands
 (sandbox-mode host, isolated in the tenant's sandbox, `PLUGIN_ALLOW_SANDBOX`). A future
 `plugin_host=service` is the brain's plugin host as its own per-tenant service — still layer 2.
+
+## 18. How plugins customize the agent loop
+
+The agent loop (`src/harness/run-turn.ts`) is a **fixed skeleton the brain owns**: assemble context →
+request model → stream → dispatch tools → collect results → repeat, with compaction / retry / abort
+woven in. A plugin never replaces the loop; it attaches at **typed decision points**. This is what
+keeps the loop governable (`PLUGIN_ALLOW`), upgradable (the point is a versioned contract, not the
+guts), and event-sourced (every change lands as an event, so replay still explains the state). A
+plugin that genuinely wants a different loop owns its own runner (§17), it does not fork the core.
+
+Two independent axes describe a plugin — do not conflate them:
+
+- **Placement** — where the plugin's *code* runs: the shared runner host (`plugin_host=runner`,
+  operator-vetted, persistent, `PLUGIN_ALLOW`) or inside the user's sandbox (`plugin_host=sandbox`,
+  isolated blast radius, `PLUGIN_ALLOW_SANDBOX`). A deployment/trust choice. `makeContext` is
+  identical in both, so the *same* plugin works either way.
+- **Reach** — what the plugin *acts on*: the **hands** (drives the sandbox via `ctx.sandbox`, or runs
+  in it) or the **brain** (only `ctx.store`/`events`/`model`/`agents`/`session`). "Hands plugin"
+  means reach, not placement: `verify` runs on the runner yet is a hands plugin (it remote-drives the
+  sandbox). Reach is decided by the capabilities used, not by where the code lives.
+
+### 18.1 Two shapes of decision point
+
+Every hook (`src/plugins/api.ts`) is one of two shapes, chosen per point:
+
+- **Middleware (compose, many):** `input`, `context`, `tool_call`, `tool_result`, `turn_end`.
+  Handlers run in registration order, each seeing the event as modified by earlier ones; results
+  merge (text-ish fields accumulate, `block`/`cancel` short-circuit — `host.ts`). Many plugins stack.
+- **Override / provider (answer-or-default, single-owner):** the loop asks "does anyone want to
+  supply this?" — the *first* plugin to answer wins, a later one is ignored with a warning
+  (`OVERRIDE_FIELDS` in `host.ts`), and if none answer the built-in default runs. This is how loop
+  *strategy* becomes pluggable without a plugin owning the whole loop.
+
+`before_compact` is the reference override point. Because history is an event log (compaction
+persists only `{ summary, first_kept_seq }`), a plugin owns the parts that carry meaning — `summary`
+(compute it with `ctx.model`/`ctx.events`, skipping the built-in summarizer) and `keepRecentTokens` —
+while the **cut point stays the harness's** (it must keep `tool_call`/`tool_result` pairs intact).
+`plugins/compactor` is the worked example; new override points (retry, model-request middleware)
+follow the same convention. Adding a decision point is a deliberate, versioned contract extension —
+never expose the loop's mutable internals, and do not add hooks speculatively.
+
+### 18.2 What of pi's extension surface we carry, and what we do not
+
+The pi-compat adapter (`src/plugins/pi-compat.ts`) maps a pi extension onto this system. The split is
+principled, not incidental:
+
+- **Carried well** — the agent-behavior core: `registerTool`; `on(tool_call | tool_result | input |
+  before_agent_start | turn_start | turn_end | session_start | session_shutdown | context |
+  session_before_compact)`; `exec` (→ `ctx.sandbox`); sub-agents (→ `ctx.agents`, richer than pi's).
+  A pi compaction extension's `{ compaction: CompactionResult }` maps to our `summary` override.
+- **Deliberately unsupported, and correct to be:**
+  - *All TUI / interactive* — `ctx.ui.*`, `registerMessageRenderer`/`EntryRenderer`/
+    `MarkdownTransformer`, `registerShortcut`, `registerFlag`, `setLabel`, `model_select` /
+    `thinking_level_select`, `user_bash`, `ui_prompt_*`. The server is headless.
+  - *`registerProvider` / OAuth / `login`* — a plugin shipping provider credentials is exactly the
+    ambient authority the API forbids; providers are operator infrastructure (layer 1), DB-configured.
+  - *`sessionManager`, `session_before_switch`/`_fork`/`_tree`, `project_trust`* — interactive
+    session-file management; our sessions are event logs managed by the platform, and trust is
+    `PLUGIN_ALLOW` governance, not an interactive prompt.
