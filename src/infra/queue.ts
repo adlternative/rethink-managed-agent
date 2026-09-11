@@ -89,9 +89,10 @@ function memoryQueue(): RunQueue {
 /** Postgres run queue: FOR UPDATE SKIP LOCKED claiming + LISTEN/NOTIFY wakeups + a stale-reclaim sweep. No Redis. */
 function pgQueue(): RunQueue {
   const STALE_MS = 120_000;
+  const owners = env.RUNNER_OWNERS; // empty = handle any owner (shared operator brain)
   return {
-    async enqueue(job) { await pool.query("INSERT INTO run_jobs (session_id, trigger_seq) VALUES ($1,$2)", [job.session_id, job.trigger_seq]); await pool.query("SELECT pg_notify('pma_jobs','1')").catch(() => {}); },
-    async depth() { const r = await pool.query<{ n: number }>("SELECT count(*)::int AS n FROM run_jobs WHERE status='pending'"); return r.rows[0]?.n ?? 0; },
+    async enqueue(job) { await pool.query("INSERT INTO run_jobs (session_id, trigger_seq, owner_id) VALUES ($1,$2,$3)", [job.session_id, job.trigger_seq, job.owner_id ?? null]); await pool.query("SELECT pg_notify('pma_jobs','1')").catch(() => {}); },
+    async depth() { const r = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM run_jobs WHERE status='pending'${owners.length ? " AND owner_id = ANY($1::text[])" : ""}`, owners.length ? [owners] : []); return r.rows[0]?.n ?? 0; },
     async consume(handler, opts) {
       const consumer = opts.consumer ?? `runner-${process.pid}`;
       const concurrency = Math.max(1, opts.concurrency ?? 1);
@@ -101,10 +102,11 @@ function pgQueue(): RunQueue {
       lc.on("notification", () => wake?.());
       lc.on("error", (e) => console.error("[pg-queue] listener error", e));
       await lc.query("LISTEN pma_jobs");
+      // A tenant-scoped runner (RUNNER_OWNERS) claims only its owners' jobs; the shared runner claims any.
       const claim = async () => (await pool.query<{ id: string; session_id: string; trigger_seq: string }>(
         `UPDATE run_jobs SET status='running', claimed_by=$1, claimed_at=now()
-         WHERE id = (SELECT id FROM run_jobs WHERE status='pending' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
-         RETURNING id, session_id, trigger_seq`, [consumer])).rows[0];
+         WHERE id = (SELECT id FROM run_jobs WHERE status='pending'${owners.length ? " AND owner_id = ANY($2::text[])" : ""} ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+         RETURNING id, session_id, trigger_seq`, owners.length ? [consumer, owners] : [consumer])).rows[0];
       const runOne = (row: { id: string; session_id: string; trigger_seq: string }) => {
         const p = (async () => {
           let outcome: "done" | "retry" = "done";

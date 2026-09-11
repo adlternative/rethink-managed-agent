@@ -437,4 +437,6 @@ export interface RunJob {
   session_id: SessionId;
   /** seq of the user event that triggered this run */
   trigger_seq: number;
+  /** owning principal — lets a tenant-scoped brain runner (RUNNER_OWNERS) route only its own sessions */
+  owner_id?: string;
 }

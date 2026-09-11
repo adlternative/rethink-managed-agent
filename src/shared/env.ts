@@ -56,6 +56,8 @@ export const env = {
   EXPERIMENTAL_PI_PACKAGES: process.env.EXPERIMENTAL_PI_PACKAGES === "1",
   /** Runs a runner handles concurrently (sub-agent sessions need > 1). */
   RUNNER_CONCURRENCY: Number(process.env.RUNNER_CONCURRENCY ?? 4),
+  /** Owners (principal ids) this runner handles; empty = all (the shared operator brain). Set to run a tenant-owned brain runner. Requires MESSAGING_BACKEND=postgres. */
+  RUNNER_OWNERS: (process.env.RUNNER_OWNERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   /** Context compaction (pi heuristics): compact when tokens > contextWindow - reserve; keep ~keepRecent tokens of recent turns. */
   COMPACTION_ENABLED: process.env.COMPACTION_ENABLED !== "0",
   COMPACTION_RESERVE_TOKENS: Number(process.env.COMPACTION_RESERVE_TOKENS ?? 16384),

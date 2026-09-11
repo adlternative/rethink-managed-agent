@@ -53,7 +53,7 @@ export async function sendUserEvents(session: SessionResource, inputs: UserEvent
     // The runner drains these between turns; anything it never pops is caught by finishRun (seq > consumed).
     for (const e of messages) if (e.payload.type === "user.message") await pushSteer(session.id, { seq: e.seq, content: e.payload.content });
   } else if (status === "idle" && messages.length > 0) {
-    await enqueueRun({ session_id: session.id, trigger_seq: messages[messages.length - 1]!.seq });
+    await enqueueRun({ session_id: session.id, trigger_seq: messages[messages.length - 1]!.seq, owner_id: session.owner_id });
   }
   if (appended.some((e) => e.type === "user.interrupt")) await publishInterrupt(session.id);
   return appended;

@@ -58,16 +58,16 @@ export async function heartbeat(sessionId: string): Promise<void> {
  * message. Find such sessions: idle, newest user.message newer than the newest status event, and
  * older than `graceMs` so an in-flight enqueue is not double-fired.
  */
-export async function findStrandedSessions(graceMs: number): Promise<{ session_id: string; trigger_seq: number }[]> {
-  const r = await pool.query<{ session_id: string; trigger_seq: string }>(
-    `SELECT s.id AS session_id, u.seq AS trigger_seq
+export async function findStrandedSessions(graceMs: number): Promise<{ session_id: string; trigger_seq: number; owner_id: string }[]> {
+  const r = await pool.query<{ session_id: string; trigger_seq: string; owner_id: string }>(
+    `SELECT s.id AS session_id, s.owner_id AS owner_id, u.seq AS trigger_seq
      FROM sessions s
      JOIN LATERAL (SELECT seq, created_at FROM events WHERE session_id = s.id AND type = 'user.message' ORDER BY seq DESC LIMIT 1) u ON true
      LEFT JOIN LATERAL (SELECT seq FROM events WHERE session_id = s.id AND type IN ('session.status_running','session.status_idle','session.status_terminated') ORDER BY seq DESC LIMIT 1) st ON true
      WHERE s.status = 'idle' AND (st.seq IS NULL OR u.seq > st.seq) AND u.created_at < now() - ($1::bigint * interval '1 millisecond')`,
     [graceMs],
   );
-  return r.rows.map((x) => ({ session_id: x.session_id, trigger_seq: Number(x.trigger_seq) }));
+  return r.rows.map((x) => ({ session_id: x.session_id, trigger_seq: Number(x.trigger_seq), owner_id: x.owner_id }));
 }
 
 /** Add one model request's usage to the session's cumulative counters and record the context size, atomically. */

@@ -115,7 +115,7 @@ const children: ChildSpawn = {
     });
     const brief = [opts.role ? `You are the "${opts.role}" agent${opts.name ? ` (${opts.name})` : ""} working for a parent agent.` : "You are a sub-agent working for a parent agent.", "Use report_to_parent for progress, questions, and your final report.", "", task].join("\n");
     const [ev] = await appendEvents(child.id, [{ type: "user.message", content: [{ type: "text", text: brief }] }]);
-    await enqueueRun({ session_id: child.id, trigger_seq: ev!.seq });
+    await enqueueRun({ session_id: child.id, trigger_seq: ev!.seq, owner_id: child.owner_id });
     return child;
   },
   async wait(childId, signal, opts = {}) {
@@ -147,7 +147,7 @@ const children: ChildSpawn = {
     if (!s) throw new Error(`child session ${childId} not found`);
     const [ev] = await appendEvents(childId, [{ type: "user.message", content: [{ type: "text", text }] }]);
     if (s.status === "running") await pushSteer(childId, { seq: ev!.seq, content: ev!.payload.type === "user.message" ? ev!.payload.content : [] });
-    else if (s.status === "idle") await enqueueRun({ session_id: childId, trigger_seq: ev!.seq });
+    else if (s.status === "idle") await enqueueRun({ session_id: childId, trigger_seq: ev!.seq, owner_id: s.owner_id });
   },
   async stop(childId) {
     const { publishInterrupt } = await import("../infra/pubsub.ts");
@@ -232,7 +232,7 @@ async function handleJob(job: RunJob): Promise<"done" | "retry"> {
     }
     if (outcome.unconsumedSeq !== null) {
       jlog.info("run.followup", { unconsumed_seq: outcome.unconsumedSeq });
-      await enqueueRun({ session_id: job.session_id, trigger_seq: outcome.unconsumedSeq });
+      await enqueueRun({ session_id: job.session_id, trigger_seq: outcome.unconsumedSeq, owner_id: job.owner_id });
     }
     outcomeLabel = outcome.status === "done" ? outcome.stopReason : "done";
     return "done";
@@ -298,6 +298,7 @@ if (env.RUNNER_METRICS_PORT > 0) {
   }).listen(env.RUNNER_METRICS_PORT, () => log.info("runner.metrics_listening", { port: env.RUNNER_METRICS_PORT }));
 }
 
+if (env.RUNNER_OWNERS.length && env.MESSAGING_BACKEND !== "postgres") log.warn("runner.owners_ignored", { note: "RUNNER_OWNERS routing needs MESSAGING_BACKEND=postgres; this runner will handle ALL owners", owners: env.RUNNER_OWNERS });
 log.info("runner.consuming", { concurrency: env.RUNNER_CONCURRENCY, default_provider: env.SANDBOX_DEFAULT_PROVIDER, idle_ttl_ms: env.SANDBOX_IDLE_TTL_MS });
 try {
   await consumeRuns(handleJob, { signal: stopping.signal, concurrency: env.RUNNER_CONCURRENCY });

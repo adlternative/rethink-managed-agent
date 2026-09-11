@@ -232,3 +232,7 @@ CREATE TABLE IF NOT EXISTS tool_result_msgs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS tool_result_msgs_key ON tool_result_msgs(session_id, call_id, id);
+
+-- Per-tenant brain routing: a runner scoped via RUNNER_OWNERS claims only its owners' jobs.
+ALTER TABLE run_jobs ADD COLUMN IF NOT EXISTS owner_id TEXT;
+CREATE INDEX IF NOT EXISTS run_jobs_pending_owner ON run_jobs(owner_id, id) WHERE status = 'pending';

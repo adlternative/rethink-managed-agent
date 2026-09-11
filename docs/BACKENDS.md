@@ -84,6 +84,8 @@ one* placement (`disallowedEverywhere`), and checked again at host start for the
 runner would reject runs fine when the session uses an isolated sandbox host — the code executes in
 the user's own environment, capability-mediated and network-governed.
 
+**Per-tenant brain routing (implemented).** A runner scoped with `RUNNER_OWNERS=<principal ids>` claims only those owners' run jobs; empty = the shared operator brain. Jobs carry `owner_id`; on the Postgres queue this is a `WHERE owner_id = ANY(...)` filter on the SKIP-LOCKED claim. So a tenant runs their own brain runner (own agent-behavior plugins, own model keys) against the operator's service. Requires `MESSAGING_BACKEND=postgres` (the Redis backend is a single shared pool; a warning is logged if `RUNNER_OWNERS` is set without it). Redis per-owner-stream routing is a later option.
+
 **Roadmap — the plugin host as its own service.** Today the host is a child process of the runner
 (runner mode) or of the sandbox (sandbox mode). The natural next step is a third placement: a
 dedicated **per-tenant plugin-host service** (a "brain sandbox") — the same `PluginHost` protocol over
