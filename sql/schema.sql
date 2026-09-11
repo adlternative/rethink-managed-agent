@@ -187,3 +187,14 @@ CREATE INDEX IF NOT EXISTS files_owner         ON files(owner_id);
 CREATE INDEX IF NOT EXISTS skills_owner        ON skills(owner_id);
 CREATE INDEX IF NOT EXISTS memory_stores_owner ON memory_stores(owner_id);
 CREATE INDEX IF NOT EXISTS sessions_owner      ON sessions(owner_id);
+
+-- ============================================================================
+-- Phase 2: owner-keyed isolation
+-- ============================================================================
+-- Sandboxes belong to a principal too (ephemeral, so nullable + no FK). The ops
+-- view (/v1/sandboxes) filters on it; container_key already carries the owner as
+-- a prefix so a container is never shared across principals.
+ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS owner_id TEXT;
+CREATE INDEX IF NOT EXISTS sandboxes_owner ON sandboxes(owner_id) WHERE status <> 'destroyed';
+-- Per-principal plugin fetch allowlist (comma list of hosts, or '*'); NULL falls back to PLUGIN_FETCH_ALLOW.
+ALTER TABLE principals ADD COLUMN IF NOT EXISTS fetch_allow TEXT;

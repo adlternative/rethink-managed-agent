@@ -325,7 +325,13 @@ busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paus
 
 **扩展到组织(增量)**:加 `principals` 里 `kind='org'` 的行 + `memberships(member_id, org_id, role)` + `X-Org` 解析,资源表和 repo 逻辑不动。
 
-**phase 1 已知边界(留给 phase 2)**:
+**phase 2(已完成):按 owner 收口隔离**
+- **容器不跨主体**:`container_key` 前缀加 `owner_id`(`${owner}/${container_group}/${env}`),所以 manager 找同 key 复用容器时永远不会把两个主体的 mount 并进同一个容器;共享容器只在同一 owner 内成立。
+- **sandbox 归属**:`sandboxes.owner_id`(临时行,可空、无 FK),acquire 时写入;`/v1/sandboxes` 运维视图(list/get/delete/pause)按调用方 owner 过滤,跨主体查不到。reaper 仍以系统身份按 provider 扫描。
+- **plugin_store 主体隔离已天然成立**:`owner`(agent_id / workspace_id)由服务端按会话上下文绑定,插件只能传 `key`+`scope`,而 agent/workspace 各属唯一主体,所以插件访问不到别的主体的数据。phase 2 额外加了 `scope="principal"`(owner = `session.owner_id`),给插件一份租户级存储。
+- **fetch 白名单按主体**:`principals.fetch_allow`(逗号列表或 `*`),每次运行取该主体策略,缺省回落到部署级 `PLUGIN_FETCH_ALLOW`。
+
+**仍留给后续**:
 - provider id 是全局主键,跨 owner 同名会 409(providers 偏基础设施,BYOK 密钥按行封存)。
-- `sandboxes` 运维列表尚未按 owner 过滤(沙箱归属经 workspace/session 间接成立);container_key / plugin_store / fetch 白名单按 owner 收口在 phase 2。
 - `AUTH_REQUIRED=true` 下的 API key 铸造仍对已认证 actor 开放,真实部署应再加 admin 门槛。
+- 组织(`kind='org'` + `memberships` + 角色判断)是 phase 3。

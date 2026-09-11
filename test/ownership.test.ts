@@ -20,6 +20,7 @@ vi.mock("pg", () => {
 
 const db = await import("../src/infra/db.ts");
 const { repos, skills, principals, apiKeys } = db;
+const leaseStore = await import("../src/sandbox/lease-store.ts");
 
 beforeEach(() => { calls.length = 0; nextRows = []; });
 const last = () => calls[calls.length - 1]!;
@@ -73,6 +74,21 @@ describe("ownership threading", () => {
     await skills.getMany(["skill_1", "skill_2"], { owner: "prc_a" });
     expect(last().sql).toContain("AND owner_id=$2");
     expect(last().params).toEqual([["skill_1", "skill_2"], "prc_a"]);
+  });
+
+  it("sandbox rows carry owner_id and the ops view filters by owner (phase 2)", async () => {
+    await leaseStore.insert({ id: "sbx_1", owner_id: "prc_a", provider: "local", status: "busy", workspace_id: "ws_1", affinity: "ws_1", external_ref: null, container_key: "prc_a/g/env", container_ref: "c1", workdir: "/w" } as never);
+    const ins = find("INSERT INTO sandboxes");
+    expect(ins.sql).toMatch(/INSERT INTO sandboxes \(id, owner_id,/);
+    expect(ins.params[1]).toBe("prc_a");
+
+    await leaseStore.list({ owner: "prc_a" });
+    expect(last().sql).toContain("owner_id=$1");
+    expect(last().params).toEqual(["prc_a"]);
+
+    await leaseStore.getScoped("sbx_1", "prc_a");
+    expect(last().sql).toContain("WHERE id=$1 AND owner_id=$2");
+    expect(last().params).toEqual(["sbx_1", "prc_a"]);
   });
 
   it("principals + api key: token is hashed, never stored in plaintext", async () => {

@@ -85,6 +85,8 @@ export interface RunDeps {
   /** Plugin host + content for this agent (cached by the runner). */
   pluginsFor(agent: SessionResource["agent"]): Promise<AgentPlugins>;
   pluginStore: { get(scope: string, owner: string, key: string): Promise<unknown>; set(scope: string, owner: string, key: string, value: unknown): Promise<void> };
+  /** The owning principal's plugin fetch allowlist (comma list or "*"); null/absent -> deployment default. */
+  principalFetchAllow?(ownerId: string): Promise<string | null>;
   /** Append events (seq assigned by the store). Must NOT publish; runSession publishes each appended event. */
   appendEvents(sessionId: SessionId, payloads: SessionEventPayload[]): Promise<SessionEvent[]>;
   /** The whole log, untruncated. */
@@ -192,8 +194,7 @@ function skillTool(skills: Skill[], prompts: PromptTemplate[]): AgentTool | null
   };
 }
 
-function isAllowedUrl(url: string): boolean {
-  const allow = env.PLUGIN_FETCH_ALLOW.split(",").map((s) => s.trim()).filter(Boolean);
+function isAllowedUrl(url: string, allow: string[]): boolean {
   if (allow.includes("*")) return true;
   let host: string;
   try { host = new URL(url).hostname; } catch { return false; }
@@ -257,7 +258,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       const slot = h;
       slot.acquiring ??= deps
         .sandboxFor(e.environment.provider)
-        .acquire({ environmentId: e.environment.id, containerKey: `${session.container_group}/${e.environment.id}`, workspaceId: e.workspace.id, workspaceRef: e.workspace.ref, image: e.environment.image, network: e.environment.network, affinity: e.workspace.id })
+        .acquire({ owner_id: session.owner_id, environmentId: e.environment.id, containerKey: `${session.owner_id}/${session.container_group}/${e.environment.id}`, workspaceId: e.workspace.id, workspaceRef: e.workspace.ref, image: e.environment.image, network: e.environment.network, affinity: e.workspace.id })
         .then(
           async (l) => {
             slot.lease = l;
@@ -373,6 +374,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     }
 
     // ---- capabilities plugins may call back into (all scoped to this session) ----
+    // Plugin store owner per scope: per-agent (default), per-workspace, or per-principal (tenant-wide).
+    const storeOwner = (scope: string) => (scope === "workspace" ? workspace.id : scope === "principal" ? session.owner_id : session.agent.id);
+    // Plugin fetch allowlist: the owning principal's policy if set, else the deployment default.
+    const fetchAllow = ((await deps.principalFetchAllow?.(session.owner_id)) ?? env.PLUGIN_FETCH_ALLOW).split(",").map((s) => s.trim()).filter(Boolean);
     const caps: Capabilities = {
       sandboxEnvs: () => [...envs.keys()],
       async sandboxExec(command, opts) {
@@ -387,8 +392,8 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       },
       async sandboxRead(p, envKey) { return new TextDecoder().decode(await (await ctx.sandbox(envKey)).readFile(p)); },
       async sandboxWrite(p, content, envKey) { await (await ctx.sandbox(envKey)).writeFile(p, new TextEncoder().encode(content)); },
-      storeGet: (key, scope) => deps.pluginStore.get(scope, scope === "agent" ? session.agent.id : workspace.id, key),
-      storeSet: (key, scope, value) => deps.pluginStore.set(scope, scope === "agent" ? session.agent.id : workspace.id, key, value),
+      storeGet: (key, scope) => deps.pluginStore.get(scope, storeOwner(scope), key),
+      storeSet: (key, scope, value) => deps.pluginStore.set(scope, storeOwner(scope), key, value),
       async modelComplete(prompt, opts) {
         const user: UserMessage = { role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() };
         const r = await deps.models.complete(model, { systemPrompt: opts.system, messages: [user] }, { maxTokens: opts.maxTokens, signal: abort.signal });
@@ -431,7 +436,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         return last;
       },
       async fetch(url, init) {
-        if (!isAllowedUrl(url)) throw new Error(`fetch blocked by PLUGIN_FETCH_ALLOW: ${url}`);
+        if (!isAllowedUrl(url, fetchAllow)) throw new Error(`fetch blocked by the principal's fetch allowlist: ${url}`);
         const r = await globalThis.fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]) });
         const headers: Record<string, string> = {};
         r.headers.forEach((v, k) => { headers[k] = v; });

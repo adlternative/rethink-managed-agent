@@ -70,7 +70,7 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | POST | `/v1/sessions/:id/environments` | `{key, environment_id, workspace?\|workspace_id?\|fork_from?}` | attach another sandbox to a session (tools take `env`) |
 | GET/POST/PATCH/DELETE | `/v1/providers` | `{id, api, base_url, auth:{type:"env",name}\|{type:"none"}, models:[{id, context_window, ...}], headers?, enabled?}` | model providers are data; keys stay in runner env vars. Seeded with the Qoder proxy on first start; runners reload on change |
 | GET | `/v1/models` | | flat model list across enabled providers |
-| GET | `/v1/sandboxes` | | lease registry view; `POST /v1/sandboxes/:id/pause` (docker stop / e2b snapshot) and `DELETE /v1/sandboxes/:id` act via the reaper |
+| GET | `/v1/sandboxes` | | lease registry view; `POST /v1/sandboxes/:id/pause` (docker pause / e2b snapshot) and `DELETE /v1/sandboxes/:id` act via the reaper |
 | POST | `/v1/sessions/:id/events` | `{events:[{type:"user.message", content:[{type:"text", text}]} \| {type:"user.interrupt"}]}` | Idle session: enqueues a run. Running session: message is steered into the live loop. Interrupt: aborts the loop |
 | GET | `/v1/sessions/:id/events` | `?since=<seq>&limit=<n>` | `{data, has_more}`; `seq` is per-session and monotonic |
 | GET | `/v1/sessions/:id/events/stream` | `?since=<seq>` | SSE. Replays from the DB, then live. `event:` is the event type; extra `agent.message_delta` frames carry streamed text and are not persisted. Closes on `session.status_terminated` |

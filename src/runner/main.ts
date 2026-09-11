@@ -1,4 +1,4 @@
-import { files, memoryStores, pluginStore, pool, repos, sessionConfig, skills, toolOutputs } from "../infra/db.ts";
+import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfig, skills, toolOutputs } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, redis } from "../infra/pubsub.ts";
@@ -153,6 +153,7 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     get models() { return models; },
     pluginsFor,
     pluginStore,
+    principalFetchAllow: async (ownerId) => (await principals.get(ownerId))?.fetch_allow ?? null,
     sandboxFor: (name) => sandboxManager.bind(name),
     children,
     // runSession publishes each event itself (so deltas and events interleave in order).

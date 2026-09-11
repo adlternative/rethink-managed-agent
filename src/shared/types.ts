@@ -25,6 +25,8 @@ export interface Principal {
   kind: "user" | "org" | "service";
   handle: string | null;
   display_name: string;
+  /** per-principal plugin fetch allowlist (comma list or "*"); null -> global PLUGIN_FETCH_ALLOW */
+  fetch_allow?: string | null;
   created_at: string;
 }
 
@@ -164,6 +166,8 @@ export interface SandboxProcess {
   kill(): void;
 }
 export interface SandboxRequest {
+  /** owning principal (isolation boundary); prefixes container_key so containers never merge across principals */
+  owner_id?: string;
   /** environment this sandbox belongs to (byoc routes requests to that environment's workers) */
   environmentId?: EnvironmentId;
   /** container grouping: mounts sharing this key (and provider) live in one container */
@@ -224,6 +228,7 @@ export interface SandboxService {
 }
 export interface SandboxRow {
   id: SandboxId;
+  owner_id: string | null;
   provider: SandboxProviderName;
   /**
    * busy: leased by a run · ready: idle, running · paused: idle, compute released (provider.pause) ·

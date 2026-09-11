@@ -7,8 +7,8 @@ const ABANDONED_MS = env.RUN_TIMEOUT_MS + 5 * 60_000;
 
 export async function insert(row: Omit<SandboxRow, "last_used_at" | "created_at">): Promise<void> {
   await pool.query(
-    `INSERT INTO sandboxes (id, provider, status, workspace_id, affinity, external_ref, container_key, container_ref, workdir) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [row.id, row.provider, row.status, row.workspace_id, row.affinity, row.external_ref, row.container_key, row.container_ref, row.workdir],
+    `INSERT INTO sandboxes (id, owner_id, provider, status, workspace_id, affinity, external_ref, container_key, container_ref, workdir) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [row.id, row.owner_id ?? null, row.provider, row.status, row.workspace_id, row.affinity, row.external_ref, row.container_key, row.container_ref, row.workdir],
   );
 }
 
@@ -92,15 +92,20 @@ export async function setExternalRef(id: SandboxId, externalRef: string): Promis
   await pool.query(`UPDATE sandboxes SET external_ref=$2, last_used_at=now() WHERE id=$1`, [id, externalRef]);
 }
 
+export async function getScoped(id: SandboxId, owner: string): Promise<SandboxRow | null> {
+  return (await pool.query<SandboxRow>(`SELECT * FROM sandboxes WHERE id=$1 AND owner_id=$2`, [id, owner])).rows[0] ?? null;
+}
 export async function get(id: SandboxId): Promise<SandboxRow | null> {
   const r = await pool.query<SandboxRow>(`SELECT * FROM sandboxes WHERE id=$1`, [id]);
   return r.rows[0] ?? null;
 }
 
-export async function list(opts: { includeDestroyed?: boolean } = {}): Promise<SandboxRow[]> {
-  const r = await pool.query<SandboxRow>(
-    opts.includeDestroyed ? `SELECT * FROM sandboxes ORDER BY created_at DESC` : `SELECT * FROM sandboxes WHERE status <> 'destroyed' ORDER BY created_at DESC`,
-  );
+export async function list(opts: { includeDestroyed?: boolean; owner?: string } = {}): Promise<SandboxRow[]> {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (!opts.includeDestroyed) where.push(`status <> 'destroyed'`);
+  if (opts.owner) { params.push(opts.owner); where.push(`owner_id=$${params.length}`); }
+  const r = await pool.query<SandboxRow>(`SELECT * FROM sandboxes${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC`, params);
   return r.rows;
 }
 

@@ -62,7 +62,7 @@ export class SandboxManager {
       if (await provider.connectContainer(sibling.container_ref).catch(() => false)) { containerRef = sibling.container_ref; origin = "shared"; }
     }
     const id = newId("sbx");
-    await this.store.insert({ id, provider: name, status: "busy", workspace_id: req.workspaceId, affinity: req.affinity ?? null, external_ref: null, container_key: containerKey, container_ref: containerRef, workdir: null });
+    await this.store.insert({ id, owner_id: req.owner_id ?? null, provider: name, status: "busy", workspace_id: req.workspaceId, affinity: req.affinity ?? null, external_ref: null, container_key: containerKey, container_ref: containerRef, workdir: null });
     try {
       if (!containerRef) containerRef = await provider.openContainer(id, req);
       const handle = await provider.addMount(containerRef, id, req.workspaceRef);

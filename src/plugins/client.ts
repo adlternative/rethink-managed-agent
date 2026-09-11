@@ -18,8 +18,8 @@ export interface Capabilities {
   sandboxRead(p: string, env?: string): Promise<string>;
   sandboxWrite(p: string, content: string, env?: string): Promise<void>;
   sandboxEnvs(): string[];
-  storeGet(key: string, scope: "agent" | "workspace"): Promise<unknown>;
-  storeSet(key: string, scope: "agent" | "workspace", value: unknown): Promise<void>;
+  storeGet(key: string, scope: "agent" | "workspace" | "principal"): Promise<unknown>;
+  storeSet(key: string, scope: "agent" | "workspace" | "principal", value: unknown): Promise<void>;
   modelComplete(prompt: string, opts: { system?: string; maxTokens?: number }): Promise<string>;
   agentRun(task: string, opts: { system?: string; maxTurns?: number; tools?: string[]; isolated?: boolean; env?: string }): Promise<string | { report: string; patch?: string; sessionId: string }>;
   fetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; body: string }>;

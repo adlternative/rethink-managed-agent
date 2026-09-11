@@ -86,9 +86,9 @@ export interface SandboxCapability {
   envs(): Promise<string[]>;
 }
 export interface StoreCapability {
-  /** Per-agent (or per-workspace with scope "workspace") JSON document store, persisted in Postgres. */
-  get<T = unknown>(key: string, scope?: "agent" | "workspace"): Promise<T | null>;
-  set(key: string, value: unknown, scope?: "agent" | "workspace"): Promise<void>;
+  /** JSON document store, persisted in Postgres, scoped per agent (default), per workspace, or per principal (tenant-wide). */
+  get<T = unknown>(key: string, scope?: "agent" | "workspace" | "principal"): Promise<T | null>;
+  set(key: string, value: unknown, scope?: "agent" | "workspace" | "principal"): Promise<void>;
 }
 export interface ModelCapability {
   /** One-shot completion with the session's model (no tools). */
