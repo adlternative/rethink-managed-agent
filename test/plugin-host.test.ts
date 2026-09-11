@@ -133,6 +133,22 @@ describe("plugin host", () => {
   });
 });
 
+describe("tool_result structured content", () => {
+  it("passes blocks through, preserves images, and composes as middleware", async () => {
+    const h = await PluginHost.start([pkg(path.join(ROOT, "test/fixtures/pma-toolresult"))], { agentId: "agent_tr", repoRoot: ROOT });
+    h.attach(session, caps);
+    const r = await h.emit(session, {
+      type: "tool_result", toolName: "bash", toolCallId: "t1", input: {},
+      content: [{ type: "text", text: "the SECRET is 42" }, { type: "image", data: "AAAA", mimeType: "image/png" }], isError: false,
+    }) as { content: any[] };
+    const text = r.content.filter((b) => b.type === "text").map((b) => b.text);
+    expect(text[0]).toBe("the [redacted] is 42");            // handler A rewrote the text block
+    expect(r.content.some((b) => b.type === "image" && b.data === "AAAA")).toBe(true); // image survived untouched
+    expect(text).toContain("seen:the [redacted] is 42");     // handler B saw A's edit (chaining)
+    h.stop();
+  }, 30_000);
+});
+
 describe("starter template", () => {
   it("loads and registers a tool, a command, and hooks", async () => {
     const h = await PluginHost.start([pkg(path.join(ROOT, "plugins/_template"))], { agentId: "agent_tpl", repoRoot: ROOT });

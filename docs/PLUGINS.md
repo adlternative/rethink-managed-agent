@@ -39,7 +39,7 @@ export default function (p: PluginAPI) {
 | `model_request_start` / `model_request_end` | around each provider call; end carries usage | — |
 | `message_end` | the assistant produced a message: text, thinking, tool calls | — |
 | `tool_call` | before a tool runs | `{block, reason}` · `{input}` rewrite |
-| `tool_result` | after a tool ran | `{content, isError}` rewrite |
+| `tool_result` | after a tool ran | `{content, isError}` rewrite — `content` is `ToolResultContent[]` (text + inline-image blocks); composes as middleware |
 | `turn_start` / `turn_end` | per model turn; end carries `toolCalls` | `turn_end`: `{stop, reason}` |
 | `before_compact` / `after_compact` | around context compaction | `before`: `{cancel}` · `{instructions}` steer the summarizer · **override:** `{summary}` replace it, `{keepRecentTokens}` change the keep budget |
 | `sandbox_acquired` / `sandbox_released` / `workspace_captured` | sandbox lifecycle | — |

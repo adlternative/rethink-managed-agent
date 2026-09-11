@@ -65,6 +65,7 @@ const rpc = new Rpc(
           }
           if (p.event.type === "input" && typeof r.text === "string") event = { ...event, text: r.text };
           if (p.event.type === "tool_call" && r.input !== undefined) event = { ...event, input: r.input };
+          if (p.event.type === "tool_result") { if (r.content !== undefined) event = { ...event, content: r.content }; if (r.isError !== undefined) event = { ...event, isError: r.isError }; }
           // decisions that later handlers cannot undo
           if ((p.event.type === "tool_call" && r.block) || (p.event.type === "input" && r.cancel) || (p.event.type === "before_compact" && r.cancel) || (p.event.type === "turn_end" && r.stop)) break;
         }

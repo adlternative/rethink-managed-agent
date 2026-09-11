@@ -57,8 +57,9 @@ export async function piCompatFactory(factory: (pi: Any) => unknown, api: Plugin
           return r?.block ? { block: true, reason: r.reason } : undefined;
         }
         if (ours === "tool_result") {
-          const r = await handler({ type: "tool_result", toolName: ev.toolName, toolCallId: ev.toolCallId, input: ev.input, content: [{ type: "text", text: ev.content }], isError: ev.isError }, piCtx(ctx));
-          if (r?.content) return { content: r.content.filter((c: Any) => c.type === "text").map((c: Any) => c.text).join(""), isError: r.isError };
+          // pma and pi both use (TextContent | ImageContent)[] here, so the content passes through as-is.
+          const r = await handler({ type: "tool_result", toolName: ev.toolName, toolCallId: ev.toolCallId, input: ev.input, content: ev.content, isError: ev.isError }, piCtx(ctx));
+          if (r && (r.content !== undefined || r.isError !== undefined)) return { content: r.content, isError: r.isError };
           return undefined;
         }
         if (ours === "context") {

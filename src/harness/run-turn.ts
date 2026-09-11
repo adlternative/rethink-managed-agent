@@ -647,9 +647,11 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         return undefined;
       },
       afterToolCall: async ({ toolCall, args, result, isError }) => {
-        const r = await host?.emit(info, { type: "tool_result", toolName: toolCall.name, toolCallId: toolCall.id, input: args, content: blocksText(result.content), isError });
+        // The hook sees and may rewrite the full structured result (text + inline image blocks), not
+        // a flattened string; text round-trips into the persisted event, images reach the model.
+        const r = await host?.emit(info, { type: "tool_result", toolName: toolCall.name, toolCallId: toolCall.id, input: args, content: result.content, isError });
         if (!r || (r.content === undefined && r.isError === undefined)) return undefined;
-        return { content: r.content !== undefined ? [{ type: "text", text: r.content }] : undefined, isError: r.isError };
+        return { content: r.content, isError: r.isError };
       },
       prepareNextTurn: async ({ context: c }) => {
         const compacted = await maybeCompact(c.messages);

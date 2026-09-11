@@ -41,8 +41,17 @@ export interface ModelRequestEndEvent { type: "model_request_end"; model: string
 export interface MessageEndEvent { type: "message_end"; text: string; thinking?: string; toolCalls: { id: string; name: string; input: unknown }[]; stopReason: string }
 export interface ToolCallEvent { type: "tool_call"; toolName: string; input: unknown; toolCallId: string }
 export interface ToolCallResult { block?: boolean; reason?: string; /** replace the arguments the tool runs with */ input?: unknown }
-export interface ToolResultEvent { type: "tool_result"; toolName: string; input: unknown; toolCallId: string; content: string; isError: boolean }
-export interface ToolResultResult { content?: string; isError?: boolean }
+/**
+ * A tool-result content block, aligned with what the model exchanges: text, or an inline image
+ * (base64). tool_result is a middleware hook — handlers see the content as rewritten by earlier ones
+ * and may rewrite it again, so a plugin can redact, annotate, or transform a structured result
+ * (multiple blocks, an image) rather than a flattened string. Text round-trips fully, including into
+ * the persisted event log; an inline image reaches the model but is not persisted in the log (the
+ * event `ContentBlock` has no inline-image form) — upload it via the Files API if it must persist.
+ */
+export type ToolResultContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+export interface ToolResultEvent { type: "tool_result"; toolName: string; input: unknown; toolCallId: string; content: ToolResultContent[]; isError: boolean }
+export interface ToolResultResult { content?: ToolResultContent[]; isError?: boolean }
 export interface TurnEvent { type: "turn_start" | "turn_end"; turn: number; /** turn_end only */ toolCalls?: number }
 export interface TurnEndResult { /** stop the run after this turn */ stop?: boolean; reason?: string }
 export interface SessionEvent { type: "session_start" | "session_end"; sessionId: string; stopReason?: string; turns?: number }
