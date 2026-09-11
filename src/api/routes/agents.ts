@@ -3,6 +3,7 @@ import { repos } from "../../infra/db.ts";
 import type { BuiltinToolName, ModelRef } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
 import { validateSkillRefs } from "./skills.ts";
+import { scope, ownerId } from "../auth.ts";
 
 const TOOLS: BuiltinToolName[] = ["bash", "read", "write", "edit"];
 
@@ -37,6 +38,7 @@ export const agents = new Hono()
     const body = await readJson<{ name?: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown }>(c);
     if (!body.name) throw invalid("name is required");
     const agent = await repos.agents.create({
+      owner_id: ownerId(c),
       name: body.name,
       model: validateModel(body.model),
       system: body.system ?? null,
@@ -56,13 +58,13 @@ export const agents = new Hono()
     if (body.tools !== undefined) patch.tools = validateTools(body.tools);
     if (body.packages !== undefined) patch.packages = validatePackages(body.packages);
     if (body.skills !== undefined) patch.skills = validateSkillRefs(body.skills);
-    const a = await repos.agents.update(c.req.param("id"), patch);
+    const a = await repos.agents.update(c.req.param("id"), patch, scope(c));
     if (!a) throw notFound("agent", c.req.param("id"));
     return c.json(a);
   })
-  .get("/", async (c) => c.json({ data: await repos.agents.list() }))
+  .get("/", async (c) => c.json({ data: await repos.agents.list(scope(c)) }))
   .get("/:id", async (c) => {
-    const a = await repos.agents.get(c.req.param("id"));
+    const a = await repos.agents.get(c.req.param("id"), scope(c));
     if (!a) throw notFound("agent", c.req.param("id"));
     return c.json(a);
   });

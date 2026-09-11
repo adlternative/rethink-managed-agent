@@ -38,6 +38,10 @@ export const env = {
   PI_AGENT_ROOT: process.env.PI_AGENT_ROOT ?? "./data/pi-agents",
   /** Hostnames plugins may fetch through ctx.fetch ("*" = any). Empty denies all. */
   PLUGIN_FETCH_ALLOW: process.env.PLUGIN_FETCH_ALLOW ?? "*",
+  /** When true the API rejects requests without a valid bearer token; when false, unauthenticated requests act as PMA_DEFAULT_PRINCIPAL. */
+  AUTH_REQUIRED: (process.env.AUTH_REQUIRED ?? "false") === "true",
+  /** The principal unauthenticated (dev) requests act as. Seeded by the schema. */
+  PMA_DEFAULT_PRINCIPAL: process.env.PMA_DEFAULT_PRINCIPAL ?? "prc_local",
   /** Experimental: host pi-coding-agent's AgentSession instead of the pma plugin host. */
   EXPERIMENTAL_PI_PACKAGES: process.env.EXPERIMENTAL_PI_PACKAGES === "1",
   /** Runs a runner handles concurrently (sub-agent sessions need > 1). */

@@ -36,13 +36,29 @@ npm run cli -- send sess_xxx "list the files here and add a README" --wait
 npm run cli -- events sess_xxx
 ```
 
+## Identity & ownership
+
+Every top-level resource belongs to a **principal** — the polymorphic owner (a user today; `kind` extends to `org`/`service`). A request's principal is resolved from `Authorization: Bearer <token>` against `api_keys`; reads and writes are scoped to it, so one principal never sees or edits another's agents, sessions, files, and so on. Sub-sessions and forked workspaces inherit the parent's owner. See DESIGN §15.
+
+Auth is off by default for local use: with `AUTH_REQUIRED=false` an unauthenticated request acts as `PMA_DEFAULT_PRINCIPAL` (the seeded `prc_local`), so nothing needs a token. Set `AUTH_REQUIRED=true` to require a valid key. Mint identities and keys with:
+
+```
+POST /v1/principals   {kind?, handle?, display_name?}     -> a principal (prc_...)
+POST /v1/api_keys     {principal_id?, name?}              -> {token}  (shown once)
+GET  /v1/me                                               -> the calling principal
+```
+
+Then call the API with `Authorization: Bearer pma_...`. The BYOC worker endpoints authenticate with `x-worker-key` instead and bypass principal auth.
+
 ## API
 
-All bodies and responses are JSON. Errors are `{type:"error", error:{type, message}}` with 400/404/500.
+All bodies and responses are JSON. Errors are `{type:"error", error:{type, message}}` with 400/401/404/500. Every `/v1/*` route (except the BYOC worker) runs behind principal auth and is scoped to the caller.
 
 | Method | Path | Body / query | Notes |
 |---|---|---|---|
 | GET | `/healthz` | | `{ok:true}` |
+| GET | `/v1/me` | | the authenticated principal |
+| POST | `/v1/principals`, `/v1/api_keys` | | mint a principal / a bearer token (token shown once) |
 | POST | `/v1/agents` | `{name, model:{provider,id}, system?, tools?}` | `tools` defaults to all four builtins |
 | GET | `/v1/agents`, `/v1/agents/:id` | | |
 | POST | `/v1/environments` | `{name, provider:"local"\|"docker"\|"e2b", image?, workspace?}` | `workspace` is the default `WorkspaceSpec`: `{kind:"empty"}` (default), `{kind:"git", remote, ref?}`, `{kind:"local", path}` |
@@ -135,6 +151,8 @@ Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sand
 | Variable | Default | Meaning |
 |---|---|---|
 | `DATABASE_URL` | `postgres://pi:pi@localhost:5432/pi` | Postgres (PolarDB-PG is wire compatible) |
+| `AUTH_REQUIRED` | `false` | Require a valid `Authorization: Bearer` key on `/v1/*`; when false, unauthenticated requests act as `PMA_DEFAULT_PRINCIPAL` |
+| `PMA_DEFAULT_PRINCIPAL` | `prc_local` | Principal that unauthenticated (dev) requests act as; seeded by the schema |
 | `REDIS_URL` | `redis://localhost:6379` | Queue, pub/sub, steering lists |
 | `QODER_BASE_URL` | `http://127.0.0.1:4141/v1` | OpenAI-compatible proxy for the `qoder` provider |
 | `QODER_API_KEY` | `qoder` | Bearer token sent to the proxy; the proxy ignores it but pi-ai refuses to send requests without one |

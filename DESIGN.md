@@ -313,3 +313,19 @@ busy ──release──► ready ──idle > SANDBOX_IDLE_TTL_MS──► paus
 | agent types / frontmatter | `plugins/team` 的角色（store 里可改） |
 
 核心只加了 `ctx.agents.*` 六个能力和一个内置工具，事件对齐 Managed Agents 的 `session.thread_created`、`agent.thread_message_sent/received`。团队与工作流本身全是插件。
+
+## 15. Principal 与归属（多租户 phase 1）
+
+不引入 `user_id`，而是一个多态主体 `principals(id, kind, ...)`：用户、组织、服务账号都是它的一种 `kind`。每个顶层资源（agents / environments / workspaces / providers / files / skills / memory_stores / sessions）加一列 `owner_id → principals(id)`。今天 `owner_id` 一律指向 `kind='user'` 的主体;将来指向 `kind='org'` 即可，资源表一列都不用改——扩展到组织是加行加表，不是全表迁移。
+
+- **actor 与 owner 分离**：actor 是认证后的调用方(一个 principal);owner scope 是资源归属的边界。phase 1 里 owner == actor;有组织后由 `X-Org` 头选定、经 membership 校验后换成 org 主体。
+- **认证**：`api_keys(token_sha256 → principal)`,`Authorization: Bearer <token>`。`AUTH_REQUIRED=false`(默认)时无 token 回落到 `PMA_DEFAULT_PRINCIPAL`(即 schema 里种子的 `prc_local`),单机流程零改动;`=true` 时强制校验。BYOC worker 走 `x-worker-key`,不经主体认证。
+- **归属贯穿**：API 中间件把 `{actor, owner}` 放进 context;create 路由 stamp `owner_id`,list/get/update/delete 传入 owner scope 后加 `WHERE owner_id=$n`,集中在 `src/infra/db.ts` 的 repo 里。runner / harness 以系统身份读(不带 scope),因为它要处理任意 owner 的会话;子 session 和 fork 的 workspace 继承父的 `owner_id`。
+- **授权 seam**：留一个函数式判断点,phase 1 就是 `resource.owner_id === actor.id`;有组织后换成"actor 是该 org 成员且角色允许",调用点不变。
+
+**扩展到组织(增量)**:加 `principals` 里 `kind='org'` 的行 + `memberships(member_id, org_id, role)` + `X-Org` 解析,资源表和 repo 逻辑不动。
+
+**phase 1 已知边界(留给 phase 2)**:
+- provider id 是全局主键,跨 owner 同名会 409(providers 偏基础设施,BYOK 密钥按行封存)。
+- `sandboxes` 运维列表尚未按 owner 过滤(沙箱归属经 workspace/session 间接成立);container_key / plugin_store / fetch 白名单按 owner 收口在 phase 2。
+- `AUTH_REQUIRED=true` 下的 API key 铸造仍对已认证 actor 开放,真实部署应再加 admin 门槛。

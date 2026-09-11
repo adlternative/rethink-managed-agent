@@ -75,7 +75,7 @@ async function forkWorkspace(parentWorkspaceId: string) {
   const parent = await repos.workspaces.get(parentWorkspaceId);
   if (!parent) throw new Error(`workspace ${parentWorkspaceId} not found`);
   if (parent.ref.kind === "local") throw new Error("local workspaces cannot be forked");
-  const child = await repos.workspaces.create(parent.spec, parent.ref);
+  const child = await repos.workspaces.create(parent.spec, parent.ref, parent.owner_id);
   if (parent.ref.kind === "dir") {
     const dest = path.join(workspaceRoot(), child.id);
     await mkdir(dest, { recursive: true });
@@ -95,6 +95,7 @@ const children: ChildSpawn = {
     if (opts.model) agent.model = opts.model;
     if (opts.tools) agent.tools = agent.tools.filter((t) => opts.tools!.includes(t));
     const child = await repos.sessions.create({
+      owner_id: parent.owner_id,
       agent_id: parent.agent_id,
       environment_id: envRow.environment_id,
       workspace_id: ws.id,

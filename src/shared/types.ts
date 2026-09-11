@@ -19,8 +19,19 @@ export interface ModelRef {
   id: string;
 }
 export type BuiltinToolName = "bash" | "read" | "write" | "edit";
+/** The polymorphic owner/actor. A user, org, or service account are all principals. */
+export interface Principal {
+  id: string;              // "prc_..."
+  kind: "user" | "org" | "service";
+  handle: string | null;
+  display_name: string;
+  created_at: string;
+}
+
 export interface AgentResource {
   id: AgentId;
+  /** owning principal (user/org/service) */
+  owner_id: string;
   name: string;
   model: ModelRef;
   system: string | null;
@@ -57,6 +68,7 @@ export interface ProviderModel {
 export interface ProviderResource {
   /** stable id used in agent.model.provider, e.g. "qoder", "anthropic", "my-gateway" */
   id: string;
+  owner_id: string;
   name: string;
   api: ProviderApi;
   base_url: string;
@@ -72,6 +84,7 @@ export interface ProviderResource {
 export type SandboxProviderName = "local" | "docker" | "e2b" | "byoc";
 export interface EnvironmentResource {
   id: EnvironmentId;
+  owner_id: string;
   name: string;
   provider: SandboxProviderName;
   /** docker image (docker provider) or e2b template name (e2b provider); ignored by local / byoc */
@@ -111,6 +124,7 @@ export type WorkspaceRef =
 
 export interface WorkspaceResource {
   id: WorkspaceId;
+  owner_id: string;
   spec: WorkspaceSpec;
   ref: WorkspaceRef; // latest captured state
   created_at: string;
@@ -258,6 +272,7 @@ export interface ContextSize {
 }
 export interface SessionResource {
   id: SessionId;
+  owner_id: string;
   agent_id: AgentId;
   /** cumulative token usage across all runs */
   usage: Usage;
@@ -294,6 +309,7 @@ export type ContentBlock =
 /** Files API shape (uploads; bytes live in the blob store, or Postgres when no store is configured). */
 export interface FileResource {
   id: string; // "file_xxx"
+  owner_id: string;
   type: "file";
   filename: string;
   mime_type: string;
@@ -305,6 +321,7 @@ export interface FileResource {
 /** Skills API shape: a custom skill is a SKILL.md (frontmatter name/description) plus optional support files. */
 export interface SkillResource {
   id: string; // "skill_xxx"
+  owner_id: string;
   type: "skill";
   source: "custom";
   display_title: string;
@@ -320,6 +337,7 @@ export type SkillRef = { type: "custom"; skill_id: string; version?: string };
 /** Memory store: a persistent directory mounted into sessions at a mount path; shared across sessions and agents. */
 export interface MemoryStoreResource {
   id: string; // "mem_xxx"
+  owner_id: string;
   type: "memory_store";
   name: string;
   description: string;

@@ -6,6 +6,7 @@ import { repos } from "../../infra/db.ts";
 import { env } from "../../shared/env.ts";
 import type { WorkspaceSpec } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
+import { scope, ownerId } from "../auth.ts";
 
 // These strings end up as git / docker argv on the runner host, so they are validated at the edge
 // (and re-checked in workspace.ts / docker.ts). Remote: network URL forms only, never a host path
@@ -56,6 +57,7 @@ export const environments = new Hono()
     if (body.provider !== "local" && body.provider !== "docker" && body.provider !== "e2b" && body.provider !== "byoc") throw invalid("provider must be 'local' | 'docker' | 'e2b' | 'byoc'");
     if (body.provider === "byoc" && body.plugin_host === "sandbox") throw invalid("plugin_host 'sandbox' is not available for byoc yet");
     const env = await repos.environments.create({
+      owner_id: ownerId(c),
       name: body.name,
       provider: body.provider,
       image: validateImage(body.image),
@@ -67,10 +69,10 @@ export const environments = new Hono()
     });
     return c.json(env, 201);
   })
-  .get("/", async (c) => c.json({ data: (await repos.environments.list()).map(mask) }))
+  .get("/", async (c) => c.json({ data: (await repos.environments.list(scope(c))).map(mask) }))
   .route("/:id/worker", worker)
   .get("/:id", async (c) => {
-    const e = await repos.environments.get(c.req.param("id"));
+    const e = await repos.environments.get(c.req.param("id"), scope(c));
     if (!e) throw notFound("environment", c.req.param("id"));
     return c.json(mask(e));
   });

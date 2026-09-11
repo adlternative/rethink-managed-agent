@@ -5,11 +5,12 @@ import { defaultProviders } from "../../harness/models.ts";
 import { seal, secretsConfigured } from "../../infra/secrets.ts";
 import type { ProviderApi, ProviderAuth, ProviderModel, ProviderResource } from "../../shared/types.ts";
 import { ApiError, invalid, notFound, readJson } from "../errors.ts";
+import { scope, ownerId } from "../auth.ts";
 
 const APIS: ProviderApi[] = ["openai-completions", "openai-responses", "anthropic-messages"];
 const ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 
-function validate(body: Record<string, unknown>, existing?: ProviderResource): Omit<ProviderResource, "created_at" | "updated_at"> {
+function validate(body: Record<string, unknown>, owner: string, existing?: ProviderResource): Omit<ProviderResource, "created_at" | "updated_at"> {
   const id = (body.id ?? existing?.id) as string | undefined;
   if (!id || !ID_RE.test(id)) throw invalid(`id must match ${ID_RE}`);
   const api = (body.api ?? existing?.api) as ProviderApi | undefined;
@@ -32,7 +33,7 @@ function validate(body: Record<string, unknown>, existing?: ProviderResource): O
   if (!Array.isArray(models) || models.some((m) => !m || typeof m.id !== "string" || typeof m.context_window !== "number")) throw invalid("models must be [{id, context_window, ...}]");
   const headers = (body.headers ?? existing?.headers ?? {}) as Record<string, string>;
   if (typeof headers !== "object" || Object.values(headers).some((v) => typeof v !== "string")) throw invalid("headers must be a string map");
-  return { id, name: String(body.name ?? existing?.name ?? id), api, base_url, headers, auth, models, enabled: (body.enabled ?? existing?.enabled ?? true) as boolean };
+  return { id, owner_id: existing?.owner_id ?? owner, name: String(body.name ?? existing?.name ?? id), api, base_url, headers, auth, models, enabled: (body.enabled ?? existing?.enabled ?? true) as boolean };
 }
 
 /** First start: seed the built-in definitions so existing agents (model qoder/…) keep working. */
@@ -47,30 +48,30 @@ export async function seedProviders(): Promise<void> {
 const mask = (p: ProviderResource): ProviderResource => (p.auth.type === "encrypted" ? { ...p, auth: { type: "encrypted", v: 1, iv: "", ct: "", tag: "" } } : p);
 
 export const providers = new Hono()
-  .get("/", async (c) => c.json({ data: (await repos.providers.list()).map(mask) }))
+  .get("/", async (c) => c.json({ data: (await repos.providers.list(scope(c))).map(mask) }))
   .get("/:id", async (c) => {
-    const p = await repos.providers.get(c.req.param("id"));
+    const p = await repos.providers.get(c.req.param("id"), scope(c));
     if (!p) throw notFound("provider", c.req.param("id"));
     return c.json(mask(p));
   })
   .post("/", async (c) => {
     const body = await readJson<Record<string, unknown>>(c);
-    if (typeof body.id === "string" && (await repos.providers.get(body.id))) throw new ApiError(409, "already_exists", `provider ${body.id} exists; use PATCH`);
-    const p = await repos.providers.upsert(validate(body));
+    if (typeof body.id === "string" && (await repos.providers.get(body.id))) throw new ApiError(409, "already_exists", `provider ${body.id} exists; use PATCH`); // global id namespace
+    const p = await repos.providers.upsert(validate(body, ownerId(c)));
     await publishProvidersChanged();
     return c.json(mask(p), 201);
   })
   .patch("/:id", async (c) => {
-    const existing = await repos.providers.get(c.req.param("id"));
+    const existing = await repos.providers.get(c.req.param("id"), scope(c));
     if (!existing) throw notFound("provider", c.req.param("id"));
     const body = await readJson<Record<string, unknown>>(c);
     delete body.id;
-    const p = await repos.providers.upsert(validate(body, existing));
+    const p = await repos.providers.upsert(validate(body, ownerId(c), existing));
     await publishProvidersChanged();
     return c.json(mask(p));
   })
   .delete("/:id", async (c) => {
-    if (!(await repos.providers.delete(c.req.param("id")))) throw notFound("provider", c.req.param("id"));
+    if (!(await repos.providers.delete(c.req.param("id"), scope(c)))) throw notFound("provider", c.req.param("id"));
     await publishProvidersChanged();
     return c.json({ id: c.req.param("id"), deleted: true });
   });

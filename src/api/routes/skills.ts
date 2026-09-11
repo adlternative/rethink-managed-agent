@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { skills } from "../../infra/db.ts";
 import type { SkillRef } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
+import { scope, ownerId } from "../auth.ts";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
@@ -49,20 +50,20 @@ async function fromRequest(c: { req: { header(n: string): string | undefined; fo
 }
 
 export const skillsRoute = new Hono()
-  .post("/", async (c) => c.json(await skills.upsert(await fromRequest(c)), 201))
-  .get("/", async (c) => { const data = await skills.list(); return c.json({ data, has_more: false }); })
+  .post("/", async (c) => c.json(await skills.upsert({ owner_id: ownerId(c), ...(await fromRequest(c)) }), 201))
+  .get("/", async (c) => { const data = await skills.list(scope(c)); return c.json({ data, has_more: false }); })
   .get("/:id", async (c) => {
-    const s = await skills.get(c.req.param("id"));
+    const s = await skills.get(c.req.param("id"), scope(c));
     if (!s) throw notFound("skill", c.req.param("id"));
     return c.json(s);
   })
   .post("/:id/versions", async (c) => {
     // a new version replaces the content; latest_version increments
-    const existing = await skills.get(c.req.param("id"));
+    const existing = await skills.get(c.req.param("id"), scope(c));
     if (!existing) throw notFound("skill", c.req.param("id"));
-    return c.json(await skills.upsert({ id: existing.id, ...(await fromRequest(c, existing)) }), 201);
+    return c.json(await skills.upsert({ id: existing.id, owner_id: existing.owner_id, ...(await fromRequest(c, existing)) }), 201);
   })
   .delete("/:id", async (c) => {
-    if (!(await skills.delete(c.req.param("id")))) throw notFound("skill", c.req.param("id"));
+    if (!(await skills.delete(c.req.param("id"), scope(c)))) throw notFound("skill", c.req.param("id"));
     return c.json({ id: c.req.param("id"), type: "skill_deleted" });
   });

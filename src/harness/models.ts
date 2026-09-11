@@ -21,6 +21,7 @@ export function defaultProviders(): Omit<ProviderResource, "created_at" | "updat
   const ids = ["auto", "ultimate", "performance", "efficient", "lite", "cmodel", "kmodel", "gmodel", "qmodel"];
   const out: Omit<ProviderResource, "created_at" | "updated_at">[] = [{
     id: "qoder",
+    owner_id: "prc_local",
     name: "Qoder (local OpenAI-compatible proxy)",
     api: "openai-completions",
     base_url: env.QODER_BASE_URL,
@@ -33,6 +34,7 @@ export function defaultProviders(): Omit<ProviderResource, "created_at" | "updat
   if (env.ANTHROPIC_API_KEY) {
     out.push({
       id: "anthropic",
+      owner_id: "prc_local",
       name: "Anthropic",
       api: "anthropic-messages",
       base_url: "https://api.anthropic.com",

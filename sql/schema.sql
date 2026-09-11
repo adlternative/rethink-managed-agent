@@ -141,3 +141,49 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS memory_stores JSONB NOT NULL DEFAU
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_system_prompt TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS container_group TEXT;
 UPDATE sessions SET container_group = id WHERE container_group IS NULL;
+
+-- ============================================================================
+-- Principals & ownership (multi-tenant phase 1)
+-- A principal is the polymorphic owner/actor: a user, an org, or a service are
+-- all principals, so extending to orgs later is new rows + a memberships table,
+-- not a schema-wide migration. Every top-level resource references principals(id).
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS principals (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'user',        -- 'user' | 'org' | 'service'
+  handle TEXT UNIQUE,
+  display_name TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- The built-in local/dev principal that owns everything created before auth existed.
+INSERT INTO principals (id, kind, handle, display_name)
+  VALUES ('prc_local', 'user', 'local', 'Local User') ON CONFLICT (id) DO NOTHING;
+
+-- Bearer tokens (stored as sha256) that authenticate a request as a principal (the actor).
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  token_sha256 TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS api_keys_principal ON api_keys(principal_id);
+
+-- owner_id on every top-level resource. DEFAULT backfills existing rows to prc_local.
+ALTER TABLE agents        ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+ALTER TABLE environments  ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+ALTER TABLE workspaces    ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+ALTER TABLE providers     ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+ALTER TABLE files         ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+ALTER TABLE skills        ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+ALTER TABLE memory_stores ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+ALTER TABLE sessions      ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'prc_local' REFERENCES principals(id);
+CREATE INDEX IF NOT EXISTS agents_owner        ON agents(owner_id);
+CREATE INDEX IF NOT EXISTS environments_owner  ON environments(owner_id);
+CREATE INDEX IF NOT EXISTS workspaces_owner    ON workspaces(owner_id);
+CREATE INDEX IF NOT EXISTS providers_owner     ON providers(owner_id);
+CREATE INDEX IF NOT EXISTS files_owner         ON files(owner_id);
+CREATE INDEX IF NOT EXISTS skills_owner        ON skills(owner_id);
+CREATE INDEX IF NOT EXISTS memory_stores_owner ON memory_stores(owner_id);
+CREATE INDEX IF NOT EXISTS sessions_owner      ON sessions(owner_id);

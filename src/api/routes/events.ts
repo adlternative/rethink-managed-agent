@@ -6,6 +6,8 @@ import { publish, publishInterrupt, pushSteer, subscribe } from "../../infra/pub
 import { enqueueRun } from "../../infra/queue.ts";
 import type { SessionEvent, SessionId, SessionResource, UserEventInput } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
+import { scope } from "../auth.ts";
+import type { Context } from "hono";
 
 export function validateUserEvents(events: unknown): UserEventInput[] {
   if (!Array.isArray(events) || events.length === 0) throw invalid("events must be a non-empty array");
@@ -46,8 +48,9 @@ export async function sendUserEvents(session: SessionResource, inputs: UserEvent
   return appended;
 }
 
-async function getSession(id: SessionId): Promise<SessionResource> {
-  const s = await repos.sessions.get(id);
+async function getSession(c: Context): Promise<SessionResource> {
+  const id = c.req.param("id")! as SessionId;
+  const s = await repos.sessions.get(id, scope(c));
   if (!s) throw notFound("session", id);
   return s;
 }
@@ -56,19 +59,19 @@ const REPLAY_PAGE = 1000;
 
 export const events = new Hono()
   .post("/", async (c) => {
-    const session = await getSession(c.req.param("id")!);
+    const session = await getSession(c);
     const body = await readJson<{ events?: unknown }>(c);
     return c.json({ events: await sendUserEvents(session, validateUserEvents(body.events)) });
   })
   .get("/", async (c) => {
-    const session = await getSession(c.req.param("id")!);
+    const session = await getSession(c);
     const since = Number(c.req.query("since") ?? 0);
     const limit = Math.min(Number(c.req.query("limit") ?? 100), 1000);
     const data = await listEvents(session.id, { since, limit: limit + 1 });
     return c.json({ data: data.slice(0, limit), has_more: data.length > limit });
   })
   .get("/stream", async (c) => {
-    const session = await getSession(c.req.param("id")!);
+    const session = await getSession(c);
     let last = Number(c.req.query("since") ?? 0);
     return streamSSE(c, async (stream) => {
       const send = (event: string, data: unknown) => stream.writeSSE({ event, data: JSON.stringify(data) });
