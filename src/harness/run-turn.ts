@@ -4,6 +4,7 @@ import {
   type AgentContext,
   type AgentEvent,
   type AgentLoopConfig,
+  type AgentLoopTurnUpdate,
   type AgentMessage,
   type AgentTool,
 } from "@earendil-works/pi-agent-core";
@@ -364,7 +365,13 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     let messages = folded.messages;
     let lastSummary = folded.summary;
     consumedSeq = folded.lastSeq;
-    const model = resolveModel(deps.models, session.agent.model);
+    // The active model and tool set for the run. Both start from the agent config and can be
+    // switched mid-run by a plugin (ctx.session.setModel / setActiveTools); the switch takes effect
+    // on the next turn via prepareNextTurn (pi's AgentLoopTurnUpdate). model drives compaction and
+    // the context-window budget too, so switching to a bigger/smaller window is respected.
+    let model = resolveModel(deps.models, session.agent.model);
+    let modelSwitched = false;
+    let activeTools: AgentTool[] = [];
     const compaction = settingsFromEnv();
 
     /** Compact `msgs` if over budget; persists the event and returns the new message list (or the same one). */
@@ -547,12 +554,28 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       agentsList: async () => Promise.all((await deps.children.list(sessionId)).map((c) => childStatus(c.id))),
       agentsPatch: async (child) => { const c = await deps.getSession(child); const ws = c ? await deps.getWorkspace(c.workspace_id) : null; return ws?.ref.kind === "git" ? ws.ref.patch ?? null : null; },
       sessionNote: async (plugin, text) => { await emit({ type: "plugin.message", plugin, content: [{ type: "text", text }] }); },
+      // Mid-run runtime switches (applied on the next turn via prepareNextTurn).
+      sessionSetModel: async (ref) => {
+        const [provider, ...rest] = ref.split("/");
+        if (!provider || rest.length === 0) throw new Error(`model must be "provider/id", got "${ref}"`);
+        model = resolveModel(deps.models, { provider, id: rest.join("/") }); // throws if unknown
+        modelSwitched = true;
+        await emit({ type: "plugin.message", plugin: "runtime", content: [{ type: "text", text: `model switched to ${model.provider}/${model.id}` }] });
+        return { model: `${model.provider}/${model.id}` };
+      },
+      sessionSetActiveTools: async (names) => {
+        const set = new Set(names);
+        activeTools = tools.filter((t) => set.has(t.name)); // unknown names are ignored
+        await emit({ type: "plugin.message", plugin: "runtime", content: [{ type: "text", text: `active tools: ${activeTools.map((t) => t.name).join(", ") || "(none)"}` }] });
+        return { active: activeTools.map((t) => t.name) };
+      },
       sessionSend: async (text) => { await deps.pushSteer(sessionId, text); },
       sessionInterrupt: async () => { stopReason = "interrupted"; abort.abort(); },
     };
     detachPlugins = host?.attach(info, caps) ?? null;
 
     const tools: AgentTool[] = [...builtinTools, ...(host?.agentTools(info) ?? [])];
+    activeTools = tools; // setActiveTools narrows this; prepareNextTurn feeds it to the next turn
     if (session.parent_id) tools.push(reportToParentTool(session.parent_id, emit, () => { stopReason = "end_turn"; abort.abort(); }));
     // Client/function tools (OpenAI Agents API): results supplied by the API caller via tool_result.
     for (const decl of session.agent.client_tools ?? []) {
@@ -656,7 +679,11 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       prepareNextTurn: async ({ context: c }) => {
         const compacted = await maybeCompact(c.messages);
         const systemPrompt = host?.hooks.has("context") ? await systemPromptFor(compacted) : c.systemPrompt;
-        return compacted !== c.messages || systemPrompt !== c.systemPrompt ? { context: { ...c, messages: compacted, systemPrompt } } : undefined;
+        const contextChanged = compacted !== c.messages || systemPrompt !== c.systemPrompt || activeTools !== c.tools;
+        const update: AgentLoopTurnUpdate = {};
+        if (contextChanged) update.context = { ...c, messages: compacted, systemPrompt, tools: activeTools };
+        if (modelSwitched) update.model = model; // switched by ctx.session.setModel; drives the next request
+        return update.context || update.model ? update : undefined;
       },
       shouldStopAfterTurn: async ({ toolResults }) => {
         turns++;

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "rethink-managed-agent 架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main-path",
+        "label": "主路径：请求到执行",
+        "focus": ["clients", "api", "redis", "runner", "sandbox_mgr", "providers"],
+        "note": "用户消息经 API 入队 → Runner 领取 → 工具在租来的 Sandbox 里执行"
+      },
+      {
+        "id": "truth",
+        "label": "状态：事件即真相",
+        "focus": ["api", "pg", "runner"],
+        "note": "session 状态 = fold(events)；events 表是唯一真相，没有 messages 表"
+      },
+      {
+        "id": "extensibility",
+        "label": "扩展：插件与 BYOC",
+        "focus": ["runner", "plugin_host", "providers", "byoc_worker", "model_api"],
+        "note": "插件跑在 runner 或沙箱内；BYOC worker 自托管执行，模型走 provider 表"
+      }
+    ]
+  },
+  "components": [
+    { "id": "clients",      "type": "external",  "label": "客户端",            "sublabel": "CLI · Dashboard · curl", "pos": [110, 80],  "size": [170, 60] },
+    { "id": "api",          "type": "backend",   "label": "API 服务器",        "sublabel": "Hono :8080 · /v1 + /agents-api", "pos": [430, 80],  "size": [200, 70], "tag": "Auth · Principal 隔离" },
+    { "id": "s3",           "type": "cloud",     "label": "MinIO / S3",        "sublabel": "files · skills · blobs", "pos": [760, 80],  "size": [190, 64] },
+    { "id": "pg",           "type": "database",  "label": "PostgreSQL",        "sublabel": "events · sessions", "pos": [110, 330], "size": [190, 64] },
+    { "id": "redis",        "type": "messagebus","label": "Redis",             "sublabel": "runs 队列 · pub/sub · steer", "pos": [760, 330], "size": [190, 64] },
+    { "id": "plugin_host",  "type": "backend",   "label": "Plugin Host",       "sublabel": "14 个内置插件", "pos": [110, 570], "size": [190, 64] },
+    { "id": "runner",       "type": "backend",   "label": "Runner",            "sublabel": "pi loop · harness", "pos": [430, 570], "size": [200, 70], "tag": "fold · tools · compaction" },
+    { "id": "model_api",    "type": "external",  "label": "模型 API",          "sublabel": "Qoder · Anthropic · OpenAI", "pos": [760, 570], "size": [190, 64] },
+    { "id": "sandbox_mgr",  "type": "backend",   "label": "Sandbox Manager",   "sublabel": "租约 · 亲和复用 · 回收", "pos": [430, 760], "size": [200, 64] },
+    { "id": "providers",    "type": "backend",   "label": "Sandbox 提供者",    "sublabel": "local · docker · e2b", "pos": [760, 760], "size": [190, 64] },
+    { "id": "byoc_worker",  "type": "external",  "label": "BYOC 工作节点",     "sublabel": "自托管 Worker", "pos": [760, 920], "size": [190, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "自托管部署（可换模型 / 可换沙箱）", "wraps": ["api", "pg", "redis", "s3", "plugin_host", "runner", "sandbox_mgr", "providers"] }
+  ],
+  "connections": [
+    { "id": "clients-api",    "from": "clients",     "to": "api",         "label": "REST /v1", "variant": "emphasis", "fromSide": "right",  "toSide": "left" },
+    { "id": "api-s3",         "from": "api",         "to": "s3",          "label": "文件读写", "fromSide": "right",  "toSide": "left" },
+    { "id": "api-enqueue",    "from": "api",         "to": "redis",       "label": "入队 RunJob", "variant": "emphasis", "fromSide": "bottom", "toSide": "left" },
+    { "id": "api-events",     "from": "api",         "to": "pg",          "label": "追加 / 读取事件", "fromSide": "bottom", "toSide": "top" },
+    { "id": "redis-runner",   "from": "redis",       "to": "runner",      "label": "消费 RunJob", "variant": "emphasis", "fromSide": "bottom", "toSide": "top" },
+    { "id": "runner-pg",      "from": "runner",      "to": "pg",          "label": "fold · 追加事件", "fromSide": "left",   "toSide": "right" },
+    { "id": "runner-plugin",  "from": "runner",      "to": "plugin_host", "label": "hooks · tools", "fromSide": "left",   "toSide": "right" },
+    { "id": "runner-model",   "from": "runner",      "to": "model_api",   "label": "LLM 调用", "fromSide": "right",  "toSide": "left" },
+    { "id": "runner-sbx",     "from": "runner",      "to": "sandbox_mgr", "label": "acquire / capture", "fromSide": "bottom", "toSide": "top" },
+    { "id": "sbx-providers",  "from": "sandbox_mgr", "to": "providers",   "label": "dispatch", "fromSide": "right",  "toSide": "left" },
+    { "id": "providers-byoc", "from": "providers",   "to": "byoc_worker", "label": "worker 传输", "variant": "dashed", "fromSide": "bottom", "toSide": "top" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "主路径", "items": ["客户端 → API：追加用户事件并读取 session 状态", "API → Redis：空闲会话入队 RunJob；运行中消息转为 steer", "Redis → Runner → 沙箱：工具只依赖 ctx.sandbox()，不关心底层实现", "结束：capture 工作区 → 释放租约 → session.status_idle"] },
+    { "dot": "emerald", "title": "唯一真相", "items": ["events 表 append-only；session 状态 = fold(events)", "sandbox 从不写进 session 行：只有事件 + sandboxes 租约表", "SSE 从 DB 回放后订阅 Redis pub/sub 增量"] },
+    { "dot": "violet", "title": "沙箱即租约", "items": ["三个独立生命周期：session（天）/ workspace（跨会话）/ sandbox（分钟级可丢弃）", "provider 按 affinity 复用或重建工作区；reaper 暂停空闲沙箱", "local 仅开发用；docker/e2b 隔离；byoc worker 自托管执行"] },
+    { "dot": "amber", "title": "扩展与兼容", "items": ["OpenAI Agents API 兼容层：/agents-api/v1 适配到原生引擎", "Plugin Host 运行 14 个插件（checkpoint、web-search、workflow…）", "模型是 providers 表的一行：BYOK，可换任意 OpenAI / Anthropic 兼容端点"] }
+  ]
+}

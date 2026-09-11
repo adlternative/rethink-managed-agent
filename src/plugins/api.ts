@@ -177,6 +177,10 @@ export interface SessionCapability {
   send(text: string): Promise<void>;
   /** Interrupt the current run. */
   interrupt(): Promise<void>;
+  /** Switch the model for the rest of the run (takes effect on the next turn). `model` is "provider/id"; throws if unknown. Returns the resolved id. Compaction and the context-window budget follow the new model. */
+  setModel(model: string): Promise<{ model: string }>;
+  /** Restrict the tools exposed to the model for the rest of the run (next turn onward) to `names` (unknown names ignored). Returns the names actually active. Pass every tool name to re-enable all. */
+  setActiveTools(names: string[]): Promise<{ active: string[] }>;
 }
 
 export interface PluginContext {

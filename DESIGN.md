@@ -562,3 +562,9 @@ principled, not incidental:
   - *`sessionManager`, `session_before_switch`/`_fork`/`_tree`, `project_trust`* — interactive
     session-file management; our sessions are event logs managed by the platform, and trust is
     `PLUGIN_ALLOW` governance, not an interactive prompt.
+- **Reworked, not dropped:** mid-run **model and tool-set switching** is a pma-native capability —
+  `ctx.session.setModel("provider/id")` / `ctx.session.setActiveTools(names)`, applied on the next
+  turn via pi's `AgentLoopTurnUpdate` (model, context, tools), with compaction and the context-window
+  budget following the new model. pi's own `setModel` / `setActiveTools` (context-free methods on the
+  API object) are not mapped — like `sendMessage`, they assume a single ambient session the multi-session
+  host does not have; the capability is reached through `ctx.session` instead.

@@ -90,6 +90,8 @@ function makeContext(session: SessionInfo, plugin = "plugin"): PluginContext {
       note: (text) => call("session.note", { plugin, text }).then(() => undefined),
       send: (text) => call("session.send", { text }).then(() => undefined),
       interrupt: () => call("session.interrupt", {}).then(() => undefined),
+      setModel: (model) => call("session.setModel", { model }),
+      setActiveTools: (names) => call("session.setActiveTools", { names }),
     },
     sandbox: {
       exec: (command, opts) => call("sandbox.exec", { command, ...opts }),

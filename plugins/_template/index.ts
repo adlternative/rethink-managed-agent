@@ -13,6 +13,8 @@ import { Type } from "typebox";
  *   ctx.session.note(text)                         leave a note for the user (not seen by the model)
  *   ctx.session.send(text)                         inject a user-role message (steer the run / next run)
  *   ctx.session.interrupt()                        abort the current run
+ *   ctx.session.setModel("provider/id")            switch the model for the rest of the run (next turn)
+ *   ctx.session.setActiveTools(names)              restrict the tools the model sees (next turn)
  *   ctx.sandbox.exec(cmd, {cwd,timeoutMs,env})     run in the sandbox  ── using this makes it a "hands" plugin
  *   ctx.sandbox.readFile(path) / writeFile(p, s)   read/write the workspace
  *   ctx.store.get/set(key, value, scope)           JSON KV; scope = "agent" | "workspace" | "principal"

@@ -68,6 +68,8 @@ model. The handler's `reply` is persisted as `plugin.message` (shown to the user
 | `ctx.session.note(text)` | persist a note for the user (`plugin.message`; not model context) | runner |
 | `ctx.session.send(text)` | queue a user-role message: steers the running turn or starts the next run | runner |
 | `ctx.session.interrupt()` | abort the current run | runner |
+| `ctx.session.setModel("provider/id")` | switch the model for the rest of the run (next turn onward); compaction + context budget follow it | runner |
+| `ctx.session.setActiveTools(names)` | restrict the tools exposed to the model (next turn onward); pass all names to reset | runner |
 | `ctx.sandbox.exec / readFile / writeFile` | the session's sandbox, workspace-confined, lazily leased like the builtin tools | sandbox |
 | `ctx.store.get / set(key, value, "agent" \| "workspace")` | JSON KV in Postgres (`plugin_store`) | runner |
 | `ctx.model.complete(prompt, {system, maxTokens})` | one-shot completion with the session's model | runner |

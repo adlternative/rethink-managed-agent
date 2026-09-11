@@ -32,6 +32,8 @@ const caps: Capabilities = {
   agentsPatch: async () => null,
   sessionSend: async (text) => { calls.push(`send:${text}`); },
   sessionInterrupt: async () => { calls.push("interrupt"); },
+  sessionSetModel: async (model) => { calls.push(`setModel:${model}`); return { model }; },
+  sessionSetActiveTools: async (names) => { calls.push(`setTools:${names.join(",")}`); return { active: names }; },
 };
 
 beforeAll(async () => {
@@ -131,6 +133,19 @@ describe("plugin host", () => {
     expect(skills.map((s) => s.name)).toEqual(["web-research"]);
     expect(skills[0]!.body).toContain("primary sources");
   });
+});
+
+describe("runtime switches (setModel / setActiveTools)", () => {
+  it("routes ctx.session.setModel / setActiveTools through capabilities", async () => {
+    const h = await PluginHost.start([pkg(path.join(ROOT, "test/fixtures/pma-runtime"))], { agentId: "agent_rt", repoRoot: ROOT });
+    h.attach(session, caps);
+    const t = Object.fromEntries(h.agentTools(session).map((x) => [x.name, x]));
+    const r = await t.escalate!.execute("1", { model: "qoder/ultimate", tools: ["bash", "read"] });
+    expect(JSON.parse(r.content[0]!.text)).toEqual({ model: "qoder/ultimate", active: ["bash", "read"] });
+    expect(calls).toContain("setModel:qoder/ultimate");
+    expect(calls).toContain("setTools:bash,read");
+    h.stop();
+  }, 30_000);
 });
 
 describe("tool_result structured content", () => {

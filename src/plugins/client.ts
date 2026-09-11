@@ -36,6 +36,8 @@ export interface Capabilities {
   sessionNote(plugin: string, text: string): Promise<void>;
   sessionSend(text: string): Promise<void>;
   sessionInterrupt(): Promise<void>;
+  sessionSetModel(model: string): Promise<{ model: string }>;
+  sessionSetActiveTools(names: string[]): Promise<{ active: string[] }>;
 }
 export interface LoadedCommand { name: string; description: string; source: string }
 
@@ -175,6 +177,8 @@ export class PluginHost {
       case "session.note": { const p = params as RunnerMethods["session.note"]["params"]; await caps.sessionNote(p.plugin, p.text); return null; }
       case "session.send": await caps.sessionSend((params as RunnerMethods["session.send"]["params"]).text); return null;
       case "session.interrupt": await caps.sessionInterrupt(); return null;
+      case "session.setModel": return caps.sessionSetModel((params as RunnerMethods["session.setModel"]["params"]).model);
+      case "session.setActiveTools": return caps.sessionSetActiveTools((params as RunnerMethods["session.setActiveTools"]["params"]).names);
       default: throw new Error(`unknown capability ${String(method)}`);
     }
   }

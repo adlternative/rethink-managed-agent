@@ -40,6 +40,8 @@ export interface RunnerMethods {
   "session.note": { params: { session: SessionInfo; plugin: string; text: string }; result: null };
   "session.send": { params: { session: SessionInfo; text: string }; result: null };
   "session.interrupt": { params: { session: SessionInfo }; result: null };
+  "session.setModel": { params: { session: SessionInfo; model: string }; result: { model: string } };
+  "session.setActiveTools": { params: { session: SessionInfo; names: string[] }; result: { active: string[] } };
 }
 export interface SessionInfo { sessionId: string; agentId: string; workspaceId: string }
 
