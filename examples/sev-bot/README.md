@@ -19,6 +19,6 @@ make up                      # postgres + redis + api + runner (or run them howe
 npx tsx examples/sev-bot/incident_bot.ts
 ```
 
-Environment overrides: `SEV_API` (default `http://localhost:8080/agents-api/v1`), `SEV_MODEL` (default `qoder/ultimate`, i.e. provider `qoder` id `ultimate`), `SEV_PROVIDER` (sandbox provider for the environment, default `local`), `SEV_TOKEN` (bearer, only if `AUTH_REQUIRED=true`).
+Environment overrides: `SEV_API` (default `http://localhost:8080/agents-api/v1`), `SEV_MODEL` (default `qoder/ultimate`, i.e. provider `qoder` id `ultimate`), `SEV_PROVIDER` (sandbox provider for the environment, default `local`), `SEV_TOKEN` (bearer, only if `AUTH_REQUIRED=true`), `SEV_AUTO_APPROVE` (`approve`/`deny` — set it, or run non-interactively, to decide the rollback without a prompt; unset + a TTY asks).
 
 The bot creates its own environment via the native API, so no pre-config is needed beyond a working model provider. Swap `SEV_MODEL` to point at any OpenAI/Anthropic-compatible provider row — that is the whole "no cloud lock-in" story.

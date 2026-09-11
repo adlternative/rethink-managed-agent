@@ -75,7 +75,16 @@ async function main() {
   });
   console.log(`[sev-bot] session ${session.id}`);
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // Approval gate. Interactive TTY -> ask; non-interactive (piped/CI) or SEV_AUTO_APPROVE set -> decide
+  // from SEV_AUTO_APPROVE (default "approve") without readline, so the demo is runnable unattended.
+  const auto = !process.stdin.isTTY || process.env.SEV_AUTO_APPROVE !== undefined;
+  const autoApprove = (process.env.SEV_AUTO_APPROVE ?? "approve").toLowerCase() !== "deny";
+  const rl = auto ? null : createInterface({ input: process.stdin, output: process.stdout });
+  const ask = async (q: string): Promise<boolean> => {
+    if (auto) { console.log(`${q}${autoApprove ? "y (auto)" : "n (auto)"}`); return autoApprove; }
+    const a = (await rl!.question(q)).trim().toLowerCase();
+    return a === "y" || a === "yes";
+  };
 
   // The read-only tools auto-resolve via `handlers`; propose_rollback has no handler, so it surfaces
   // as action_required while its turn stays open — we approve/deny INLINE and submit tool_result,
@@ -85,14 +94,13 @@ async function main() {
     else if (ev.type === "session.turn.item.added" && ev.function_call) console.log(`\n[tool] ${ev.function_call.name}(${JSON.stringify(ev.function_call.arguments)})`);
     else if (ev.type === "agent.session.action_required" && ev.required_action?.name === "propose_rollback") {
       const ra = ev.required_action;
-      const ans = (await rl.question(`\n[approval] sev-bot proposes rollback ${JSON.stringify(ra.arguments)} — approve? (y/N) `)).trim().toLowerCase();
-      const approved = ans === "y" || ans === "yes";
+      const approved = await ask(`\n[approval] sev-bot proposes rollback ${JSON.stringify(ra.arguments)} — approve? (y/N) `);
       await session.tool_result({ call_id: ra.call_id, turn_id: ra.turn_id, success: true, output: { decision: approved ? "approved" : "denied", executed: false } });
       console.log(`[approval] ${approved ? "approved" : "denied"} — submitted; sev-bot continues.`);
     } else if (ev.type === "agent.session.turn.completed") console.log(`\n[turn completed: ${ev.stop_reason}]`);
   }
 
-  rl.close();
+  rl?.close();
   console.log("\n[sev-bot] done.");
 }
 
