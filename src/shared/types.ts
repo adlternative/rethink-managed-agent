@@ -409,6 +409,8 @@ export type SessionEventPayload =
   | { type: "session.status_idle"; stop_reason: StopReason }
   | { type: "session.status_terminated"; reason?: string }
   | { type: "session.error"; error: { type: string; message: string } }
+  /** A byoc environment has no live worker: the run is paused, awaiting a worker (re)connection. */
+  | { type: "session.environment_disconnected"; environment_id: EnvironmentId }
   /** one model request finished: its usage and the context size it carried */
   | { type: "span.model_request_end"; model: string; usage: Omit<Usage, "requests">; context: ContextSize; stop_reason?: string }
   /** cumulative usage snapshot, emitted when a run ends */

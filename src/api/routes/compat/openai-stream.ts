@@ -65,6 +65,12 @@ export function projectDelta(delta: StreamDelta, session: SessionResource, ctx: 
     case "sandbox.acquired":
       // The session's execution environment is up and connected (a sandbox lease was obtained).
       return [{ type: "agent.session.environment.ready", event_id: evId(), session_id: sid, environment: { id: session.environment_id, status: "ready", error: null } }];
+    case "session.environment_disconnected":
+      // A byoc environment has no worker: the run is paused, awaiting reconnection (requires_action).
+      return [
+        { type: "agent.session.environment.failed", event_id: evId(), session_id: sid, environment: { id: p.environment_id, status: "failed", error: { message: "environment has no connected worker" } } },
+        { type: "agent.session.requires_action", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "requires_action", required_actions: [{ type: "environment_connection", environment_id: p.environment_id }] } },
+      ];
     case "session.error":
       return [{ type: "agent.session.failed", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "failed", error: p.error?.message ?? "session failed" } }];
     default:

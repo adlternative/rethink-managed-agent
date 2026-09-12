@@ -3,6 +3,7 @@ import OpenAI from "openai7";
 import { toAgentSession } from "../src/api/routes/compat/openai-agents.ts";
 import { projectDelta, newTurnCtx } from "../src/api/routes/compat/openai-stream.ts";
 import { toItems, toTurns } from "../src/api/routes/compat/openai-agents.ts";
+import { environmentActions } from "../src/api/routes/compat/required-actions.ts";
 
 /**
  * Contract test against the REAL OpenAI SDK (openai@7.15.0, aliased as `openai7`). We do not boot the
@@ -87,6 +88,20 @@ describe("items & turns projection (phase 1c)", () => {
     const turns = toTurns(session, evlog as any);
     expect(turns).toHaveLength(1);
     expect(turns[0]).toMatchObject({ id: "turn_1", object: "agent.session.turn", status: "completed" });
+  });
+});
+
+describe("environment reconnect (environment_connection required action)", () => {
+  it("derives environment_connection while disconnected, and clears it once a sandbox is acquired", () => {
+    const disc = [{ seq: 1, type: "session.environment_disconnected", payload: { type: "session.environment_disconnected", environment_id: "env_1" } }] as any;
+    expect(environmentActions(disc)).toEqual([{ type: "environment_connection", environment_id: "env_1" }]);
+    // a later session.status_running means the run resumed past the pause -> no longer pending
+    const reconnected = [...disc, { seq: 2, type: "session.status_running", payload: { type: "session.status_running" } }] as any;
+    expect(environmentActions(reconnected)).toEqual([]);
+    // the session projects as requires_action with the environment_connection action
+    const s = toAgentSession(session, disc, "env_1");
+    expect(s.status).toBe("requires_action");
+    expect(s.required_actions).toContainEqual({ type: "environment_connection", environment_id: "env_1" });
   });
 });
 

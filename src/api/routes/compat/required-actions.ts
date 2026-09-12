@@ -32,6 +32,27 @@ export function clientToolNames(session: SessionResource): string[] {
   return (session.agent.client_tools ?? []).map((t) => t.name);
 }
 
+/** A pending environment-reconnection required action (SDK `environment_connection`). */
+export interface EnvironmentAction {
+  type: "environment_connection";
+  environment_id: string;
+}
+
+/**
+ * Environment reconnection is pending when the latest environment signal is a disconnect with no
+ * later run progress: a `session.environment_disconnected` after which no `session.status_running`
+ * (the run resumed past the pause) appeared. The pause is emitted *instead of* running, so a later
+ * run-start means the worker reconnected and the run proceeded. Derived purely from the log.
+ */
+export function environmentActions(events: SessionEvent[]): EnvironmentAction[] {
+  let pending: string | null = null;
+  for (const e of events) {
+    if (e.payload.type === "session.environment_disconnected") pending = e.payload.environment_id;
+    else if (e.payload.type === "session.status_running") pending = null;
+  }
+  return pending ? [{ type: "environment_connection", environment_id: pending }] : [];
+}
+
 export type OpenAiStatus = "idle" | "running" | "requires_action" | "terminated";
 
 /** OpenAI-facing session status: required_action takes precedence over running while a call is pending. */

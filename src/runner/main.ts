@@ -2,6 +2,7 @@ import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfi
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { closeBus, onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, takeToolResult } from "../infra/pubsub.ts";
+import { anyWorkerAlive } from "../infra/byoc.ts";
 import { consumeRuns, enqueueRun, queueDepth } from "../infra/queue.ts";
 import { disallowedFor } from "../plugins/allow.ts";
 import { createServer } from "node:http";
@@ -216,10 +217,27 @@ const runDuration = histogram("runner_run_duration_seconds", "Run wall-clock dur
 const activeRuns = gauge("runner_active_runs", "Runs currently executing on this runner");
 let active = 0;
 
+/**
+ * BYOC pause: a byoc environment with no live worker cannot run. Instead of failing (or hanging on
+ * acquire), append a session.environment_disconnected event — the session then reads as
+ * requires_action(environment_connection) — and skip the run. A worker (re)connect re-enqueues it
+ * (see resumeEnvironment on the worker poll). Returns true if the run was paused.
+ */
+async function pauseIfDisconnected(job: RunJob): Promise<boolean> {
+  const session = await repos.sessions.get(job.session_id);
+  if (!session) return false;
+  const environment = await repos.environments.get(session.environment_id);
+  if (environment?.provider !== "byoc" || (await anyWorkerAlive(environment.id))) return false;
+  const [ev] = await appendEvents(session.id, [{ type: "session.environment_disconnected", environment_id: environment.id }]);
+  if (ev) await publish({ type: "event", event: ev });
+  return true;
+}
+
 async function handleJob(job: RunJob): Promise<"done" | "retry"> {
   const started = Date.now();
   const jlog = log.child({ session: job.session_id, trigger_seq: job.trigger_seq });
   jlog.info("run.start");
+  if (await pauseIfDisconnected(job)) { jlog.info("run.paused_env_disconnected"); return "done"; }
   activeRuns.set(++active);
   // Heartbeat while running so a re-examined job can tell a live run from a dead runner's.
   const hb = setInterval(() => void heartbeat(job.session_id).catch(() => {}), HEARTBEAT_MS);

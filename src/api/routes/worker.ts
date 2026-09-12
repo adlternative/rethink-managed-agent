@@ -1,8 +1,24 @@
 import { Hono } from "hono";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { repos } from "../../infra/db.ts";
-import { pollForWorker, pushResult, type WorkerResult } from "../../infra/byoc.ts";
+import { pool, repos } from "../../infra/db.ts";
+import { pollForWorker, pushResult, isWorkerAlive, markWorkerAlive, type WorkerResult } from "../../infra/byoc.ts";
+import { listEvents } from "../../infra/events.ts";
+import { enqueueRun } from "../../infra/queue.ts";
+import { environmentActions } from "./compat/required-actions.ts";
 import { ApiError, invalid, notFound, readJson } from "../errors.ts";
+
+/** On a worker (re)connect, re-enqueue idle sessions of this environment that are paused awaiting one. */
+async function resumeEnvironment(envId: string): Promise<number> {
+  const { rows } = await pool.query<{ id: string; owner_id: string }>(`SELECT id, owner_id FROM sessions WHERE environment_id=$1 AND status='idle'`, [envId]);
+  let resumed = 0;
+  for (const s of rows) {
+    const events = await listEvents(s.id);
+    if (environmentActions(events).length === 0) continue; // not waiting on reconnection
+    await enqueueRun({ session_id: s.id, trigger_seq: events.length ? events[events.length - 1]!.seq : 0, owner_id: s.owner_id });
+    resumed++;
+  }
+  return resumed;
+}
 
 const hash = (s: string) => createHash("sha256").update(s).digest();
 function checkKey(given: string | undefined, expected: string | null | undefined): void {
@@ -25,6 +41,8 @@ export const worker = new Hono()
     const body = await readJson<{ worker_id?: string; sandbox_ids?: string[] }>(c);
     if (!body.worker_id || !/^[A-Za-z0-9_.:-]{1,64}$/.test(body.worker_id)) throw invalid("worker_id is required");
     const ids = Array.isArray(body.sandbox_ids) ? body.sandbox_ids.filter((s) => typeof s === "string").slice(0, 64) : [];
+    // On a fresh (re)connect, mark alive first (so the runner's re-check wins) then resume paused runs.
+    if (!(await isWorkerAlive(envId, body.worker_id))) { await markWorkerAlive(envId, body.worker_id); void resumeEnvironment(envId).catch(() => {}); }
     const req = await pollForWorker(envId, body.worker_id, ids, 20);
     return c.json({ request: req });
   })

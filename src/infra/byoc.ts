@@ -65,8 +65,12 @@ export async function anyWorkerAlive(envId: string): Promise<boolean> {
 }
 
 // ---- API side (worker long-poll) ----
-export async function pollForWorker(envId: string, workerId: string, sandboxIds: string[], waitS: number): Promise<WorkerRequest | null> {
+/** Mark a worker live (heartbeat). Called at the top of every poll; also used to win the reconnect race before resuming paused sessions. */
+export async function markWorkerAlive(envId: string, workerId: string): Promise<void> {
   await redis.set(workerAlive(envId, workerId), "1", "EX", WORKER_TTL_S);
+}
+export async function pollForWorker(envId: string, workerId: string, sandboxIds: string[], waitS: number): Promise<WorkerRequest | null> {
+  await markWorkerAlive(envId, workerId);
   for (const s of sandboxIds) await redis.expire(sbxWorker(s), WORKER_TTL_S * 2);
   const r = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
   try {

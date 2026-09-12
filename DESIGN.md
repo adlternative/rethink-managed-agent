@@ -632,18 +632,27 @@ What this is NOT: a general vendor secret-manager or MCP-OAuth token-rotation se
 the latter). It is the core, broadly useful thing — encrypted secrets injected into the agent's
 environment — which is what Managed-Agents-style workloads actually need.
 
-## 20. Environment lifecycle & reconnect (partial)
+## 20. Environment lifecycle & BYOC reconnect
 
 The OpenAI stream projects a sandbox lease into `agent.session.environment.ready` (from our persisted
 `sandbox.acquired` event), so the SDK sees the environment come up during a turn — verified live (it
 appears in `sessions.stream()` before the first tool result).
 
-The remaining depth is **BYOC reconnect**: when a `byoc` environment has no live worker, `acquire`
-throws ("no BYOC worker is connected…", see `src/sandbox/byoc.ts`). To match the SDK's
-`environment_connection` semantics, that condition should instead pause the run and surface a
-`requires_action` with `{ type: "environment_connection", environment_id }` (+ an
-`agent.session.environment.failed` event), then resume when the worker reconnects (`anyWorkerAlive`).
-This needs the run loop to treat a missing-worker acquire as a pause rather than a terminal error, plus
-a reconnect signal to re-enqueue — and a running BYOC worker to build and verify against. It is scoped
-but not built; the observable contract (the environment events, and the `environment_connection`
-required-action shape) is where the projection already plugs in.
+**BYOC reconnect** matches the SDK's `environment_connection` semantics end to end:
+
+- **Pause** (`src/runner/main.ts` `pauseIfDisconnected`): before a run, if the session's environment is
+  `byoc` and no worker is live (`anyWorkerAlive`), the runner appends `session.environment_disconnected`
+  and skips the run — instead of hanging on `acquire` or terminating. The session then reads as
+  `requires_action` with `{ type: "environment_connection", environment_id }` (derived in
+  `environmentActions`), and the stream emits `agent.session.environment.failed` +
+  `agent.session.requires_action`.
+- **Resume** (`src/api/routes/worker.ts`): a worker's poll is a heartbeat; on a *fresh* (re)connect the
+  route marks the worker alive first (so the runner's re-check wins the race), then `resumeEnvironment`
+  re-enqueues the environment's idle sessions that are waiting on a reconnection. The re-run passes the
+  pause check and proceeds; a later `session.status_running` clears the pending action.
+- **Verified live**: a `byoc` session with no worker paused as `requires_action` /
+  `environment_connection`; a worker poll (reconnect) resumed it and the run completed —
+  `environment_disconnected → status_running → status_idle`, final status `idle`, `required_actions: []`.
+
+The pending action clears on `session.status_running` (run resumed past the pause), not on
+`sandbox.acquired`, because a toolless run completes without ever leasing a sandbox.

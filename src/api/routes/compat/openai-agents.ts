@@ -9,7 +9,7 @@ import { scope, ownerId } from "../../auth.ts";
 import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
 import { openaiAgentToRethink, openaiEnvToEnvironmentId, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
-import { requiredActions, clientToolNames } from "./required-actions.ts";
+import { requiredActions, clientToolNames, environmentActions } from "./required-actions.ts";
 import { streamAgentSessionEvents } from "./openai-stream.ts";
 
 /**
@@ -29,7 +29,7 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 export function toAgentSession(session: SessionResource, events: SessionEvent[], environmentId: string) {
   const errorEvent = [...events].reverse().find((e) => e.payload.type === "session.error");
   const error = errorEvent && errorEvent.payload.type === "session.error" ? (errorEvent.payload as { message?: string }).message ?? "session failed" : null;
-  const actions = requiredActions(events, clientToolNames(session));
+  const actions = [...requiredActions(events, clientToolNames(session)), ...environmentActions(events)];
   const status: "idle" | "in_progress" | "requires_action" | "failed" =
     error ? "failed" : actions.length ? "requires_action" : session.status === "running" ? "in_progress" : "idle";
   const created = Math.floor(new Date(session.created_at as unknown as string).getTime() / 1000) || nowSec();
