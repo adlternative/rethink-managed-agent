@@ -469,6 +469,24 @@ addition is **client/function tools**.
   `programmatic_tool_calling` is not built (accepted-and-ignored); `input` is string-only; cold resume across
   idle is covered by the keep-alive long-poll (approval completes within the window).
 
+### 16.1 Official OpenAI SDK surface (`/openai/v1`)
+
+Alongside the hand-written showcase adapter above, `src/api/routes/compat/openai-agents.ts` serves the
+**exact contract of the official `openai` SDK's Agents API** (`client.beta.agents.sessions.*`), so real
+SDK code runs against `baseURL: "<host>/openai/v1"` unchanged. It matches the SDK's paths verbatim
+(`POST/GET/DELETE /agents/sessions`, `GET /agents/sessions/{id}`, `POST /agents/sessions/{id}` update,
+`GET /agents/sessions`, `POST/GET /agents/sessions/{id}/events`), the `AgentSession` object
+(`object:"agent.session"`, `status: idle|in_progress|requires_action|failed`, top-level
+`required_actions[]` with the SDK's `{arguments, call_id, name, turn_id, type:"function_call"}` shape),
+and the `agent.session.input.{message,tool_result,cancel}` event union — all as a pure projection over
+the native event log (reusing `translate.ts` and `requiredActions`). `test/openai-sdk.test.ts` drives the
+**real `openai@7.15.0`** (aliased `openai7`) with a capturing `fetch`, asserting the SDK hits our paths,
+our projection parses in the SDK, and the SDK's request bodies are what our mapper consumes — the
+anti-drift check (like OMA's SDK audit). **Phase 1a** covers session lifecycle + event submit/list
+(non-streaming); streaming turn projection (`agent.session.turn.*` SSE), `items`/`turns`, and
+`artifacts`/`subagents` are the next phases. The contract itself is derived by reading the pinned SDK's
+TypeScript declarations (`npm pack openai@7.15.0`), not guessed.
+
 ## 17. The three layers, and who owns each
 
 The system is three layers, each an independent isolation domain that can be operator-run or
