@@ -1,4 +1,4 @@
-import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfig, skills, toolOutputs } from "../infra/db.ts";
+import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfig, skills, toolOutputs, vaultSecrets } from "../infra/db.ts";
 import { appendEvents, listAllEvents } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { closeBus, onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, takeToolResult } from "../infra/pubsub.ts";
@@ -162,6 +162,7 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     pluginsFor,
     pluginStore,
     principalFetchAllow: async (ownerId) => (await principals.get(ownerId))?.fetch_allow ?? null,
+    vaultSecrets: (session) => vaultSecrets(session.owner_id, session.vault_ids ?? []),
     awaitToolResult: async (sessionId, callId, signal, timeoutMs) => {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {

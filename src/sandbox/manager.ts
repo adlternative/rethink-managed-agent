@@ -65,7 +65,7 @@ export class SandboxManager {
     await this.store.insert({ id, owner_id: req.owner_id ?? null, provider: name, status: "busy", workspace_id: req.workspaceId, affinity: req.affinity ?? null, external_ref: null, container_key: containerKey, container_ref: containerRef, workdir: null });
     try {
       if (!containerRef) containerRef = await provider.openContainer(id, req);
-      const handle = await provider.addMount(containerRef, id, req.workspaceRef);
+      const handle = await provider.addMount(containerRef, id, req.workspaceRef, req.secrets);
       await this.store.setMount(id, containerRef, handle.workdir);
       return this.lease(provider, id, handle, origin);
     } catch (e) {

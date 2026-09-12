@@ -605,3 +605,29 @@ principled, not incidental:
   budget following the new model. pi's own `setModel` / `setActiveTools` (context-free methods on the
   API object) are not mapped — like `sendMessage`, they assume a single ambient session the multi-session
   host does not have; the capability is reached through `ctx.session` instead.
+
+## 19. Vaults (per-principal secret injection)
+
+Vaults close the credential gap against Claude Managed Agents / the OpenAI Agents API. A **vault** is a
+named, per-principal container of **encrypted secrets**; a session lists `vault_ids`, and at run time
+the harness decrypts those secrets and injects them into every sandbox the session leases as
+environment variables. Secrets are **write-only**: the API returns a credential's name and metadata,
+never its value.
+
+- **Storage** (`src/infra/db.ts`): `vaults` + `vault_credentials` tables; each secret is sealed with
+  the existing BYOK cipher (`src/infra/secrets.ts`, AES-256-GCM, `PMA_SECRET_KEY`) — no new crypto.
+  `vaultSecrets(owner_id, vault_ids)` decrypts an owner's vault secrets into an env map.
+- **Injection** (`SandboxRequest.secrets`): the isolating providers already inject at container create
+  (`docker`/`e2b`); `local` now injects into each command's env too (via `addMount`). `run-turn`
+  computes the session's vault secrets once and passes them on every `acquire`.
+- **API**: native `/v1/vaults` (+ `/:id/credentials`), and the official SDK surface
+  `client.beta.agents.vaults.*` at `/openai/v1/vaults` (+ `/:id/credentials`); the SDK's typed `auth`
+  union (`static_bearer` / `mcp_oauth`) is accepted by storing its token. `AgentSession.vault_ids` is
+  populated and session create accepts `vault_ids`.
+- **Verified live** (rebuilt stack, real `openai@7.15.0`): created a vault + credential (value never
+  returned by create or list), created a session with `vault_ids` and a `bash` tool, and the model ran
+  `echo $MY_SECRET` in the sandbox — the injected secret appeared in the tool output.
+
+What this is NOT: a general vendor secret-manager or MCP-OAuth token-rotation service (the SDK models
+the latter). It is the core, broadly useful thing — encrypted secrets injected into the agent's
+environment — which is what Managed-Agents-style workloads actually need.

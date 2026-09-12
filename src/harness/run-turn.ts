@@ -91,6 +91,8 @@ export interface RunDeps {
   pluginStore: { get(scope: string, owner: string, key: string): Promise<unknown>; set(scope: string, owner: string, key: string, value: unknown): Promise<void> };
   /** The owning principal's plugin fetch allowlist (comma list or "*"); null/absent -> deployment default. */
   principalFetchAllow?(ownerId: string): Promise<string | null>;
+  /** Decrypt the session's vault secrets into an env map injected into its sandboxes. */
+  vaultSecrets?(session: SessionResource): Promise<Record<string, string>>;
   /** Wait for a client/function tool result posted by the API caller; null on timeout. Honors the signal (interrupt). */
   awaitToolResult(sessionId: SessionId, callId: string, signal: AbortSignal, timeoutMs: number): Promise<{ content: ContentBlock[]; isError: boolean } | null>;
   /** Append events (seq assigned by the store). Must NOT publish; runSession publishes each appended event. */
@@ -309,6 +311,8 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   }
   await publishAll(claimed);
 
+  // Vault secrets for this session, injected into every sandbox it leases (as container env vars).
+  const runSecrets = (await deps.vaultSecrets?.(session)) ?? {};
   // One lazily leased sandbox per attached environment; read in `finally` for capture + release.
   const held = new Map<string, { lease: SandboxLease | null; acquiring: Promise<SandboxLease> | null }>();
   const ctx: ToolContext = {
@@ -326,7 +330,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       const slot = h;
       slot.acquiring ??= deps
         .sandboxFor(e.environment.provider)
-        .acquire({ owner_id: session.owner_id, environmentId: e.environment.id, containerKey: `${session.owner_id}/${session.container_group}/${e.environment.id}`, workspaceId: e.workspace.id, workspaceRef: e.workspace.ref, image: e.environment.image, network: e.environment.network, affinity: e.workspace.id })
+        .acquire({ owner_id: session.owner_id, environmentId: e.environment.id, containerKey: `${session.owner_id}/${session.container_group}/${e.environment.id}`, workspaceId: e.workspace.id, workspaceRef: e.workspace.ref, image: e.environment.image, network: e.environment.network, affinity: e.workspace.id, secrets: runSecrets })
         .then(
           async (l) => {
             slot.lease = l;

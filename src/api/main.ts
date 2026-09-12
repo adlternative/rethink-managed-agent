@@ -15,6 +15,7 @@ import { memoryStoresRoute } from "./routes/memories.ts";
 import { principalsRoute } from "./routes/principals.ts";
 import { agentsApi } from "./routes/compat/agents-api.ts";
 import { openaiAgents } from "./routes/compat/openai-agents.ts";
+import { vaultsRoute } from "./routes/vaults.ts";
 import { ui } from "./routes/ui.ts";
 import { auth } from "./auth.ts";
 import { ensureBucket } from "../infra/blobs.ts";
@@ -67,7 +68,8 @@ export const app = new Hono<{ Variables: { requestId: string } }>()
   .route("/v1/providers", providers)
   .route("/v1/files", filesRoute)
   .route("/v1/skills", skillsRoute)
-  .route("/v1/memory_stores", memoryStoresRoute);
+  .route("/v1/memory_stores", memoryStoresRoute)
+  .route("/v1/vaults", vaultsRoute);
 
 await migrate();
 await ensureBucket();

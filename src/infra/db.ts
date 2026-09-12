@@ -1,10 +1,13 @@
 import pg from "pg";
 import { env } from "../shared/env.ts";
 import { newId } from "../shared/ids.ts";
+import { seal, open, type Sealed } from "./secrets.ts";
 import type {
   FileResource,
   MemoryMount,
   MemoryStoreResource,
+  VaultResource,
+  VaultCredentialResource,
   Principal,
   SkillRef,
   SkillResource,
@@ -196,6 +199,7 @@ export const repos = {
       environments?: SessionEnvironment[];
       parent_id?: string | null;
       memory_stores?: MemoryMount[];
+      vault_ids?: string[];
       /** container-sharing group; children inherit the parent's so a spawn tree shares a container */
       container_group?: string | null;
     }): Promise<SessionResource> {
@@ -207,9 +211,9 @@ export const repos = {
       return tx(async (c) => {
         const row = await one<SessionResource>(
           c,
-          `INSERT INTO sessions (id, owner_id, agent_id, environment_id, workspace_id, agent, parent_id, memory_stores, container_group)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, COALESCE($9, $1)) RETURNING *`,
-          [newId("sess"), input.owner_id, input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memory_stores ?? []), input.container_group ?? null],
+          `INSERT INTO sessions (id, owner_id, agent_id, environment_id, workspace_id, agent, parent_id, memory_stores, container_group, vault_ids)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, COALESCE($9, $1), $10) RETURNING *`,
+          [newId("sess"), input.owner_id, input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memory_stores ?? []), input.container_group ?? null, input.vault_ids ?? []],
         );
         for (const e of envs) {
           await c.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4)`, [row!.id, e.key, e.environment_id, e.workspace_id]);
@@ -383,3 +387,57 @@ export const sessionConfig = {
     await pool.query(`UPDATE sessions SET agent = jsonb_set(agent, '{skills}', $2::jsonb), updated_at=now() WHERE id=$1`, [id, JSON.stringify(refs)]);
   },
 };
+
+/** Vaults: per-principal encrypted secrets. Secret values are write-only (never returned). */
+export const vaults = {
+  async create(input: { owner_id: string; name?: string | null; metadata?: Record<string, string> }): Promise<VaultResource> {
+    const r = await one<VaultResource>(pool, `INSERT INTO vaults (id, owner_id, name, metadata) VALUES ($1,$2,$3,$4) RETURNING id, owner_id, name, metadata, created_at`, [newId("vault"), input.owner_id, input.name ?? null, JSON.stringify(input.metadata ?? {})]);
+    return iso(r)!;
+  },
+  async get(id: string, scope?: Scope): Promise<VaultResource | null> {
+    return iso(await one<VaultResource>(pool, `SELECT id, owner_id, name, metadata, created_at FROM vaults WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id]));
+  },
+  async list(scope?: Scope): Promise<VaultResource[]> {
+    return (await many<VaultResource>(pool, `SELECT id, owner_id, name, metadata, created_at FROM vaults${scope ? " WHERE owner_id=$1" : ""} ORDER BY id DESC`, scope ? [scope.owner] : [])).map((r) => iso(r)!);
+  },
+  async delete(id: string, scope?: Scope): Promise<boolean> {
+    return ((await pool.query(`DELETE FROM vaults WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id])).rowCount ?? 0) > 0;
+  },
+};
+
+/** Credentials in a vault. The plaintext is sealed with PMA_SECRET_KEY and never leaves the DB. */
+export const vaultCredentials = {
+  /** Store (or replace) a named secret. `value` is the plaintext, sealed before it is written. */
+  async put(vaultId: string, name: string, value: string, metadata?: Record<string, string>): Promise<VaultCredentialResource> {
+    const r = await one<VaultCredentialResource>(pool,
+      `INSERT INTO vault_credentials (id, vault_id, name, secret, metadata) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (vault_id, name) DO UPDATE SET secret=EXCLUDED.secret, metadata=EXCLUDED.metadata
+       RETURNING id, vault_id, name, metadata, created_at`,
+      [newId("cred"), vaultId, name, JSON.stringify(seal(value)), JSON.stringify(metadata ?? {})]);
+    return iso(r)!;
+  },
+  async list(vaultId: string): Promise<VaultCredentialResource[]> {
+    return (await many<VaultCredentialResource>(pool, `SELECT id, vault_id, name, metadata, created_at FROM vault_credentials WHERE vault_id=$1 ORDER BY name`, [vaultId])).map((r) => iso(r)!);
+  },
+  async get(vaultId: string, name: string): Promise<VaultCredentialResource | null> {
+    return iso(await one<VaultCredentialResource>(pool, `SELECT id, vault_id, name, metadata, created_at FROM vault_credentials WHERE vault_id=$1 AND name=$2`, [vaultId, name]));
+  },
+  async delete(vaultId: string, name: string): Promise<boolean> {
+    return ((await pool.query(`DELETE FROM vault_credentials WHERE vault_id=$1 AND name=$2`, [vaultId, name])).rowCount ?? 0) > 0;
+  },
+};
+
+/**
+ * Decrypt the secrets of the given vaults (owner-scoped) into an env map for sandbox injection.
+ * A later vault's key wins on a name clash. Skips vaults not owned by `ownerId`.
+ */
+export async function vaultSecrets(ownerId: string, vaultIds: string[]): Promise<Record<string, string>> {
+  if (!vaultIds?.length) return {};
+  const rows = await many<{ name: string; secret: Sealed; vault_id: string }>(pool,
+    `SELECT c.name, c.secret, c.vault_id FROM vault_credentials c JOIN vaults v ON v.id = c.vault_id
+     WHERE c.vault_id = ANY($1::text[]) AND v.owner_id = $2 ORDER BY array_position($1::text[], c.vault_id)`,
+    [vaultIds, ownerId]);
+  const out: Record<string, string> = {};
+  for (const r of rows) { try { out[r.name] = open(r.secret); } catch { /* skip unreadable */ } }
+  return out;
+}

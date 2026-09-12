@@ -230,7 +230,7 @@ export interface SandboxProvider {
   /** Tear down a container and everything in it; must tolerate an already-gone container. */
   destroyContainer(containerRef: string): Promise<void>;
   /** Materialize `ref` into a fresh workdir in the container; return a Sandbox bound to it. */
-  addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef): Promise<SandboxHandle>;
+  addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef, secrets?: Record<string, string>): Promise<SandboxHandle>;
   /** Re-attach a Sandbox to an existing mount. */
   connectMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null>;
   /** Remove one mount's workdir (leaves the container). */
@@ -315,11 +315,30 @@ export interface SessionResource {
   container_group: SessionId;
   /** memory stores mounted into this session's main sandbox (mount_path is relative to the workspace root) */
   memory_stores: MemoryMount[];
+  /** vaults whose secrets are injected into this session's sandboxes as env vars */
+  vault_ids: string[];
   status: SessionStatus;
   /** snapshot of agent config at creation (Managed-Agent style) */
   agent: Omit<AgentResource, "created_at">;
   created_at: string;
   updated_at: string;
+}
+
+/** A named, per-principal container of encrypted secrets. Secret values are never returned. */
+export interface VaultResource {
+  id: string;
+  owner_id: string;
+  name: string | null;
+  metadata: Record<string, string>;
+  created_at: string;
+}
+/** One secret in a vault (the ciphertext lives only in the DB; the API returns metadata only). */
+export interface VaultCredentialResource {
+  id: string;
+  vault_id: string;
+  name: string;
+  metadata: Record<string, string>;
+  created_at: string;
 }
 
 // ---------- Events (the single source of truth) ----------

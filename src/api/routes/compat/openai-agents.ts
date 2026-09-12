@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { repos } from "../../../infra/db.ts";
+import { repos, vaults, vaultCredentials } from "../../../infra/db.ts";
 import { listEvents } from "../../../infra/events.ts";
+import { secretsConfigured } from "../../../infra/secrets.ts";
 import type { SessionEvent, SessionResource, UserEventInput, WorkspaceRef } from "../../../shared/types.ts";
 import { invalid, notFound, readJson } from "../../errors.ts";
 import { scope, ownerId } from "../../auth.ts";
@@ -43,7 +44,7 @@ export function toAgentSession(session: SessionResource, events: SessionEvent[],
     required_actions: actions,
     metadata: {},
     usage: null,
-    vault_ids: [] as string[],
+    vault_ids: session.vault_ids ?? [],
     agent: {
       id: session.agent.id,
       model: `${session.agent.model.provider}/${session.agent.model.id}`,
@@ -150,7 +151,7 @@ async function loadSession(c: Context): Promise<SessionResource> {
 
 export const openaiAgents = new Hono()
   .post("/agents/sessions", async (c) => {
-    const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; metadata?: unknown; stream?: boolean }>(c);
+    const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; metadata?: unknown; vault_ids?: string[]; stream?: boolean }>(c);
     if (body.stream) throw invalid("stream is not supported yet on /openai/v1 (phase 1b); omit it and poll GET /agents/sessions/{id}");
     if (!body.agent) throw invalid("agent (with a model) is required; agent_id references are not supported yet");
     const owner = ownerId(c);
@@ -162,7 +163,7 @@ export const openaiAgents = new Hono()
     const workspace = await repos.workspaces.create(spec, initialRef(spec) as WorkspaceRef, owner);
     const agentRow = await repos.agents.create({ owner_id: owner, name: draft.name, model: draft.model, system: draft.system, tools: draft.tools, packages: draft.packages, skills: [] });
     const { created_at: _c, ...snapshot } = { ...agentRow, client_tools: draft.client_tools, mcp_servers: draft.mcp_servers };
-    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot });
+    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot, vault_ids: Array.isArray(body.vault_ids) ? body.vault_ids : [] });
     const inputs = createInputToUserEvents(body.input);
     if (inputs.length) await sendUserEvents(session, inputs);
     return c.json(toAgentSession(session, await listEvents(session.id), environmentId), 201);
@@ -228,4 +229,43 @@ export const openaiAgents = new Hono()
     const turn = toTurns(session, await listEvents(session.id)).find((t) => t.id === c.req.param("turnId"));
     if (!turn) throw notFound("turn", c.req.param("turnId"));
     return c.json(turn);
+  })
+  // ---- Vaults (client.beta.agents.vaults.*) ----
+  .post("/vaults", async (c) => {
+    const body = await readJson<{ name?: string; metadata?: Record<string, string> }>(c);
+    const v = await vaults.create({ owner_id: ownerId(c), name: body.name ?? null, metadata: body.metadata });
+    return c.json({ ...v, object: "vault" }, 201);
+  })
+  .get("/vaults", async (c) => c.json({ object: "list", data: (await vaults.list(scope(c))).map((v) => ({ ...v, object: "vault" })), has_more: false }))
+  .get("/vaults/:vaultId", async (c) => {
+    const v = await vaults.get(c.req.param("vaultId"), scope(c));
+    if (!v) throw notFound("vault", c.req.param("vaultId"));
+    return c.json({ ...v, object: "vault" });
+  })
+  .delete("/vaults/:vaultId", async (c) => {
+    if (!(await vaults.delete(c.req.param("vaultId"), scope(c)))) throw notFound("vault", c.req.param("vaultId"));
+    return c.json({ id: c.req.param("vaultId"), object: "vault.deleted", deleted: true });
+  })
+  /** Store a credential. The SDK sends a typed `auth` union (mcp_oauth | static_bearer); we store the token. */
+  .post("/vaults/:vaultId/credentials", async (c) => {
+    if (!secretsConfigured()) throw invalid("PMA_SECRET_KEY is not set: cannot store vault secrets");
+    const v = await vaults.get(c.req.param("vaultId"), scope(c));
+    if (!v) throw notFound("vault", c.req.param("vaultId"));
+    const body = await readJson<{ name?: string; auth?: { type?: string; token?: string; access_token?: string }; value?: string }>(c);
+    if (!body.name) throw invalid("name is required");
+    const value = body.auth?.token ?? body.auth?.access_token ?? body.value; // static_bearer.token | mcp_oauth.access_token | plain value
+    if (typeof value !== "string") throw invalid("a credential secret is required (auth.token, auth.access_token, or value)");
+    const cred = await vaultCredentials.put(v.id, body.name, value);
+    return c.json({ ...cred, object: "vault.credential" }, 201);
+  })
+  .get("/vaults/:vaultId/credentials", async (c) => {
+    const v = await vaults.get(c.req.param("vaultId"), scope(c));
+    if (!v) throw notFound("vault", c.req.param("vaultId"));
+    return c.json({ object: "list", data: (await vaultCredentials.list(v.id)).map((cr) => ({ ...cr, object: "vault.credential" })), has_more: false });
+  })
+  .delete("/vaults/:vaultId/credentials/:name", async (c) => {
+    const v = await vaults.get(c.req.param("vaultId"), scope(c));
+    if (!v) throw notFound("vault", c.req.param("vaultId"));
+    if (!(await vaultCredentials.delete(v.id, c.req.param("name")))) throw notFound("credential", c.req.param("name"));
+    return c.json({ id: c.req.param("name"), object: "vault.credential.deleted", deleted: true });
   });

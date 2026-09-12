@@ -14,18 +14,20 @@ const root = () => path.resolve(env.SANDBOX_LOCAL_ROOT);
 const dirExists = (p: string) => stat(p).then((st) => st.isDirectory(), () => false);
 const containerDir = (containerRef: string) => path.join(root(), containerRef);
 
-function makeSandbox(id: SandboxId, workdir: string): Sandbox {
+function makeSandbox(id: SandboxId, workdir: string, secrets: Record<string, string> = {}): Sandbox {
+  // Vault secrets are baked into every command's env (per-call env still wins on a name clash).
+  const withSecrets = (e?: Record<string, string>) => sandboxEnv({ ...secrets, ...e });
   return {
     id,
     provider: "local",
     workdir,
     exec(cmd: string, opts: ExecOptions = {}): AsyncIterable<ExecChunk> {
-      return streamProcess("bash", ["-lc", cmd], { cwd: opts.cwd ? resolveInside(workdir, workdir, opts.cwd) : workdir, env: sandboxEnv(opts.env), timeoutMs: opts.timeoutMs, signal: opts.signal });
+      return streamProcess("bash", ["-lc", cmd], { cwd: opts.cwd ? resolveInside(workdir, workdir, opts.cwd) : workdir, env: withSecrets(opts.env), timeoutMs: opts.timeoutMs, signal: opts.signal });
     },
     async readFile(p) { return new Uint8Array(await readFile(await resolveInsideReal(workdir, workdir, p))); },
     async writeFile(p, data) { const host = await resolveInsideReal(workdir, workdir, p); await mkdir(path.dirname(host), { recursive: true }); await writeFile(host, data); },
     async spawn(cmd, opts = {}): Promise<SandboxProcess> {
-      return spawnProcess("bash", ["-lc", cmd], { cwd: opts.cwd ? resolveInside(workdir, workdir, opts.cwd) : workdir, env: sandboxEnv(opts.env) });
+      return spawnProcess("bash", ["-lc", cmd], { cwd: opts.cwd ? resolveInside(workdir, workdir, opts.cwd) : workdir, env: withSecrets(opts.env) });
     },
   };
 }
@@ -40,9 +42,9 @@ export class LocalProvider implements SandboxProvider {
   async connectContainer(containerRef: string): Promise<boolean> { return dirExists(containerDir(containerRef)); }
   async destroyContainer(containerRef: string): Promise<void> { await rm(containerDir(containerRef), { recursive: true, force: true }); }
 
-  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef): Promise<SandboxHandle> {
+  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef, secrets?: Record<string, string>): Promise<SandboxHandle> {
     const workdir = await materialize(ref, path.join(containerDir(containerRef), mountId));
-    return { sandbox: makeSandbox(mountId, workdir), containerRef, workdir };
+    return { sandbox: makeSandbox(mountId, workdir, secrets), containerRef, workdir };
   }
   async connectMount(_containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null> {
     return (await dirExists(workdir)) ? makeSandbox(mountId, workdir) : null;

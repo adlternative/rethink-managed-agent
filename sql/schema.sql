@@ -236,3 +236,27 @@ CREATE INDEX IF NOT EXISTS tool_result_msgs_key ON tool_result_msgs(session_id, 
 -- Per-tenant brain routing: a runner scoped via RUNNER_OWNERS claims only its owners' jobs.
 ALTER TABLE run_jobs ADD COLUMN IF NOT EXISTS owner_id TEXT;
 CREATE INDEX IF NOT EXISTS run_jobs_pending_owner ON run_jobs(owner_id, id) WHERE status = 'pending';
+
+-- Vaults: named, per-principal encrypted secrets injected into a session's sandbox as env vars.
+-- The secret ciphertext never leaves the DB and is never returned by the API (write-only).
+CREATE TABLE IF NOT EXISTS vaults (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  name TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS vaults_owner ON vaults(owner_id, id);
+
+CREATE TABLE IF NOT EXISTS vault_credentials (
+  id TEXT PRIMARY KEY,
+  vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  secret JSONB NOT NULL, -- Sealed (AES-256-GCM); never returned by the API
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (vault_id, name)
+);
+
+-- Vaults whose secrets are injected into this session's sandboxes.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS vault_ids TEXT[] NOT NULL DEFAULT '{}';

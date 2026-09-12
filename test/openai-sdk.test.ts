@@ -90,6 +90,30 @@ describe("items & turns projection (phase 1c)", () => {
   });
 });
 
+describe("official SDK vaults (client.beta.agents.vaults.*)", () => {
+  function vaultClient(capture) {
+    const fetch = async (url, init = {}) => {
+      capture.req = { url: url.toString(), method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) : undefined };
+      const path = new URL(url.toString()).pathname;
+      const canned = path.endsWith("/credentials") ? { id: "cred_1", vault_id: "vault_1", name: "MY_SECRET", object: "vault.credential" } : { id: "vault_1", object: "vault", name: null, metadata: {}, created_at: 1 };
+      return new Response(JSON.stringify(canned), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    return new OpenAI({ apiKey: "x", baseURL: "http://local/openai/v1", fetch });
+  }
+  it("vaults.create hits POST /openai/v1/vaults", async () => {
+    const cap = {};
+    await vaultClient(cap).beta.agents.vaults.create({});
+    expect(new URL(cap.req.url).pathname).toBe("/openai/v1/vaults");
+    expect(cap.req.method).toBe("POST");
+  });
+  it("vaults.credentials.create hits POST .../credentials with the auth the route consumes", async () => {
+    const cap = {};
+    await vaultClient(cap).beta.agents.vaults.credentials.create("vault_1", { name: "MY_SECRET", auth: { type: "static_bearer", token: "s3cr3t" } });
+    expect(new URL(cap.req.url).pathname).toBe("/openai/v1/vaults/vault_1/credentials");
+    expect(cap.req.body).toMatchObject({ name: "MY_SECRET", auth: { type: "static_bearer", token: "s3cr3t" } });
+  });
+});
+
 describe("official SDK streaming (sessions.stream drives our projection)", () => {
   it("yields our agent.session.turn.* projection, runs the tool handler, submits the result, and terminates", async () => {
     // Build the SSE body by running the REAL projection over synthetic native deltas.
