@@ -482,10 +482,18 @@ and the `agent.session.input.{message,tool_result,cancel}` event union — all a
 the native event log (reusing `translate.ts` and `requiredActions`). `test/openai-sdk.test.ts` drives the
 **real `openai@7.15.0`** (aliased `openai7`) with a capturing `fetch`, asserting the SDK hits our paths,
 our projection parses in the SDK, and the SDK's request bodies are what our mapper consumes — the
-anti-drift check (like OMA's SDK audit). **Phase 1a** covers session lifecycle + event submit/list
-(non-streaming); streaming turn projection (`agent.session.turn.*` SSE), `items`/`turns`, and
-`artifacts`/`subagents` are the next phases. The contract itself is derived by reading the pinned SDK's
-TypeScript declarations (`npm pack openai@7.15.0`), not guessed.
+anti-drift check (like OMA's SDK audit). **Phase 1b** adds streaming: `GET /agents/sessions/{id}/events` with `Accept: text/event-stream`
+(what `sessions.stream()` subscribes to) projects the native event log into the exact
+`agent.session.turn.*` SSE sequence the SDK's `TurnState` drives on — `turn.created`
+(`turn.subagent_id === null` sets the turn id), `turn.item.added` with an `item.type: "function_call"`
+(a pending tool call the SDK's `toolHandlers` run, result submitted back through `POST .../events`),
+and a `turn.completed` + `agent.session.idle` (or `agent.session.failed`) terminal. `src/api/routes/
+compat/openai-stream.ts` holds the projection; the stream starts at the current tail (subscribe-before-
+input) so a fresh turn is never preceded by a replayed prior turn. `test/openai-sdk.test.ts` drives the
+real `sessions.stream(id, {input, toolHandlers})` over our projection and asserts the SDK runs the
+handler with our item's arguments, submits the result, and terminates — no server needed.
+`items`/`turns` read projections and `artifacts`/`subagents` are the remaining phases. The contract is
+derived by reading the pinned SDK's TypeScript declarations (`npm pack openai@7.15.0`), not guessed.
 
 ## 17. The three layers, and who owns each
 

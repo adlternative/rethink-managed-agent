@@ -9,6 +9,7 @@ import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
 import { openaiAgentToRethink, openaiEnvToEnvironmentId, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
 import { requiredActions, clientToolNames } from "./required-actions.ts";
+import { streamAgentSessionEvents } from "./openai-stream.ts";
 
 /**
  * The OFFICIAL OpenAI Agents API surface (openai-node `client.beta.agents.sessions.*`), mounted at
@@ -153,9 +154,15 @@ export const openaiAgents = new Hono()
     if (inputs.length) await sendUserEvents(session, inputs);
     return c.json(toAgentSession(await loadSession(c), await listEvents(session.id), session.environment_id));
   })
-  /** List the session's persisted events (getEvents). */
+  /** List the session's persisted events, or stream them (getEvents / events.stream). */
   .get("/agents/sessions/:id/events", async (c) => {
     const session = await loadSession(c);
+    // The SDK's sessions.stream() subscribes here with Accept: text/event-stream, then submits input.
+    if ((c.req.header("accept") ?? "").includes("text/event-stream")) {
+      const existing = await listEvents(session.id);
+      const since = existing.length ? existing[existing.length - 1]!.seq : 0; // tail: the fresh turn only
+      return streamAgentSessionEvents(c, session, since);
+    }
     const events = await listEvents(session.id);
     const data = events.map((e) => ({ object: "agent.session.event", event_id: `evt_${e.seq}`, session_id: session.id, seq: e.seq, type: e.type, payload: e.payload }));
     return c.json({ object: "list", data, has_more: false });

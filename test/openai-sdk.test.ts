@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import OpenAI from "openai7";
 import { toAgentSession } from "../src/api/routes/compat/openai-agents.ts";
+import { projectDelta, newTurnCtx } from "../src/api/routes/compat/openai-stream.ts";
 
 /**
  * Contract test against the REAL OpenAI SDK (openai@7.15.0, aliased as `openai7`). We do not boot the
@@ -65,5 +66,48 @@ describe("official OpenAI SDK contract (openai@7.15.0)", () => {
     expect(new URL(cap.req.url).pathname).toBe("/openai/v1/agents/sessions/sess_abc/events");
     expect(cap.req.method).toBe("POST");
     expect(cap.req.body.events[0]).toMatchObject({ type: "agent.session.input.tool_result", call_id: "call_1" });
+  });
+});
+
+describe("official SDK streaming (sessions.stream drives our projection)", () => {
+  it("yields our agent.session.turn.* projection, runs the tool handler, submits the result, and terminates", async () => {
+    // Build the SSE body by running the REAL projection over synthetic native deltas.
+    const ctx = newTurnCtx();
+    const idleSession: any = { ...session, status: "idle", agent: { ...session.agent } };
+    const natives: any[] = [
+      { type: "event", event: { seq: 1, type: "session.status_running", payload: { type: "session.status_running" } } },
+      { type: "event", event: { seq: 2, type: "agent.tool_use", payload: { type: "agent.tool_use", tool_use_id: "call_1", name: "run_bash", input: { cmd: "ls" } } } },
+      { type: "event", event: { seq: 3, type: "session.status_idle", payload: { type: "session.status_idle", stop_reason: "end_turn" } } },
+    ];
+    const projected = natives.flatMap((d) => projectDelta(d, idleSession, ctx));
+    const sseBody = projected.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+
+    const posts: any[] = [];
+    const fetch = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+      const path = new URL(typeof url === "string" ? url : url.toString()).pathname;
+      const method = init?.method ?? "GET";
+      if (method === "GET" && path.endsWith("/events")) return new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } });
+      if (method === "GET") return new Response(JSON.stringify(toAgentSession(idleSession, [], "env_1")), { status: 200, headers: { "content-type": "application/json" } });
+      if (method === "POST" && path.endsWith("/events")) { posts.push(init?.body ? JSON.parse(String(init.body)) : undefined); return new Response(null, { status: 204 }); }
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const client = new OpenAI({ apiKey: "test", baseURL: "http://local/openai/v1", fetch: fetch as any });
+
+    let toolArgs: any;
+    const seen: string[] = [];
+    const stream = client.beta.agents.sessions.stream("sess_abc", {
+      input: "list files",
+      toolHandlers: { run_bash: async (args) => { toolArgs = args; return "listed" as any; } },
+    });
+    for await (const ev of stream) seen.push(ev.type);
+
+    // The projection drove the SDK's full loop:
+    expect(seen).toContain("agent.session.turn.created");
+    expect(seen).toContain("agent.session.turn.item.added");
+    expect(seen).toContain("agent.session.idle"); // terminal reached (no "ended before idle" throw)
+    expect(toolArgs).toEqual({ cmd: "ls" }); // our function_call item carried arguments the handler received
+    // The handler's result was submitted back as an input.tool_result to POST .../events:
+    const toolResult = posts.find((b) => b?.events?.[0]?.type === "agent.session.input.tool_result");
+    expect(toolResult.events[0]).toMatchObject({ call_id: "call_1" });
   });
 });
