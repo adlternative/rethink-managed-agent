@@ -631,3 +631,19 @@ never its value.
 What this is NOT: a general vendor secret-manager or MCP-OAuth token-rotation service (the SDK models
 the latter). It is the core, broadly useful thing — encrypted secrets injected into the agent's
 environment — which is what Managed-Agents-style workloads actually need.
+
+## 20. Environment lifecycle & reconnect (partial)
+
+The OpenAI stream projects a sandbox lease into `agent.session.environment.ready` (from our persisted
+`sandbox.acquired` event), so the SDK sees the environment come up during a turn — verified live (it
+appears in `sessions.stream()` before the first tool result).
+
+The remaining depth is **BYOC reconnect**: when a `byoc` environment has no live worker, `acquire`
+throws ("no BYOC worker is connected…", see `src/sandbox/byoc.ts`). To match the SDK's
+`environment_connection` semantics, that condition should instead pause the run and surface a
+`requires_action` with `{ type: "environment_connection", environment_id }` (+ an
+`agent.session.environment.failed` event), then resume when the worker reconnects (`anyWorkerAlive`).
+This needs the run loop to treat a missing-worker acquire as a pause rather than a terminal error, plus
+a reconnect signal to re-enqueue — and a running BYOC worker to build and verify against. It is scoped
+but not built; the observable contract (the environment events, and the `environment_connection`
+required-action shape) is where the projection already plugs in.

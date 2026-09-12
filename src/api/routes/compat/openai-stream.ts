@@ -62,6 +62,9 @@ export function projectDelta(delta: StreamDelta, session: SessionResource, ctx: 
         { type: "agent.session.idle", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "idle" } },
       ];
     }
+    case "sandbox.acquired":
+      // The session's execution environment is up and connected (a sandbox lease was obtained).
+      return [{ type: "agent.session.environment.ready", event_id: evId(), session_id: sid, environment: { id: session.environment_id, status: "ready", error: null } }];
     case "session.error":
       return [{ type: "agent.session.failed", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "failed", error: p.error?.message ?? "session failed" } }];
     default:
