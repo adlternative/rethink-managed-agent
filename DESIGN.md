@@ -492,8 +492,19 @@ compat/openai-stream.ts` holds the projection; the stream starts at the current 
 input) so a fresh turn is never preceded by a replayed prior turn. `test/openai-sdk.test.ts` drives the
 real `sessions.stream(id, {input, toolHandlers})` over our projection and asserts the SDK runs the
 handler with our item's arguments, submits the result, and terminates — no server needed.
-`items`/`turns` read projections and `artifacts`/`subagents` are the remaining phases. The contract is
-derived by reading the pinned SDK's TypeScript declarations (`npm pack openai@7.15.0`), not guessed.
+**Phase 1c** adds the read projections `GET /agents/sessions/{id}/items` (event log → messages /
+function calls / function-call outputs) and `GET .../turns[/{turnId}]` (one `Turn` per
+`status_running`, closed by `status_idle`). `artifacts`/`subagents` are the remaining phases. The
+contract is derived by reading the pinned SDK's TypeScript declarations (`npm pack openai@7.15.0`),
+not guessed.
+
+**Verified live** against the running stack (rebuilt API): the real `openai@7.15.0` SDK created a
+session, ran `sessions.stream()` with a `get_time` toolHandler, and the actual model called the
+function tool — the SDK ran the handler, submitted the result through `POST .../events`, and the model
+answered from it; `items.list`/`turns.list` returned the projected `message / function_call /
+function_call_output / message` items and one `completed` turn. (`AUTH_REQUIRED=false` runs as the
+default principal when no `Authorization` header is sent; the SDK always sends a bearer, so a real key
+is needed under `AUTH_REQUIRED=true`.)
 
 ## 17. The three layers, and who owns each
 

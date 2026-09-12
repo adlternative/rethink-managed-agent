@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import OpenAI from "openai7";
 import { toAgentSession } from "../src/api/routes/compat/openai-agents.ts";
 import { projectDelta, newTurnCtx } from "../src/api/routes/compat/openai-stream.ts";
+import { toItems, toTurns } from "../src/api/routes/compat/openai-agents.ts";
 
 /**
  * Contract test against the REAL OpenAI SDK (openai@7.15.0, aliased as `openai7`). We do not boot the
@@ -66,6 +67,26 @@ describe("official OpenAI SDK contract (openai@7.15.0)", () => {
     expect(new URL(cap.req.url).pathname).toBe("/openai/v1/agents/sessions/sess_abc/events");
     expect(cap.req.method).toBe("POST");
     expect(cap.req.body.events[0]).toMatchObject({ type: "agent.session.input.tool_result", call_id: "call_1" });
+  });
+});
+
+describe("items & turns projection (phase 1c)", () => {
+  const evlog: any[] = [
+    { seq: 1, type: "session.status_running", payload: { type: "session.status_running" }, created_at: "2026-01-01T00:00:00Z" },
+    { seq: 2, type: "user.message", payload: { type: "user.message", content: [{ type: "text", text: "hi" }] }, created_at: "2026-01-01T00:00:01Z" },
+    { seq: 3, type: "agent.tool_use", payload: { type: "agent.tool_use", tool_use_id: "call_1", name: "run_bash", input: { cmd: "ls" } }, created_at: "2026-01-01T00:00:02Z" },
+    { seq: 4, type: "agent.tool_result", payload: { type: "agent.tool_result", tool_use_id: "call_1", content: [{ type: "text", text: "a.ts" }], is_error: false }, created_at: "2026-01-01T00:00:03Z" },
+    { seq: 5, type: "agent.message", payload: { type: "agent.message", content: [{ type: "text", text: "done" }] }, created_at: "2026-01-01T00:00:04Z" },
+    { seq: 6, type: "session.status_idle", payload: { type: "session.status_idle", stop_reason: "end_turn" }, created_at: "2026-01-01T00:00:05Z" },
+  ];
+  it("projects the event log into SDK items and one completed turn", () => {
+    const items = toItems(session, evlog as any);
+    expect(items.map((i) => i.type)).toEqual(["message", "function_call", "function_call_output", "message"]);
+    expect(items.every((i) => i.turn_id === "turn_1")).toBe(true); // all in the run's turn
+    expect(items[1]).toMatchObject({ type: "function_call", call_id: "call_1", name: "run_bash" });
+    const turns = toTurns(session, evlog as any);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ id: "turn_1", object: "agent.session.turn", status: "completed" });
   });
 });
 

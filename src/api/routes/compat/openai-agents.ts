@@ -58,6 +58,51 @@ export function toAgentSession(session: SessionResource, events: SessionEvent[],
   };
 }
 
+const textOf = (content: { type: string; text?: string }[]) => content.map((b) => (b.type === "text" ? b.text ?? "" : "")).join("");
+
+/** Assign a turn id to each event: a turn spans session.status_running → status_idle. */
+function turnCursor() {
+  let turn = "";
+  return (e: SessionEvent) => {
+    if (e.payload.type === "session.status_running") turn = `turn_${e.seq}`;
+    return turn || `turn_${e.seq}`;
+  };
+}
+
+/** Project the event log into the SDK's AgentSessionItem list (messages, function calls + outputs). */
+export function toItems(session: SessionResource, events: SessionEvent[]) {
+  const at = turnCursor();
+  const items: Record<string, unknown>[] = [];
+  for (const e of events) {
+    const p = e.payload;
+    const turn_id = at(e);
+    if (p.type === "user.message") items.push({ id: `item_${e.seq}`, type: "message", role: "user", content: [{ type: "input_text", text: textOf(p.content) }], phase: null, status: "completed", turn_id });
+    else if (p.type === "agent.message") items.push({ id: `item_${e.seq}`, type: "message", role: "assistant", content: [{ type: "output_text", text: textOf(p.content) }], phase: "final_answer", status: "completed", turn_id });
+    else if (p.type === "agent.tool_use") items.push({ id: `item_${e.seq}`, type: "function_call", call_id: p.tool_use_id, name: p.name, arguments: p.input, status: "completed", turn_id });
+    else if (p.type === "agent.tool_result") items.push({ id: `item_${e.seq}`, type: "function_call_output", call_id: p.tool_use_id, output: textOf(p.content), error: p.is_error ? textOf(p.content) : null, status: "completed", turn_id });
+  }
+  return items;
+}
+
+/** Project the event log into Turn objects (one per session.status_running, closed by status_idle). */
+export function toTurns(session: SessionResource, events: SessionEvent[]) {
+  const turns: Record<string, unknown>[] = [];
+  let cur: Record<string, unknown> | null = null;
+  for (const e of events) {
+    const p = e.payload;
+    const sec = Math.floor(new Date((e.created_at as unknown as string) ?? Date.now()).getTime() / 1000) || nowSec();
+    if (p.type === "session.status_running") {
+      cur = { id: `turn_${e.seq}`, object: "agent.session.turn", agent_id: session.agent.id, session_id: session.id, subagent_id: null, status: "in_progress", created_at: sec, started_at: sec, completed_at: null, error: null };
+      turns.push(cur);
+    } else if (p.type === "session.status_idle" && cur) {
+      cur.status = p.stop_reason === "error" ? "failed" : p.stop_reason === "interrupted" ? "cancelled" : "completed";
+      cur.completed_at = sec;
+      cur = null;
+    }
+  }
+  return turns;
+}
+
 /** Map the SDK's `agent.session.input.*` events onto rethink user events. */
 function inputEventsToUserEvents(events: unknown[]): UserEventInput[] {
   const out: UserEventInput[] = [];
@@ -166,4 +211,21 @@ export const openaiAgents = new Hono()
     const events = await listEvents(session.id);
     const data = events.map((e) => ({ object: "agent.session.event", event_id: `evt_${e.seq}`, session_id: session.id, seq: e.seq, type: e.type, payload: e.payload }));
     return c.json({ object: "list", data, has_more: false });
+  })
+  /** List the session's items (messages, function calls + outputs), projected from the log. */
+  .get("/agents/sessions/:id/items", async (c) => {
+    const session = await loadSession(c);
+    return c.json({ object: "list", data: toItems(session, await listEvents(session.id)), has_more: false });
+  })
+  /** List the session's turns. */
+  .get("/agents/sessions/:id/turns", async (c) => {
+    const session = await loadSession(c);
+    return c.json({ object: "list", data: toTurns(session, await listEvents(session.id)), has_more: false });
+  })
+  /** Retrieve one turn. */
+  .get("/agents/sessions/:id/turns/:turnId", async (c) => {
+    const session = await loadSession(c);
+    const turn = toTurns(session, await listEvents(session.id)).find((t) => t.id === c.req.param("turnId"));
+    if (!turn) throw notFound("turn", c.req.param("turnId"));
+    return c.json(turn);
   });
