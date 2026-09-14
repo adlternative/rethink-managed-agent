@@ -376,9 +376,9 @@ Bundled CLI commands (`npm run cli -- --help`, and `<command> --help` for the fl
 
 | Command | Subcommands |
 |---|---|
-| `agents` | `list`, `get <id>`, `create <name> <provider/model> [--system S \| --system-file F] [--tools a,b] [--packages p1,p2] [--skills s1,s2]`, `update <id> [...]` (the API has no agent delete) |
-| `envs` | `list`, `get <id>`, `create <name> --provider local\|docker\|e2b\|byoc [--image I] [--network none\|bridge] [--plugin-host runner\|sandbox] [--git URL [--ref R]]` (byoc prints the `worker_key` once) |
-| `sessions` | `list [--status S] [--all]`, `get`, `create --agent A --env E [--model p/m] [--message T] [--memory-stores mem[:path],..] [--environments main=env,k=env[:fork]] [--parent sess]`, `delete`, `archive`, `prompt`, `set-system`, `attach`, `mount`, `unmount`, `skill add\|remove` |
+| `agents` | `list`, `get <id>`, `create <name> <provider/model> [--system S \| --system-file F] [--tools a,b] [--packages p1,p2] [--skills s1,s2]`, `update <id> [...]`, `delete <id>` (removed if unused, archived if sessions reference it) |
+| `envs` | `list`, `get <id>`, `create <name> --provider local\|docker\|e2b\|byoc [--image I] [--network none\|bridge] [--plugin-host runner\|sandbox] [--git URL [--ref R]]`, `delete <id>` (removed if unused, archived if sessions are attached; byoc prints the `worker_key` once) |
+| `sessions` | `list [--status S] [--all]`, `get`, `create --agent A --env E [--model p/m] [--message T] [--memory-stores mem[:path],..] [--vaults vault_a,vault_b] [--environments main=env,k=env[:fork]] [--parent sess]`, `delete`, `archive`, `prompt`, `set-system`, `attach`, `mount`, `unmount`, `skill add\|remove` |
 | `send` | `send <session> <text...> [--file a.png,b.pdf] [--wait [--timeout SEC]]` |
 | `stream` / `events` / `interrupt` | `stream <session> [--since SEQ]`, `events <session> [--since SEQ] [--limit N]` (follows every page), `interrupt <session>` |
 | `vaults` | `list`, `get`, `create [name]`, `delete`, `credentials list <vault>`, `credentials put <vault> <name> --value-env VAR \| --value-stdin \| --value V`, `credentials delete <vault> <name>` |

@@ -13,15 +13,19 @@ export async function* streamProcess(
   const queue: ExecChunk[] = [];
   let notify: (() => void) | null = null;
   const push = (c: ExecChunk) => { queue.push(c); notify?.(); };
-  const kill = () => { try { process.kill(-child.pid!, "SIGKILL"); } catch { child.kill("SIGKILL"); } };
+  // Kill the whole group AND the leader: under load the group signal can reach the children before the
+  // leader (bash) joined, which then survives, sees its job die and exits 0.
+  const kill = () => { try { process.kill(-child.pid!, "SIGKILL"); } catch { /* group gone or not formed */ } try { child.kill("SIGKILL"); } catch { /* already exited */ } };
+  let killed = false; // a timeout/abort kill: the command did not complete, so it never reports success
+  const killFor = () => { killed = true; kill(); };
 
   child.stdout.on("data", (d: Buffer) => push({ type: "stdout", data: d.toString() }));
   child.stderr.on("data", (d: Buffer) => push({ type: "stderr", data: d.toString() }));
   child.on("error", (e) => { push({ type: "stderr", data: String(e) }); push({ type: "exit", code: 127 }); });
-  child.on("close", (code, sig) => push({ type: "exit", code: code ?? (sig ? 137 : 1) }));
+  child.on("close", (code, sig) => push({ type: "exit", code: killed && !code ? 137 : code ?? (sig ? 137 : 1) }));
 
-  const timer = opts.timeoutMs ? setTimeout(kill, opts.timeoutMs) : null;
-  opts.signal?.addEventListener("abort", kill, { once: true });
+  const timer = opts.timeoutMs ? setTimeout(killFor, opts.timeoutMs) : null;
+  opts.signal?.addEventListener("abort", killFor, { once: true });
   try {
     while (true) {
       if (queue.length === 0) await new Promise<void>((r) => (notify = r));
@@ -32,7 +36,7 @@ export async function* streamProcess(
     }
   } finally {
     if (timer) clearTimeout(timer);
-    opts.signal?.removeEventListener("abort", kill);
+    opts.signal?.removeEventListener("abort", killFor);
     if (child.exitCode === null && child.signalCode === null) kill();
   }
 }

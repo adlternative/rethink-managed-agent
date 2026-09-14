@@ -108,6 +108,24 @@ export const apiKeys = {
   },
 };
 
+/**
+ * Delete-or-archive for rows sessions may reference (agents, environments). Serialized on the row with
+ * FOR UPDATE so a concurrent delete cannot both archive and remove it; a row that is already archived
+ * reads as not found for a scoped caller.
+ */
+async function retire(table: "agents" | "environments", refQuery: string, id: string, scope?: Scope): Promise<{ archived: boolean } | null> {
+  return tx(async (c) => {
+    const row = await one<{ id: string }>(c, `SELECT id FROM ${table} WHERE id=$1 AND archived_at IS NULL${scope ? " AND owner_id=$2" : ""} FOR UPDATE`, scope ? [id, scope.owner] : [id]);
+    if (!row) return null;
+    if (await one(c, refQuery, [id])) {
+      await c.query(`UPDATE ${table} SET archived_at=now() WHERE id=$1`, [id]);
+      return { archived: true };
+    }
+    await c.query(`DELETE FROM ${table} WHERE id=$1`, [id]);
+    return { archived: false };
+  });
+}
+
 export const repos = {
   providers: {
     /** Insert, or update the row with this id when it belongs to the same owner. null: the id is taken by another owner. */
@@ -144,13 +162,13 @@ export const repos = {
       return iso(row)!;
     },
     async get(id: string, scope?: Scope): Promise<AgentResource | null> {
-      return iso(await one<AgentResource>(pool, `SELECT * FROM agents WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id]));
+      return iso(await one<AgentResource>(pool, `SELECT * FROM agents WHERE id=$1${scope ? " AND owner_id=$2 AND archived_at IS NULL" : ""}`, scope ? [id, scope.owner] : [id]));
     },
     async update(id: string, patch: Partial<Omit<AgentResource, "id" | "created_at">>, scope?: Scope): Promise<AgentResource | null> {
       const row = await one<AgentResource>(
         pool,
         `UPDATE agents SET name=COALESCE($2,name), model=COALESCE($3::jsonb,model), system=CASE WHEN $8 THEN $4 ELSE system END,
-           tools=COALESCE($5::jsonb,tools), packages=COALESCE($6::jsonb,packages), skills=COALESCE($7::jsonb,skills) WHERE id=$1${scope ? " AND owner_id=$9" : ""} RETURNING *`,
+           tools=COALESCE($5::jsonb,tools), packages=COALESCE($6::jsonb,packages), skills=COALESCE($7::jsonb,skills) WHERE id=$1${scope ? " AND owner_id=$9 AND archived_at IS NULL" : ""} RETURNING *`,
         scope
           ? [id, patch.name ?? null, patch.model ? JSON.stringify(patch.model) : null, patch.system ?? null, patch.tools ? JSON.stringify(patch.tools) : null, patch.packages ? JSON.stringify(patch.packages) : null, patch.skills ? JSON.stringify(patch.skills) : null, "system" in patch, scope.owner]
           : [id, patch.name ?? null, patch.model ? JSON.stringify(patch.model) : null, patch.system ?? null, patch.tools ? JSON.stringify(patch.tools) : null, patch.packages ? JSON.stringify(patch.packages) : null, patch.skills ? JSON.stringify(patch.skills) : null, "system" in patch],
@@ -158,7 +176,11 @@ export const repos = {
       return iso(row);
     },
     async list(scope?: Scope): Promise<AgentResource[]> {
-      return isoAll(await many<AgentResource>(pool, `SELECT * FROM agents${scope ? " WHERE owner_id=$1" : ""} ORDER BY created_at`, scope ? [scope.owner] : []));
+      return isoAll(await many<AgentResource>(pool, `SELECT * FROM agents${scope ? " WHERE owner_id=$1 AND archived_at IS NULL" : ""} ORDER BY created_at`, scope ? [scope.owner] : []));
+    },
+    /** Delete an agent: removed outright if no session references it, else archived. null = not found for this scope. */
+    async delete(id: string, scope?: Scope): Promise<{ archived: boolean } | null> {
+      return retire("agents", `SELECT 1 FROM sessions WHERE agent_id=$1 LIMIT 1`, id, scope);
     },
   },
   environments: {
@@ -171,10 +193,14 @@ export const repos = {
       return iso(row)!;
     },
     async get(id: string, scope?: Scope): Promise<EnvironmentResource | null> {
-      return iso(await one<EnvironmentResource>(pool, `SELECT * FROM environments WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id]));
+      return iso(await one<EnvironmentResource>(pool, `SELECT * FROM environments WHERE id=$1${scope ? " AND owner_id=$2 AND archived_at IS NULL" : ""}`, scope ? [id, scope.owner] : [id]));
     },
     async list(scope?: Scope): Promise<EnvironmentResource[]> {
-      return isoAll(await many<EnvironmentResource>(pool, `SELECT * FROM environments${scope ? " WHERE owner_id=$1" : ""} ORDER BY created_at`, scope ? [scope.owner] : []));
+      return isoAll(await many<EnvironmentResource>(pool, `SELECT * FROM environments${scope ? " WHERE owner_id=$1 AND archived_at IS NULL" : ""} ORDER BY created_at`, scope ? [scope.owner] : []));
+    },
+    /** Delete an environment: removed outright if no session is attached to it, else archived (running sessions keep using it). */
+    async delete(id: string, scope?: Scope): Promise<{ archived: boolean } | null> {
+      return retire("environments", `SELECT 1 FROM sessions WHERE environment_id=$1 UNION ALL SELECT 1 FROM session_environments WHERE environment_id=$1 LIMIT 1`, id, scope);
     },
   },
   workspaces: {

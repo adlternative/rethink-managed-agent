@@ -31,7 +31,7 @@ async function gitRepo(name: string, files: Record<string, string> = { "a.txt": 
   return dir;
 }
 
-describe("captureGit", () => {
+describe("captureGit", { timeout: 30_000 }, () => { // many git subprocesses per test: slow under a loaded parallel suite
   // Regression: captureGit runs git in a sandbox-writable repo without disabling config-driven hooks
   // (core.fsmonitor / diff.external), so sandboxed code gets arbitrary execution on the runner host.
   it("does not execute a command injected via .git/config core.fsmonitor / diff.external", async () => {

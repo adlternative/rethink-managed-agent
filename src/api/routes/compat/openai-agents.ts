@@ -12,6 +12,7 @@ import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
 import { openaiAgentToRethink, openaiEnvToEnvironmentId, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
 import { requiredActions, clientToolNames, environmentActions, STATE_EVENT_TYPES } from "./required-actions.ts";
+import { validateVaultIds } from "../vaults.ts";
 import { streamAgentSessionEvents } from "./openai-stream.ts";
 
 /**
@@ -240,7 +241,7 @@ async function loadSession(c: Context): Promise<SessionResource> {
 
 export const openaiAgents = new Hono()
   .post("/agents/sessions", async (c) => {
-    const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; metadata?: unknown; vault_ids?: string[]; stream?: boolean }>(c);
+    const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; metadata?: unknown; vault_ids?: unknown; stream?: boolean }>(c);
     if (!body.agent) throw invalid("agent (with a model) is required; agent_id references are not supported yet");
     const owner = ownerId(c);
     const draft = openaiAgentToRethink(body.agent);
@@ -250,11 +251,12 @@ export const openaiAgents = new Hono()
     if (body.stream && inputs.length === 0) throw invalid("stream:true needs input (the stream follows the turn it triggers)");
     const environment = await repos.environments.get(environmentId, scope(c));
     if (!environment) throw notFound("environment", environmentId);
+    const vaultIds = await validateVaultIds(body.vault_ids, scope(c));
     const spec = environment.workspace;
     const workspace = await repos.workspaces.create(spec, initialRef(spec) as WorkspaceRef, owner);
     const agentRow = await repos.agents.create({ owner_id: owner, name: draft.name, model: draft.model, system: draft.system, tools: draft.tools, packages: draft.packages, skills: [] });
     const { created_at: _c, ...snapshot } = { ...agentRow, client_tools: draft.client_tools, mcp_servers: draft.mcp_servers };
-    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot, vault_ids: Array.isArray(body.vault_ids) ? body.vault_ids : [] });
+    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot, vault_ids: vaultIds });
     const appended = inputs.length ? await sendUserEvents(session, inputs) : [];
     // stream:true -> SSE of AgentSessionEvents for the turn the input just triggered. Start at the
     // input's seq (the fresh session's first user.message) so the run's events that follow are all captured.

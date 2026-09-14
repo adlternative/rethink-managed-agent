@@ -75,4 +75,10 @@ export const environments = new Hono()
     const e = await repos.environments.get(c.req.param("id"), scope(c));
     if (!e) throw notFound("environment", c.req.param("id"));
     return c.json(mask(e));
+  })
+  /** Removed outright when no session is attached; archived when one is (its sessions and BYOC worker keep working). */
+  .delete("/:id", async (c) => {
+    const r = await repos.environments.delete(c.req.param("id"), scope(c));
+    if (!r) throw notFound("environment", c.req.param("id"));
+    return c.json({ id: c.req.param("id"), object: "environment.deleted", deleted: true, archived: r.archived });
   });

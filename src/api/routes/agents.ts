@@ -90,4 +90,10 @@ export const agents = new Hono()
     const a = await repos.agents.get(c.req.param("id"), scope(c));
     if (!a) throw notFound("agent", c.req.param("id"));
     return c.json(a);
+  })
+  /** Removed outright when unused; archived (hidden, not usable for new sessions) when sessions still reference it. */
+  .delete("/:id", async (c) => {
+    const r = await repos.agents.delete(c.req.param("id"), scope(c));
+    if (!r) throw notFound("agent", c.req.param("id"));
+    return c.json({ id: c.req.param("id"), object: "agent.deleted", deleted: true, archived: r.archived });
   });

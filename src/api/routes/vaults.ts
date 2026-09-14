@@ -3,6 +3,17 @@ import { vaults, vaultCredentials } from "../../infra/db.ts";
 import { secretsConfigured } from "../../infra/secrets.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
 import { scope, ownerId } from "../auth.ts";
+import type { Scope } from "../../infra/db.ts";
+
+/** Validate a session's `vault_ids`: an array of distinct vault ids the caller owns (unknown/foreign -> 404). */
+export async function validateVaultIds(input: unknown, sc: Scope): Promise<string[]> {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input) || input.some((v) => typeof v !== "string" || !v)) throw invalid("vault_ids must be an array of vault ids");
+  const ids = [...new Set(input as string[])];
+  if (ids.length > 32) throw invalid("at most 32 vault_ids");
+  for (const id of ids) if (!(await vaults.get(id, sc))) throw notFound("vault", id);
+  return ids;
+}
 
 /**
  * Vaults: named, per-principal encrypted secrets injected into a session's sandboxes as env vars.

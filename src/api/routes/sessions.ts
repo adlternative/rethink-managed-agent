@@ -6,6 +6,7 @@ import { ApiError, invalid, notFound, queryInt, readJson } from "../errors.ts";
 import { checkModelAccess, checkSkillAccess, validateModel, validatePackages, validateTools } from "./agents.ts";
 import { validateSkillRefs } from "./skills.ts";
 import { validateMounts } from "./memories.ts";
+import { validateVaultIds } from "./vaults.ts";
 import { sessionConfig, skills as skillsRepo } from "../../infra/db.ts";
 import { parseSessionCursor } from "../../shared/cursor.ts";
 import { renderSystemPrompt } from "../../harness/system-prompt.ts";
@@ -80,7 +81,7 @@ async function getLive(id: string, sc: Scope): Promise<SessionResource> {
 
 export const sessions = new Hono()
   .post("/", async (c) => {
-    const body = await readJson<{ agent?: AgentInput; environment_id?: string; workspace?: unknown; workspace_id?: string; environments?: EnvInput[]; parent_id?: string; memory_stores?: unknown; initial_events?: unknown }>(c);
+    const body = await readJson<{ agent?: AgentInput; environment_id?: string; workspace?: unknown; workspace_id?: string; environments?: EnvInput[]; parent_id?: string; memory_stores?: unknown; vault_ids?: unknown; initial_events?: unknown }>(c);
     const sc = scope(c);
     const owner = ownerId(c);
     const agent = await resolveAgent(body.agent, sc);
@@ -93,6 +94,7 @@ export const sessions = new Hono()
     // Validate everything that does not create rows first, so a 4xx never leaves orphaned workspaces/sessions.
     if (body.parent_id && !(await repos.sessions.get(body.parent_id, sc))) throw notFound("session", body.parent_id);
     const memory_stores = await validateMounts(body.memory_stores, sc);
+    const vault_ids = await validateVaultIds(body.vault_ids, sc);
     const initial = Array.isArray(body.initial_events) && body.initial_events.length > 0 ? validateUserEvents(body.initial_events) : null;
     const envs: SessionEnvironment[] = [];
     for (const input of inputs) envs.push(await resolveEnvironment(input, envs, owner, sc));
@@ -105,6 +107,7 @@ export const sessions = new Hono()
       environments: envs,
       parent_id: body.parent_id ?? null,
       memory_stores,
+      vault_ids,
     });
     if (initial) await sendUserEvents(session, initial);
     return c.json(session, 201);

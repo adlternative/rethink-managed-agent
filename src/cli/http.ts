@@ -29,18 +29,25 @@ export function describeError(status: number, body: string): string {
   return `HTTP ${status}${text ? `: ${text.slice(0, 300)}` : ""}`;
 }
 
+const STALE_SOCKET = new Set(["UND_ERR_SOCKET", "ECONNRESET", "EPIPE"]);
+
 export class Client {
   constructor(public cfg: CliConfig) {}
 
   async fetch(method: string, path: string, init: { body?: BodyInit; headers?: Record<string, string>; signal?: AbortSignal } = {}): Promise<Response> {
     const headers = { ...(this.cfg.token ? { authorization: `Bearer ${this.cfg.token}` } : {}), ...init.headers };
-    try {
-      return await fetch(this.cfg.base + path, { method, headers, body: init.body, signal: init.signal });
-    } catch (e) {
-      if (init.signal?.aborted) throw e;
-      if (!(e instanceof TypeError && (e as { cause?: unknown }).cause)) throw e; // not a network failure (e.g. an invalid header value)
-      const cause = (e as { cause?: { code?: string; message?: string } }).cause;
-      throw new Error(`cannot reach the API at ${this.cfg.base} (${cause?.code ?? cause?.message ?? (e as Error).message}); set PMA_API to its URL`);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fetch(this.cfg.base + path, { method, headers, body: init.body, signal: init.signal });
+      } catch (e) {
+        if (init.signal?.aborted) throw e;
+        if (!(e instanceof TypeError && (e as { cause?: unknown }).cause)) throw e; // not a network failure (e.g. an invalid header value)
+        const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+        // A pooled keep-alive socket the server already closed fails before the request is sent: retry an
+        // idempotent GET once on a fresh connection. Writes are never retried (they may have been applied).
+        if (attempt === 0 && method === "GET" && STALE_SOCKET.has(cause?.code ?? "")) continue;
+        throw new Error(`cannot reach the API at ${this.cfg.base} (${cause?.code ?? cause?.message ?? (e as Error).message}); set PMA_API to its URL`);
+      }
     }
   }
 

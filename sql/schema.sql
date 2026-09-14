@@ -273,3 +273,8 @@ CREATE INDEX IF NOT EXISTS sessions_env_status ON sessions(environment_id, statu
 CREATE INDEX IF NOT EXISTS sandboxes_container_ref ON sandboxes(container_ref) WHERE status <> 'destroyed';
 -- Latest event of a type without walking the log (status/user.message probes, compaction cut, turns).
 CREATE INDEX IF NOT EXISTS events_session_type_seq ON events(session_id, type, seq);
+
+-- Deleting an agent/environment that sessions still reference archives it instead (sessions keep an agent
+-- snapshot and the runner still reads the environment): hidden from owner-scoped reads, unusable for new sessions.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;

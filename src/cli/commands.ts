@@ -24,8 +24,8 @@ export const HELP = `pma CLI (npm run cli -- <command>) — scriptable client fo
 usage: <command> [subcommand] [args] [--flag value | --flag=value] [--json] [--help]
 
 resources:
-  agents         list | get <id> | create <name> <provider/model> [...] | update <id> [...]
-  envs           list | get <id> | create <name> --provider local|docker|e2b|byoc [...]
+  agents         list | get <id> | create <name> <provider/model> [...] | update <id> [...] | delete <id>
+  envs           list | get <id> | create <name> --provider local|docker|e2b|byoc [...] | delete <id>
   sessions       list | get <id> | create --agent A --env E [...] | delete <id> | archive <id> | prompt <id>
                  set-system <id> | attach <id> <key>=<env> | mount|unmount <id> <mem> | skill <id> add|remove <skill>
   vaults         list | get <id> | create [name] | delete <id> | credentials list|put|delete <vault> [name]
@@ -57,16 +57,17 @@ agents get <id>
 agents create <name> <provider/model>            (or: --name N --provider P --model M)
        [--system S | --system-file F] [--tools bash,read,write,edit] [--packages npm:x,git:y,/path] [--skills skill_a,skill_b]
 agents update <id> [--name N] [--model provider/model] [--system S | --system-file F | --no-system] [--tools ...] [--packages ...] [--skills ...]
-(agents cannot be deleted through the API)`,
+agents delete <id>          removed if unused; archived (hidden, unusable for new sessions) if sessions reference it`,
   envs: `envs list
 envs get <id>
 envs create <name> --provider local|docker|e2b|byoc  (or: --name N)
        [--image I] [--network none|bridge] [--plugin-host runner|sandbox] [--git URL [--ref R] | --local PATH]
+envs delete <id>            removed if unused; archived if sessions are attached (they keep working)
 (byoc: the response carries worker_key once; run "worker --env <id> --key <worker_key>" on the machine that executes tools)`,
   sessions: `sessions list [--status idle|running|terminated] [--limit N] [--all]
 sessions get <id>
 sessions create --agent A --env E [--workspace-id W] [--model provider/model] [--message TEXT]
-       [--memory-stores mem_a[:path],mem_b] [--environments main=env_a,<key>=env_b[:fork]] [--parent sess_p]
+       [--memory-stores mem_a[:path],mem_b] [--vaults vault_a,vault_b] [--environments main=env_a,<key>=env_b[:fork]] [--parent sess_p]
 sessions delete <id>
 sessions archive <id>
 sessions prompt <id>                                  the system prompt as actually sent
@@ -190,8 +191,15 @@ async function agents(c: Ctx, [sub = "list", a, b]: string[]): Promise<void> {
       if (!Object.keys(body).length) throw new UsageError("agents update: nothing to change");
       return c.print(await api.json("PATCH", `/v1/agents/${seg(a)}`, body));
     }
+    case "delete": case "rm": if (!a) usage("agents"); return deleted(c, await api.json("DELETE", `/v1/agents/${seg(a)}`));
     default: usage("agents");
   }
+}
+
+/** Print a delete result; note when the resource was archived rather than removed. */
+function deleted(c: Ctx, r: { id: string; archived?: boolean }): void {
+  if (c.json) return c.print(r);
+  c.line(r.archived ? `archived ${r.id} (still referenced by sessions; hidden and unusable for new sessions)` : `deleted ${r.id}`);
 }
 
 async function envs(c: Ctx, [sub = "list", a]: string[]): Promise<void> {
@@ -211,6 +219,7 @@ async function envs(c: Ctx, [sub = "list", a]: string[]): Promise<void> {
       if (env?.worker_key && !c.json) c.io.stderr(`worker_key is shown only once. Start a worker with:\n  npm run cli -- worker --env ${env.id} --key ${env.worker_key}\n`);
       return;
     }
+    case "delete": case "rm": if (!a) usage("envs"); return deleted(c, await api.json("DELETE", `/v1/environments/${seg(a)}`));
     default: usage("envs");
   }
 }
@@ -244,6 +253,7 @@ async function sessions(c: Ctx, args: string[]): Promise<void> {
       else body.environment_id = need(flags, "env", USAGE.sessions);
       if (str(flags, "workspace-id")) body.workspace_id = str(flags, "workspace-id");
       if (str(flags, "parent")) body.parent_id = str(flags, "parent");
+      if (str(flags, "vaults")) body.vault_ids = list(str(flags, "vaults"));
       if (str(flags, "memory-stores")) body.memory_stores = list(str(flags, "memory-stores"))!.map((x) => { const [id, mp] = x.split(":"); return mp ? { memory_store_id: id, mount_path: mp } : id; });
       if (str(flags, "message")) body.initial_events = [{ type: "user.message", content: [{ type: "text", text: str(flags, "message") }] }];
       return c.print(await api.json("POST", "/v1/sessions", body));

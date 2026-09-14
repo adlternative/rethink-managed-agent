@@ -142,6 +142,7 @@ describe("POST /agents/sessions", () => {
   const good = { agent: { model: "x", tools: [{ type: "function", name: "lookup", parameters: {} }] }, environment: { environment_id: "env_1" } };
 
   it("creates a session, forwards a string input, and returns an AgentSession (201)", async () => {
+    st.vaults.set("vault_z", { id: "vault_z", owner_id: "prc_a", name: null, metadata: {}, created_at: "2026-01-01T00:00:00.000Z" }); // vault_ids must be the caller's own vaults
     const res = await call("POST", "/agents/sessions", { ...good, input: "hello", vault_ids: ["vault_z"] });
     expect(res.status).toBe(201);
     const body = await res.json();

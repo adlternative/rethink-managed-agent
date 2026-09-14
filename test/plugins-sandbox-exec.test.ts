@@ -80,12 +80,21 @@ const psExists = async (pat: string) => {
 
 describe("streamProcess", () => {
   it("a timeout kills the whole process group (a backgrounded grandchild is gone)", async () => {
-    const marker = `pma-timeout-${process.pid}-${Date.now()}`;
-    const r = await collect(streamProcess("bash", ["-lc", `sleep 30 & echo ${marker}-x >/dev/null; wait`], { timeoutMs: 200 }));
+    // a sleep duration no other test uses, so pgrep cannot match another test's process
+    const secs = `41.${process.pid % 1000}`;
+    const r = await collect(streamProcess("bash", ["-lc", `sleep ${secs} & wait`], { timeoutMs: 200 }));
     expect(r.code).not.toBe(0);
-    await new Promise((res) => setTimeout(res, 300));
-    expect(await psExists(`sleep 30`)).toBe(false);
+    let alive = true;
+    for (let i = 0; i < 30 && alive; i++) { await new Promise((res) => setTimeout(res, 100)); alive = await psExists(`sleep ${secs}`); }
+    expect(alive).toBe(false);
   }, 10_000);
+
+  it("a timed-out command never reports success even if the shell outlives its killed job (load race)", async () => {
+    // Regression: under load the group kill reached the backgrounded sleep before bash, bash survived,
+    // `wait` returned 0 and the timeout was reported as exit 0.
+    const runs = await Promise.all(Array.from({ length: 40 }, () => collect(streamProcess("bash", ["-lc", `sleep 42.${process.pid % 1000} & wait`], { timeoutMs: 150 }))));
+    expect(runs.map((r) => r.code).filter((c) => c === 0)).toEqual([]);
+  }, 20_000);
 
   it("an abort signal kills the process", async () => {
     const ac = new AbortController();
