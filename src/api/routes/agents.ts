@@ -5,6 +5,10 @@ import { invalid, notFound, readJson } from "../errors.ts";
 import { validateSkillRefs } from "./skills.ts";
 import { disallowedEverywhere } from "../../plugins/allow.ts";
 import { scope, ownerId } from "../auth.ts";
+import { isOperatorOwner } from "../../harness/models.ts";
+import type { Scope } from "../../infra/db.ts";
+import { skills as skillsRepo } from "../../infra/db.ts";
+import type { SkillRef } from "../../shared/types.ts";
 
 const TOOLS: BuiltinToolName[] = ["bash", "read", "write", "edit"];
 
@@ -17,6 +21,22 @@ export function validateModel(model: unknown): ModelRef {
   const m = model as Partial<ModelRef> | undefined;
   if (!m || typeof m.provider !== "string" || typeof m.id !== "string") throw invalid("model {provider,id} is required");
   return { provider: m.provider, id: m.id };
+}
+
+/** A model may only name a provider the caller owns or an operator-shared one (never another tenant's BYOK row). */
+export async function checkModelAccess(model: ModelRef, owner: string): Promise<ModelRef> {
+  const p = await repos.providers.get(model.provider);
+  if (p && p.owner_id !== owner && !isOperatorOwner(p.owner_id)) throw notFound("provider", model.provider);
+  return model;
+}
+
+/** Skill refs must name skills owned by the caller (the runner injects their bodies into the prompt). */
+export async function checkSkillAccess(refs: SkillRef[], sc: Scope): Promise<SkillRef[]> {
+  const ids = [...new Set(refs.map((r) => r.skill_id))];
+  const found = new Set((await skillsRepo.getMany(ids, sc)).map((s) => s.id));
+  const missing = ids.find((id) => !found.has(id));
+  if (missing) throw notFound("skill", missing);
+  return refs;
 }
 
 /** Package sources pi understands: npm:<pkg>, git:<url>, or a local path on the runner. */
@@ -43,11 +63,11 @@ export const agents = new Hono()
     const agent = await repos.agents.create({
       owner_id: ownerId(c),
       name: body.name,
-      model: validateModel(body.model),
+      model: await checkModelAccess(validateModel(body.model), ownerId(c)),
       system: body.system ?? null,
       tools: validateTools(body.tools),
       packages: validatePackages(body.packages),
-      skills: validateSkillRefs(body.skills),
+      skills: await checkSkillAccess(validateSkillRefs(body.skills), scope(c)),
     });
     return c.json(agent, 201);
   })
@@ -56,11 +76,11 @@ export const agents = new Hono()
     const body = await readJson<{ name?: string; model?: unknown; system?: string | null; tools?: unknown; packages?: unknown; skills?: unknown }>(c);
     const patch: Record<string, unknown> = {};
     if (body.name !== undefined) patch.name = String(body.name);
-    if (body.model !== undefined) patch.model = validateModel(body.model);
+    if (body.model !== undefined) patch.model = await checkModelAccess(validateModel(body.model), ownerId(c));
     if (body.system !== undefined) patch.system = body.system === null ? null : String(body.system);
     if (body.tools !== undefined) patch.tools = validateTools(body.tools);
     if (body.packages !== undefined) patch.packages = validatePackages(body.packages);
-    if (body.skills !== undefined) patch.skills = validateSkillRefs(body.skills);
+    if (body.skills !== undefined) patch.skills = await checkSkillAccess(validateSkillRefs(body.skills), scope(c));
     const a = await repos.agents.update(c.req.param("id"), patch, scope(c));
     if (!a) throw notFound("agent", c.req.param("id"));
     return c.json(a);

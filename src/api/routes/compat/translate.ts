@@ -34,6 +34,7 @@ export interface SplitTools {
 /** Split OpenAI tool decls into rethink builtin tools, client/function tools, and accepted-and-ignored types. */
 export function splitTools(tools: OpenAiToolDecl[] | undefined): SplitTools {
   const out: SplitTools = { builtins: [], clientTools: [], mcpServers: [], webSearch: false, ignored: [] };
+  let unlabeled = 0;
   for (const t of tools ?? []) {
     if (t.type === "function") {
       if (!t.name || typeof t.name !== "string") throw invalid("function tool requires a name");
@@ -42,7 +43,9 @@ export function splitTools(tools: OpenAiToolDecl[] | undefined): SplitTools {
       out.builtins.push(t.type as BuiltinToolName);
     } else if (t.type === "mcp") {
       const tr = (t.transport ?? {}) as { type?: string; server_url?: string; authorization?: string; headers?: Record<string, string> };
-      const label = typeof t.server_label === "string" ? t.server_label : "mcp";
+      // tool names are namespaced by label, so every server needs a distinct one
+      const label = typeof t.server_label === "string" ? t.server_label : unlabeled++ ? `mcp${unlabeled}` : "mcp";
+      if (out.mcpServers.some((m) => m.label === label)) throw invalid(`mcp server_label ${JSON.stringify(label)} is used by more than one mcp tool`);
       if (!tr.server_url || typeof tr.server_url !== "string") throw invalid(`mcp tool ${label} requires transport.server_url`);
       out.mcpServers.push({ label, url: tr.server_url, authorization: tr.authorization, headers: tr.headers, allowed_tools: Array.isArray(t.allowed_tools) ? (t.allowed_tools as string[]) : undefined });
     } else if (t.type === "web_search") {

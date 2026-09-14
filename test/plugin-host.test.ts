@@ -228,7 +228,7 @@ describe("plugin host inside a sandbox", () => {
       // note: writeFile above is workspace-confined like the real providers, so the bundle must go via spawn
     };
     const bundle = await buildHostBundle([pkg(path.join(ROOT, "test/fixtures/pma-escape"))], ROOT);
-    expect(bundle.manifests[0]!.dir).toMatch(/^\/tmp\/pma-host\/packages\//);
+    expect(bundle.manifests[0]!.dir).toMatch(/^\/tmp\/pma-host\/[^/]+\/packages\//); // one dir per bundle
     const host = await PluginHost.startInSandbox(sandbox, bundle, { agentId: "agent_s" });
     host.attach(session, caps);
     const t = Object.fromEntries(host.agentTools(session).map((x) => [x.name, x]));

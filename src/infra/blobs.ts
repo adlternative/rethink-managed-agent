@@ -31,8 +31,9 @@ const noneStore: BlobStore = {
 function fsStore(dir: string): BlobStore {
   const root = path.resolve(dir);
   const loc = (key: string) => {
+    if (!key) throw new Error("blob key must be non-empty");
     const p = path.resolve(root, key);
-    if (p !== root && !p.startsWith(root + path.sep)) throw new Error(`blob key escapes BLOB_DIR: ${key}`);
+    if (p === root || !p.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) throw new Error(`blob key escapes BLOB_DIR: ${key}`);
     return p;
   };
   return {

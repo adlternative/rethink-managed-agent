@@ -44,7 +44,9 @@ class Histogram implements Metric {
 type Kind = "counter" | "gauge" | "histogram";
 const registry = new Map<string, { kind: Kind; help: string; metric: Metric }>();
 function reg<T extends Metric>(name: string, kind: Kind, help: string, make: () => T): T {
-  const existing = registry.get(name); if (existing) return existing.metric as T;
+  const existing = registry.get(name);
+  if (existing && existing.kind !== kind) throw new Error(`metric ${name} is already registered as a ${existing.kind}, not a ${kind}`);
+  if (existing) return existing.metric as T;
   const metric = make(); registry.set(name, { kind, help, metric }); return metric;
 }
 

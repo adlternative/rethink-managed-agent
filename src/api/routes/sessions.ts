@@ -2,11 +2,12 @@ import { Hono } from "hono";
 import { repos, toolOutputs } from "../../infra/db.ts";
 import { appendEvents } from "../../infra/events.ts";
 import type { AgentResource, SessionEnvironment, SessionResource, WorkspaceRef, WorkspaceResource, WorkspaceSpec } from "../../shared/types.ts";
-import { invalid, notFound, readJson } from "../errors.ts";
-import { validateModel, validatePackages, validateTools } from "./agents.ts";
+import { ApiError, invalid, notFound, queryInt, readJson } from "../errors.ts";
+import { checkModelAccess, checkSkillAccess, validateModel, validatePackages, validateTools } from "./agents.ts";
 import { validateSkillRefs } from "./skills.ts";
 import { validateMounts } from "./memories.ts";
 import { sessionConfig, skills as skillsRepo } from "../../infra/db.ts";
+import { parseSessionCursor } from "../../shared/cursor.ts";
 import { renderSystemPrompt } from "../../harness/system-prompt.ts";
 import { validateWorkspaceSpec } from "./environments.ts";
 import { events, sendUserEvents, validateUserEvents } from "./events.ts";
@@ -30,11 +31,11 @@ async function resolveAgent(input: AgentInput | undefined, sc: Scope): Promise<S
   if (typeof input === "string" || input === undefined) return snap;
   return {
     ...snap,
-    model: input.model !== undefined ? validateModel(input.model) : snap.model,
+    model: input.model !== undefined ? await checkModelAccess(validateModel(input.model), base.owner_id) : snap.model,
     system: input.system !== undefined ? input.system : snap.system,
     tools: input.tools !== undefined ? validateTools(input.tools) : snap.tools,
     packages: input.packages !== undefined ? validatePackages(input.packages) : (snap.packages ?? []),
-    skills: input.skills !== undefined ? validateSkillRefs(input.skills) : (snap.skills ?? []),
+    skills: input.skills !== undefined ? await checkSkillAccess(validateSkillRefs(input.skills), sc) : (snap.skills ?? []),
   };
 }
 
@@ -84,13 +85,17 @@ export const sessions = new Hono()
     const owner = ownerId(c);
     const agent = await resolveAgent(body.agent, sc);
     // Either the classic single-environment shape, or an explicit list whose first entry is "main".
+    if (Array.isArray(body.environments) && body.environments.some((e) => !e || typeof e !== "object" || Array.isArray(e))) throw invalid("each environments[] entry must be an object");
     const inputs: EnvInput[] = Array.isArray(body.environments) && body.environments.length > 0
       ? body.environments.map((e, i) => ({ ...e, key: e.key ?? (i === 0 ? "main" : undefined) }))
       : [{ key: "main", environment_id: body.environment_id, workspace: body.workspace, workspace_id: body.workspace_id }];
     if (inputs[0]!.key !== "main") throw invalid("environments[0] must be the main environment");
+    // Validate everything that does not create rows first, so a 4xx never leaves orphaned workspaces/sessions.
+    if (body.parent_id && !(await repos.sessions.get(body.parent_id, sc))) throw notFound("session", body.parent_id);
+    const memory_stores = await validateMounts(body.memory_stores, sc);
+    const initial = Array.isArray(body.initial_events) && body.initial_events.length > 0 ? validateUserEvents(body.initial_events) : null;
     const envs: SessionEnvironment[] = [];
     for (const input of inputs) envs.push(await resolveEnvironment(input, envs, owner, sc));
-    if (body.parent_id && !(await repos.sessions.get(body.parent_id, sc))) throw notFound("session", body.parent_id);
     const session = await repos.sessions.create({
       owner_id: owner,
       agent_id: agent.id,
@@ -99,11 +104,9 @@ export const sessions = new Hono()
       agent,
       environments: envs,
       parent_id: body.parent_id ?? null,
-      memory_stores: await validateMounts(body.memory_stores, sc),
+      memory_stores,
     });
-    if (Array.isArray(body.initial_events) && body.initial_events.length > 0) {
-      await sendUserEvents(session, validateUserEvents(body.initial_events));
-    }
+    if (initial) await sendUserEvents(session, initial);
     return c.json(session, 201);
   })
   /** Change this session's system prompt (next turn). `null` restores the default. */
@@ -135,36 +138,30 @@ export const sessions = new Hono()
   .post("/:id/memory_stores", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
     const [mount] = await validateMounts([await readJson(c)], scope(c));
-    if (s.memory_stores.some((m) => m.memory_store_id === mount!.memory_store_id || m.mount_path === mount!.mount_path)) throw invalid("already mounted (same store or mount_path)");
-    const next = [...s.memory_stores, mount!];
-    await sessionConfig.setMemoryStores(s.id, next);
+    const next = await sessionConfig.addMemoryStore(s.id, mount!);
+    if (!next) throw invalid("already mounted (same store or mount_path)");
     await appendEvents(s.id, [{ type: "session.updated", changes: { memory_stores: next } }]);
     return c.json({ ...s, memory_stores: next }, 201);
   })
   .delete("/:id/memory_stores/:storeId", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
-    const next = s.memory_stores.filter((m) => m.memory_store_id !== c.req.param("storeId"));
-    if (next.length === s.memory_stores.length) throw notFound("mounted memory_store", c.req.param("storeId"));
-    await sessionConfig.setMemoryStores(s.id, next);
+    const next = await sessionConfig.removeMemoryStore(s.id, c.req.param("storeId"));
+    if (!next) throw notFound("mounted memory_store", c.req.param("storeId"));
     await appendEvents(s.id, [{ type: "session.updated", changes: { memory_stores: next } }]);
     return c.json({ ...s, memory_stores: next });
   })
   .post("/:id/skills", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
-    const [ref] = validateSkillRefs([await readJson(c)]);
-    const cur = s.agent.skills ?? [];
-    if (cur.some((r) => r.skill_id === ref!.skill_id)) throw invalid("skill already attached");
-    const next = [...cur, ref!];
-    await sessionConfig.setSkills(s.id, next);
+    const [ref] = await checkSkillAccess(validateSkillRefs([await readJson(c)]), scope(c));
+    const next = await sessionConfig.addSkill(s.id, ref!);
+    if (!next) throw invalid("skill already attached");
     await appendEvents(s.id, [{ type: "session.updated", changes: { skills: next } }]);
     return c.json({ ...s, agent: { ...s.agent, skills: next } }, 201);
   })
   .delete("/:id/skills/:skillId", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
-    const cur = s.agent.skills ?? [];
-    const next = cur.filter((r) => r.skill_id !== c.req.param("skillId"));
-    if (next.length === cur.length) throw notFound("attached skill", c.req.param("skillId"));
-    await sessionConfig.setSkills(s.id, next);
+    const next = await sessionConfig.removeSkill(s.id, c.req.param("skillId"));
+    if (!next) throw notFound("attached skill", c.req.param("skillId"));
     await appendEvents(s.id, [{ type: "session.updated", changes: { skills: next } }]);
     return c.json({ ...s, agent: { ...s.agent, skills: next } });
   })
@@ -177,12 +174,13 @@ export const sessions = new Hono()
     const body = await readJson<EnvInput>(c);
     if (!body.key || body.key === "main") throw invalid("key is required and cannot be 'main'");
     const e = await resolveEnvironment(body, s.environments, ownerId(c), scope(c));
-    await repos.sessions.attachEnvironment(id, e);
+    if (!(await repos.sessions.attachEnvironment(id, e))) throw new ApiError(409, "conflict_error", `environment key ${e.key} is already attached`);
     return c.json({ ...s, environments: [...s.environments, e] }, 201);
   })
   .get("/", async (c) => {
-    const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
+    const limit = queryInt(c, "limit", 50, 1);
     const cursor = c.req.query("cursor") || undefined;
+    if (cursor) try { parseSessionCursor(cursor); } catch { throw invalid("cursor must be a next_cursor from a previous page"); }
     return c.json(await repos.sessions.listPage(scope(c), { limit, cursor })); // { data, has_more, next_cursor }
   })
   /** Full text of a tool result that was truncated for the model. */

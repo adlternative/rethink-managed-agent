@@ -19,13 +19,22 @@ export function requiredActions(events: SessionEvent[], clientToolNames: Iterabl
   const answered = new Set<string>();
   for (const e of events) if (e.payload.type === "agent.tool_result") answered.add(e.payload.tool_use_id);
   const out: RequiredAction[] = [];
+  let turn = ""; // turns are named after their session.status_running event (like turns/items/stream)
   for (const e of events) {
+    if (e.payload.type === "session.status_running") turn = `turn_${e.seq}`;
     if (e.payload.type === "agent.tool_use" && clientTools.has(e.payload.name) && !answered.has(e.payload.tool_use_id)) {
-      out.push({ turn_id: `turn_${e.seq}`, call_id: e.payload.tool_use_id, type: "function_call", name: e.payload.name, arguments: e.payload.input });
+      out.push({ turn_id: turn || `turn_${e.seq}`, call_id: e.payload.tool_use_id, type: "function_call", name: e.payload.name, arguments: e.payload.input });
     }
   }
   return out;
 }
+
+/**
+ * Event types the session-state projections (requiredActions' turn ids, environmentActions, the current
+ * error) read besides the client tool calls; together with listEventsForState's tool filter they yield
+ * the same projections as the whole log.
+ */
+export const STATE_EVENT_TYPES = ["session.status_running", "session.error", "session.environment_disconnected"];
 
 /** Names of a session's client/function tools (used to tell them apart from sandbox tools in the log). */
 export function clientToolNames(session: SessionResource): string[] {

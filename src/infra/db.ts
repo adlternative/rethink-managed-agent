@@ -1,6 +1,7 @@
 import pg from "pg";
 import { env } from "../shared/env.ts";
 import { newId } from "../shared/ids.ts";
+import { parseSessionCursor } from "../shared/cursor.ts";
 import { seal, open, type Sealed } from "./secrets.ts";
 import type {
   FileResource,
@@ -82,6 +83,8 @@ export const principals = {
   },
 };
 
+/** Minimum interval between last_used_at writes for one API key. */
+const API_KEY_TOUCH_S = 60;
 export const apiKeys = {
   /** Create a key for a principal; returns the plaintext token exactly once (only its hash is stored). */
   async create(principalId: string, name = ""): Promise<{ id: string; token: string }> {
@@ -91,27 +94,34 @@ export const apiKeys = {
     await pool.query(`INSERT INTO api_keys (id, principal_id, token_sha256, name) VALUES ($1,$2,$3,$4)`, [id, principalId, createHash("sha256").update(token).digest("hex"), name]);
     return { id, token };
   },
-  /** Resolve a bearer token to its principal, or null. Touches last_used_at. */
+  /**
+   * Resolve a bearer token to its principal, or null, in one round trip. Touches last_used_at at most once a
+   * minute per key (minute precision), so steady traffic on one key does not write + row-lock on every request.
+   */
   async resolve(token: string): Promise<Principal | null> {
     const { createHash } = await import("node:crypto");
     const hash = createHash("sha256").update(token).digest("hex");
-    const row = await one<{ principal_id: string }>(pool, `UPDATE api_keys SET last_used_at=now() WHERE token_sha256=$1 RETURNING principal_id`, [hash]);
-    return row ? principals.get(row.principal_id) : null;
+    return iso(await one<Principal>(pool,
+      `WITH k AS (SELECT id, principal_id, last_used_at FROM api_keys WHERE token_sha256=$1),
+       touch AS (UPDATE api_keys a SET last_used_at=now() FROM k WHERE a.id = k.id AND (k.last_used_at IS NULL OR k.last_used_at < now() - interval '${API_KEY_TOUCH_S} seconds'))
+       SELECT p.* FROM k JOIN principals p ON p.id = k.principal_id`, [hash]));
   },
 };
 
 export const repos = {
   providers: {
-    async upsert(p: Omit<ProviderResource, "created_at" | "updated_at">): Promise<ProviderResource> {
+    /** Insert, or update the row with this id when it belongs to the same owner. null: the id is taken by another owner. */
+    async upsert(p: Omit<ProviderResource, "created_at" | "updated_at">): Promise<ProviderResource | null> {
       const row = await one<ProviderResource>(
         pool,
         `INSERT INTO providers (id, owner_id, name, api, base_url, headers, auth, models, enabled) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, api=EXCLUDED.api, base_url=EXCLUDED.base_url, headers=EXCLUDED.headers,
            auth=EXCLUDED.auth, models=EXCLUDED.models, enabled=EXCLUDED.enabled, updated_at=now()
+         WHERE providers.owner_id = EXCLUDED.owner_id
          RETURNING *`,
         [p.id, p.owner_id, p.name, p.api, p.base_url, JSON.stringify(p.headers), JSON.stringify(p.auth), JSON.stringify(p.models), p.enabled],
       );
-      return iso(row)!;
+      return iso(row);
     },
     async get(id: string, scope?: Scope): Promise<ProviderResource | null> {
       return iso(await one<ProviderResource>(pool, `SELECT * FROM providers WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id]));
@@ -221,8 +231,10 @@ export const repos = {
         return { ...iso(row)!, environments: envs };
       });
     },
-    async attachEnvironment(sessionId: string, e: SessionEnvironment): Promise<void> {
-      await pool.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4)`, [sessionId, e.key, e.environment_id, e.workspace_id]);
+    /** false when the key is already attached (a concurrent attach won). */
+    async attachEnvironment(sessionId: string, e: SessionEnvironment): Promise<boolean> {
+      const r = await pool.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, [sessionId, e.key, e.environment_id, e.workspace_id]);
+      return (r.rowCount ?? 0) > 0;
     },
     async environments(sessionId: string): Promise<SessionEnvironment[]> {
       const rows = await many<SessionEnvironment & { created_at: string }>(pool, `SELECT key, environment_id, workspace_id FROM session_environments WHERE session_id=$1 ORDER BY (key <> 'main'), created_at`, [sessionId]);
@@ -234,26 +246,34 @@ export const repos = {
     },
     async list(scope?: Scope): Promise<SessionResource[]> {
       const rows = isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions${scope ? " WHERE owner_id=$1" : ""} ORDER BY created_at`, scope ? [scope.owner] : []));
-      const envs = await many<SessionEnvironment & { session_id: string }>(pool, `SELECT session_id, key, environment_id, workspace_id FROM session_environments ORDER BY (key <> 'main'), created_at`);
-      return rows.map((r) => ({ ...r, environments: envs.filter((e) => e.session_id === r.id).map(({ key, environment_id, workspace_id }) => ({ key, environment_id, workspace_id })) }));
+      return withEnvironments(rows);
     },
     /** Child (sub-agent) sessions of a parent, oldest first. */
     async childrenOf(parentId: string, scope?: Scope): Promise<SessionResource[]> {
-      return isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions WHERE parent_id=$1${scope ? " AND owner_id=$2" : ""} ORDER BY created_at`, scope ? [parentId, scope.owner] : [parentId]));
+      const rows = isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions WHERE parent_id=$1${scope ? " AND owner_id=$2" : ""} ORDER BY created_at`, scope ? [parentId, scope.owner] : [parentId]));
+      return withEnvironments(rows);
     },
-    /** Cursor-paginated, newest first. cursor = the previous page's next_cursor (a created_at ISO). */
-    async listPage(scope: Scope, opts: { limit?: number; cursor?: string } = {}): Promise<{ data: SessionResource[]; has_more: boolean; next_cursor: string | null }> {
+    /**
+     * Cursor-paginated, newest first. cursor = the previous page's next_cursor, `<created_at ISO, microseconds>|<id>`
+     * (a bare ISO timestamp is still accepted); `after` = a session id to continue after (the OpenAI-style cursor).
+     * (created_at, id) is the sort key, so rows sharing a timestamp are neither skipped nor repeated.
+     */
+    async listPage(scope: Scope, opts: { limit?: number; cursor?: string; after?: string } = {}): Promise<{ data: SessionResource[]; has_more: boolean; next_cursor: string | null }> {
       const lim = Math.min(Math.max(opts.limit ?? 50, 1), 200);
       const params: unknown[] = []; const where: string[] = [];
       if (scope) { params.push(scope.owner); where.push(`owner_id=$${params.length}`); }
-      if (opts.cursor) { params.push(opts.cursor); where.push(`created_at < $${params.length}::timestamptz`); }
-      const rows = isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT ${lim + 1}`, params));
+      if (opts.cursor) {
+        const [ts, id] = parseSessionCursor(opts.cursor);
+        params.push(ts); where.push(id === undefined ? `created_at < $${params.length}::timestamptz` : `(created_at, id) < ($${params.length}::timestamptz, $${params.push(id)})`);
+      }
+      if (opts.after) { params.push(opts.after); where.push(`(created_at, id) < (SELECT created_at, id FROM sessions WHERE id=$${params.length})`); }
+      const rows = isoAll(await many<SessionResource & { cursor_ts?: string }>(pool, `SELECT *, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts FROM sessions${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC, id DESC LIMIT ${lim + 1}`, params));
       const has_more = rows.length > lim;
       const page = rows.slice(0, lim);
-      const ids = page.map((r) => r.id);
-      const envs = ids.length ? await many<SessionEnvironment & { session_id: string }>(pool, `SELECT session_id, key, environment_id, workspace_id FROM session_environments WHERE session_id = ANY($1::text[]) ORDER BY (key <> 'main'), created_at`, [ids]) : [];
-      const data = page.map((r) => ({ ...r, environments: envs.filter((e) => e.session_id === r.id).map(({ key, environment_id, workspace_id }) => ({ key, environment_id, workspace_id })) }));
-      return { data, has_more, next_cursor: has_more ? (page[page.length - 1]!.created_at as string) : null };
+      const last = page[page.length - 1];
+      const next_cursor = has_more && last ? `${last.cursor_ts ?? last.created_at}|${last.id}` : null;
+      const data = await withEnvironments(page.map(({ cursor_ts: _t, ...r }) => r as SessionResource));
+      return { data, has_more, next_cursor };
     },
     async setStatus(id: string, status: SessionStatus): Promise<void> {
       await pool.query(`UPDATE sessions SET status=$2, updated_at=now() WHERE id=$1`, [id, status]);
@@ -263,6 +283,15 @@ export const repos = {
     },
   },
 };
+
+/** Attach each session's environment rows (one query for the whole batch). */
+async function withEnvironments(rows: SessionResource[]): Promise<SessionResource[]> {
+  const ids = rows.map((r) => r.id);
+  const envs = ids.length ? await many<SessionEnvironment & { session_id: string }>(pool, `SELECT session_id, key, environment_id, workspace_id FROM session_environments WHERE session_id = ANY($1::text[]) ORDER BY (key <> 'main'), created_at`, [ids]) : [];
+  const bySession = new Map<string, SessionEnvironment[]>(); // grouped in query order, so each list keeps the ORDER BY
+  for (const { session_id, key, environment_id, workspace_id } of envs) (bySession.get(session_id) ?? bySession.set(session_id, []).get(session_id)!).push({ key, environment_id, workspace_id });
+  return rows.map((r) => ({ ...r, environments: bySession.get(r.id) ?? [] }));
+}
 
 export const pluginStore = {
   async get(scope: string, owner: string, key: string): Promise<unknown> {
@@ -389,6 +418,39 @@ export const sessionConfig = {
   },
   async setSkills(id: string, refs: SkillRef[]): Promise<void> {
     await pool.query(`UPDATE sessions SET agent = jsonb_set(agent, '{skills}', $2::jsonb), updated_at=now() WHERE id=$1`, [id, JSON.stringify(refs)]);
+  },
+  // Single-statement add/remove (no read-modify-write), so concurrent changes never lose an update.
+  /** Append a skill ref unless one with that skill_id is attached. Returns the new list, or null when already attached. */
+  async addSkill(id: string, ref: SkillRef): Promise<SkillRef[] | null> {
+    const r = await pool.query<{ v: SkillRef[] }>(
+      `UPDATE sessions SET agent = jsonb_set(agent, '{skills}', COALESCE(agent->'skills', '[]'::jsonb) || $2::jsonb), updated_at=now()
+       WHERE id=$1 AND NOT COALESCE(agent->'skills', '[]'::jsonb) @> $3::jsonb RETURNING agent->'skills' AS v`,
+      [id, JSON.stringify([ref]), JSON.stringify([{ skill_id: ref.skill_id }])]);
+    return r.rows[0]?.v ?? null;
+  },
+  /** Remove a skill by id. Returns the new list, or null when it was not attached. */
+  async removeSkill(id: string, skillId: string): Promise<SkillRef[] | null> {
+    const r = await pool.query<{ v: SkillRef[] }>(
+      `UPDATE sessions SET agent = jsonb_set(agent, '{skills}', (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(agent->'skills') e WHERE e->>'skill_id' <> $2)), updated_at=now()
+       WHERE id=$1 AND COALESCE(agent->'skills', '[]'::jsonb) @> $3::jsonb RETURNING agent->'skills' AS v`,
+      [id, skillId, JSON.stringify([{ skill_id: skillId }])]);
+    return r.rows[0]?.v ?? null;
+  },
+  /** Append a mount unless the same store or mount_path is mounted. Returns the new list, or null on a clash. */
+  async addMemoryStore(id: string, mount: MemoryMount): Promise<MemoryMount[] | null> {
+    const r = await pool.query<{ v: MemoryMount[] }>(
+      `UPDATE sessions SET memory_stores = memory_stores || $2::jsonb, updated_at=now()
+       WHERE id=$1 AND NOT memory_stores @> $3::jsonb AND NOT memory_stores @> $4::jsonb RETURNING memory_stores AS v`,
+      [id, JSON.stringify([mount]), JSON.stringify([{ memory_store_id: mount.memory_store_id }]), JSON.stringify([{ mount_path: mount.mount_path }])]);
+    return r.rows[0]?.v ?? null;
+  },
+  /** Unmount a store. Returns the new list, or null when it was not mounted. */
+  async removeMemoryStore(id: string, storeId: string): Promise<MemoryMount[] | null> {
+    const r = await pool.query<{ v: MemoryMount[] }>(
+      `UPDATE sessions SET memory_stores = (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(memory_stores) e WHERE e->>'memory_store_id' <> $2), updated_at=now()
+       WHERE id=$1 AND memory_stores @> $3::jsonb RETURNING memory_stores AS v`,
+      [id, storeId, JSON.stringify([{ memory_store_id: storeId }])]);
+    return r.rows[0]?.v ?? null;
   },
 };
 

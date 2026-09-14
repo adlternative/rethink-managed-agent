@@ -17,15 +17,28 @@ export interface Logger {
   child(ctx: Record<string, unknown>): Logger;
 }
 
+/** JSON that never throws: BigInt becomes a string, a repeated (circular) object becomes "[Circular]". */
+function safeJson(v: unknown): string {
+  const seen = new WeakSet<object>();
+  try {
+    return JSON.stringify(v, (_k, x) => {
+      if (typeof x === "bigint") return x.toString();
+      if (x && typeof x === "object") { if (seen.has(x)) return "[Circular]"; seen.add(x); }
+      return x;
+    }) ?? String(v);
+  } catch (e) { return JSON.stringify({ log_error: String(e) }); }
+}
+
 function make(ctx: Record<string, unknown>): Logger {
   const emit = (level: Level, msg: string, fields?: Record<string, unknown>) => {
     if (ORDER[level] < threshold) return;
-    const rec = { level, msg, ...ctx, ...fields, ts: new Date().toISOString() };
+    // level, msg and ts are the record's own: context/fields cannot override them
+    const rec = { ...ctx, ...fields, level, msg, ts: new Date().toISOString() };
     if (env.LOG_FORMAT === "pretty") {
-      const extra = Object.entries({ ...ctx, ...fields }).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ");
+      const extra = Object.entries({ ...ctx, ...fields }).map(([k, v]) => `${k}=${typeof v === "string" ? v : safeJson(v)}`).join(" ");
       (level === "error" ? console.error : console.log)(`${rec.ts} ${level.toUpperCase()} ${msg}${extra ? " " + extra : ""}`);
     } else {
-      (level === "error" ? console.error : console.log)(JSON.stringify(rec));
+      (level === "error" ? console.error : console.log)(safeJson(rec));
     }
   };
   return {

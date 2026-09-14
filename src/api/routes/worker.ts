@@ -2,22 +2,25 @@ import { Hono } from "hono";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { pool, repos } from "../../infra/db.ts";
 import { pollForWorker, pushResult, isWorkerAlive, markWorkerAlive, type WorkerResult } from "../../infra/byoc.ts";
-import { listEvents } from "../../infra/events.ts";
 import { enqueueRun } from "../../infra/queue.ts";
-import { environmentActions } from "./compat/required-actions.ts";
 import { ApiError, invalid, notFound, readJson } from "../errors.ts";
 
-/** On a worker (re)connect, re-enqueue idle sessions of this environment that are paused awaiting one. */
-async function resumeEnvironment(envId: string): Promise<number> {
-  const { rows } = await pool.query<{ id: string; owner_id: string }>(`SELECT id, owner_id FROM sessions WHERE environment_id=$1 AND status='idle'`, [envId]);
-  let resumed = 0;
-  for (const s of rows) {
-    const events = await listEvents(s.id);
-    if (environmentActions(events).length === 0) continue; // not waiting on reconnection
-    await enqueueRun({ session_id: s.id, trigger_seq: events.length ? events[events.length - 1]!.seq : 0, owner_id: s.owner_id });
-    resumed++;
-  }
-  return resumed;
+/**
+ * On a worker (re)connect, re-enqueue idle sessions of this environment that are paused awaiting one:
+ * those whose newest environment signal is a disconnect (environmentActions over the log, evaluated in
+ * one query from the newest disconnected/status_running event per session instead of reading each log).
+ */
+export async function resumeEnvironment(envId: string): Promise<number> {
+  const { rows } = await pool.query<{ id: string; owner_id: string; last_seq: string | number }>(
+    `SELECT s.id, s.owner_id, (SELECT MAX(seq) FROM events WHERE session_id = s.id) AS last_seq
+     FROM sessions s
+     WHERE s.environment_id=$1 AND s.status='idle'
+       AND (SELECT MAX(seq) FROM events WHERE session_id = s.id AND type = 'session.environment_disconnected')
+         > COALESCE((SELECT MAX(seq) FROM events WHERE session_id = s.id AND type = 'session.status_running'), 0)`,
+    [envId],
+  );
+  for (const s of rows) await enqueueRun({ session_id: s.id, trigger_seq: Number(s.last_seq ?? 0), owner_id: s.owner_id });
+  return rows.length;
 }
 
 const hash = (s: string) => createHash("sha256").update(s).digest();

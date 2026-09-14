@@ -43,17 +43,22 @@ export function createClient(opts: { baseURL: string; apiKey?: string }) {
   const headers = (json = true): Record<string, string> => ({ ...(json ? { "content-type": "application/json" } : {}), ...(opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {}) });
   const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: headers(), body: JSON.stringify(body) });
   const req = (method: string, path: string) => fetch(`${base}${path}`, { method, headers: headers(false) });
+  /** A non-2xx response is an error (with the status and body), never an empty result. */
+  const ok = async (what: string, res: Response): Promise<Response> => {
+    if (!res.ok) throw new Error(`${what} failed ${res.status}: ${await res.text().catch(() => "")}`);
+    return res;
+  };
 
   function makeSession(id: string) {
     const session = {
       id,
       info: { environment: { environment_id: "" }, required_actions: [] as any[] },
-      async retrieve() { const s = await (await req("GET", `/sessions/${id}`)).json(); session.info = s.info; (session as any).status = s.status; return session; },
-      async delete() { await req("DELETE", `/sessions/${id}`); },
-      async tool_result(p: { turn_id?: string; call_id: string; success: boolean; output: unknown }) { await post(`/sessions/${id}/tool_result`, p); },
+      async retrieve() { const s = await (await ok("retrieve", await req("GET", `/sessions/${id}`))).json(); session.info = s.info; (session as any).status = s.status; return session; },
+      async delete() { await ok("delete", await req("DELETE", `/sessions/${id}`)); },
+      async tool_result(p: { turn_id?: string; call_id: string; success: boolean; output: unknown }) { await ok("tool_result", await post(`/sessions/${id}/tool_result`, p)); },
       /** Send input and yield events; auto-runs any function_call whose name is in tool_handlers, posting the result. */
       async *stream(p: { input?: string; tool_handlers?: Record<string, ToolHandler> } = {}): AsyncGenerator<StreamEvent> {
-        const res = await post(`/sessions/${id}`, { input: p.input, stream: true });
+        const res = await ok("stream", await post(`/sessions/${id}`, { input: p.input, stream: true }));
         for await (const ev of parseSse(res)) {
           yield ev;
           const call = ev.function_call ?? (ev.type === "agent.session.action_required" ? ev.required_action : undefined);

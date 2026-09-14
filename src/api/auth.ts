@@ -15,7 +15,7 @@ import { loadResolver } from "./principal-resolver.ts";
 export function auth(): MiddlewareHandler {
   return async (c, next) => {
     // BYOC worker endpoints authenticate machine-to-machine with x-worker-key, not a principal.
-    if (/\/worker(\/|$)/.test(c.req.path)) return next();
+    if (/^\/v1\/environments\/[^/]+\/worker(\/|$)/.test(c.req.path)) return next();
 
     const resolver = await loadResolver();
     const identity = await resolver.resolve({ header: (n) => c.req.header(n), method: c.req.method, path: c.req.path });

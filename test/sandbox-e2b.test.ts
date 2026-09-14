@@ -70,14 +70,15 @@ class FakeSandbox {
       else if (cmd.startsWith("exit ")) exitCode = Number(cmd.slice(5));
       else if (cmd.includes("git rev-parse HEAD")) stdout = "deadbeef\n";
       else if (cmd.includes("git diff HEAD --binary")) stdout = "diff --git a/x b/x\n";
-      else if (cmd.includes("tar czf /tmp/pi-cap.tgz")) {
+      else if (/tar czf \/tmp\/pi-cap\S*\.tgz/.test(cmd)) {
+        const target = /tar czf (\/tmp\/pi-cap\S*\.tgz)/.exec(cmd)![1]!; // the capture temp file is unique per call
         // produce a real tgz of {hello.txt: "hi"} so the provider's local extraction works
         const { execFile } = await import("node:child_process");
         const { promisify } = await import("node:util");
         const dir = await mkdtemp(path.join(tmpdir(), "fake-"));
         await writeFile(path.join(dir, "hello.txt"), "hi");
         await promisify(execFile)("tar", ["czf", path.join(dir, "c.tgz"), "-C", dir, "hello.txt"]);
-        this.fake.files.set("/tmp/pi-cap.tgz", new Uint8Array(await readFile(path.join(dir, "c.tgz"))));
+        this.fake.files.set(target, new Uint8Array(await readFile(path.join(dir, "c.tgz"))));
       }
       if (o.background) {
         const handle = {

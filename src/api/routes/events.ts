@@ -5,7 +5,7 @@ import { appendIn, listEvents, withSession } from "../../infra/events.ts";
 import { publish, publishInterrupt, publishToolResult, pushSteer, subscribe } from "../../infra/pubsub.ts";
 import { enqueueRun } from "../../infra/queue.ts";
 import type { SessionEvent, SessionId, SessionResource, UserEventInput } from "../../shared/types.ts";
-import { invalid, notFound, readJson } from "../errors.ts";
+import { invalid, notFound, queryInt, readJson } from "../errors.ts";
 import { scope } from "../auth.ts";
 import type { Context } from "hono";
 
@@ -45,7 +45,11 @@ export async function sendUserEvents(session: SessionResource, inputs: UserEvent
   // it on the per-call channel; the running loop records the real agent.tool_result when the tool returns.
   const toolResults = inputs.filter((i): i is Extract<UserEventInput, { type: "tool_result" }> => i.type === "tool_result");
   const rest = inputs.filter((i) => i.type !== "tool_result");
-  const { appended, status } = await withSession(session.id, async (c, s) => ({ appended: rest.length ? await appendIn(c, session.id, rest) : [], status: s.status }));
+  const { appended, status } = await withSession(session.id, async (c, s) => {
+    // a terminated session never runs again: appending would silently drop the message
+    if (s.status === "terminated") throw invalid(`session ${session.id} is terminated`);
+    return { appended: rest.length ? await appendIn(c, session.id, rest) : [], status: s.status };
+  });
   for (const event of appended) await publish({ type: "event", event });
   for (const tr of toolResults) await publishToolResult(session.id, tr.tool_use_id, { content: tr.content, isError: !!tr.is_error });
   const messages = appended.filter((e) => e.payload.type === "user.message");
@@ -76,19 +80,20 @@ export const events = new Hono()
   })
   .get("/", async (c) => {
     const session = await getSession(c);
-    const since = Number(c.req.query("since") ?? 0);
-    const limit = Math.min(Number(c.req.query("limit") ?? 100), 1000);
+    const since = queryInt(c, "since", 0, 0);
+    const limit = Math.min(queryInt(c, "limit", 100, 1), 1000);
     const data = await listEvents(session.id, { since, limit: limit + 1 });
     return c.json({ data: data.slice(0, limit), has_more: data.length > limit });
   })
   .get("/stream", async (c) => {
     const session = await getSession(c);
-    let last = Number(c.req.query("since") ?? 0);
+    let last = queryInt(c, "since", 0, 0);
     return streamSSE(c, async (stream) => {
       const send = (event: string, data: unknown) => stream.writeSSE({ event, data: JSON.stringify(data) });
       let done = false;
       let unsub = () => {};
       const finish = () => {
+        if (done) return;
         done = true;
         unsub();
         void stream.close();
@@ -119,7 +124,7 @@ export const events = new Hono()
         chain = chain.then(fn).catch((e) => console.error("[sse] send failed", e));
       };
 
-      unsub = await subscribe(session.id, (delta) => {
+      const off = await subscribe(session.id, (delta) => {
         if (done) return;
         if (delta.type !== "event") {
           void send(delta.type, delta);
@@ -131,8 +136,12 @@ export const events = new Hono()
           await sendEvent(ev);
         });
       });
+      if (done) return off(); // the client left while subscribe() was pending
+      unsub = off;
       enqueue(() => replay());
       await chain;
+      // since >= the terminated event's seq: replay shows nothing and no live event will ever come
+      if (!done && (await repos.sessions.get(session.id, scope(c)))?.status === "terminated") finish();
       while (!done) {
         await stream.sleep(15000);
         if (!done) await stream.write(": heartbeat\n\n");

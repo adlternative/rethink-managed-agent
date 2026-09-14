@@ -1,0 +1,1 @@
+{ "name": "plugins-sandbox-merge-a", "type": "module", "pma": { "plugins": ["./index.ts"] } }

@@ -36,11 +36,35 @@ export const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null, lazy
 const PROVIDERS_CHANNEL = "providers:changed";
 
 function redisBus(): Bus {
+  // One subscriber connection per process, fanned out to in-process handlers by channel (like the pg bus's
+  // single LISTEN), instead of a connection per SSE client / run. A channel is SUBSCRIBEd while it has handlers.
+  let conn: Redis | null = null;
+  const handlers = new Map<string, Set<(msg: string) => void>>();
+  const subscribed = new Map<string, Promise<unknown>>();
+  const connection = () => {
+    if (!conn) {
+      conn = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
+      conn.on("message", (ch: string, msg: string) => { for (const h of handlers.get(ch) ?? []) h(msg); });
+    }
+    return conn;
+  };
   async function subscriber(channel: string, onMessage: (msg: string) => void): Promise<() => void> {
-    const sub = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
-    sub.on("message", (ch, msg) => { if (ch === channel) onMessage(msg); });
-    try { await sub.subscribe(channel); } catch (e) { sub.disconnect(); throw e; }
-    return () => sub.disconnect();
+    const h = (msg: string) => onMessage(msg); // own identity: the same callback may subscribe twice
+    let set = handlers.get(channel);
+    if (!set) handlers.set(channel, (set = new Set()));
+    set.add(h);
+    const off = () => {
+      const cur = handlers.get(channel);
+      if (!cur?.delete(h) || cur.size > 0) return;
+      handlers.delete(channel); subscribed.delete(channel);
+      void conn?.unsubscribe(channel).catch(() => {});
+    };
+    // Resolve only once Redis confirmed the subscription (callers replay from the store after this), also when
+    // another handler's SUBSCRIBE for the channel is still in flight.
+    let ready = subscribed.get(channel);
+    if (!ready) { ready = connection().subscribe(channel); subscribed.set(channel, ready); }
+    try { await ready; } catch (e) { if (subscribed.get(channel) === ready) subscribed.delete(channel); off(); throw e; }
+    return off;
   }
   return {
     async publish(delta) { const id = delta.type === "event" ? delta.event.session_id : delta.session_id; await redis.publish(`sess:${id}`, JSON.stringify(delta)); },
@@ -57,7 +81,7 @@ function redisBus(): Bus {
     async takeToolResult(sessionId, callId) { const s = await redis.lpop(`toolresult:${sessionId}:${callId}`); return s ? (JSON.parse(s) as ToolResultMsg) : null; },
     async publishProvidersChanged() { await redis.publish(PROVIDERS_CHANNEL, String(Date.now())); },
     onProvidersChanged(cb) { return subscriber(PROVIDERS_CHANNEL, () => cb()); },
-    async close() { await redis.quit().catch(() => {}); },
+    async close() { const c = conn; conn = null; handlers.clear(); subscribed.clear(); c?.disconnect(); await redis.quit().catch(() => {}); },
   };
 }
 
@@ -93,13 +117,44 @@ function pgBus(): Bus {
   const local = new EventEmitter(); local.setMaxListeners(0);
   let listener: Promise<void> | null = null;
   let client: import("pg").PoolClient | null = null;
+  // The LISTEN connection is memoized only while healthy: a failed connect is retried by the next caller, and
+  // a dropped connection is discarded and re-established (in the background while anyone is subscribed).
   const ensure = () => (listener ??= (async () => {
-    const c = await pool.connect(); client = c;
-    c.on("notification", (n) => { try { local.emit(n.channel, JSON.parse(n.payload || "{}")); } catch { /* ignore bad payload */ } });
-    c.on("error", (e) => console.error("[pg-bus] listener error", e));
-    await c.query("LISTEN pma_bus");
-    await c.query("LISTEN pma_ctl");
-  })());
+    const c = await pool.connect();
+    try {
+      c.on("notification", (n) => { try { local.emit(n.channel, JSON.parse(n.payload || "{}")); } catch { /* ignore bad payload */ } });
+      c.on("error", (e) => {
+        console.error("[pg-bus] listener error; reconnecting", e);
+        if (client !== c) return;
+        client = null; listener = null;
+        try { c.release(e instanceof Error ? e : true); } catch { /* already released */ }
+        const retry = () => { if (!listener && (local.listenerCount("pma_bus") || local.listenerCount("pma_ctl"))) ensure().catch(() => setTimeout(retry, 1000)); };
+        setTimeout(retry, 1000);
+      });
+      await c.query("LISTEN pma_bus");
+      await c.query("LISTEN pma_ctl");
+      client = c;
+    } catch (e) { c.release(); throw e; }
+  })().catch((e) => { listener = null; throw e; }));
+  // In-flight event-row reads keyed by session+seq: one NOTIFY fans out to every local subscriber of the session,
+  // and all of them are served by a single SELECT (dropped once settled; later reads hit the table again).
+  const rowReads = new Map<string, Promise<SessionEvent | undefined>>();
+  const eventRow = (sessionId: string, seq: number) => {
+    const key = `${sessionId}:${seq}`;
+    let p = rowReads.get(key);
+    if (!p) {
+      p = pool.query<SessionEvent>("SELECT id, session_id, seq, type, payload, created_at FROM events WHERE session_id=$1 AND seq=$2", [sessionId, seq]).then((r) => {
+        const ev = r.rows[0];
+        if (!ev) return undefined;
+        const ca = ev.created_at as unknown;
+        return { ...ev, seq: Number(ev.seq), created_at: ca instanceof Date ? ca.toISOString() : String(ca) };
+      });
+      rowReads.set(key, p);
+      const drop = () => { rowReads.delete(key); };
+      p.then(drop, drop);
+    }
+    return p;
+  };
   const notify = (channel: string, payload: unknown) => pool.query("SELECT pg_notify($1,$2)", [channel, JSON.stringify(payload)]).then(() => {});
   const onLocal = async (channel: string, filter: (m: Record<string, unknown>) => void): Promise<() => void> => {
     await ensure(); const h = (m: Record<string, unknown>) => filter(m); local.on(channel, h); return () => local.off(channel, h);
@@ -107,14 +162,22 @@ function pgBus(): Bus {
   return {
     async publish(delta) {
       if (delta.type === "event") return notify("pma_bus", { sid: delta.event.session_id, seq: delta.event.seq });
-      const p = JSON.stringify(delta); if (p.length < 7500) await notify("pma_bus", { sid: delta.session_id, d: delta }); // else drop: previews are best-effort, the event is the truth
+      const p = JSON.stringify({ sid: delta.session_id, d: delta });
+      // NOTIFY caps the payload at 8000 bytes (not characters); larger previews are dropped: best-effort, the event is the truth
+      if (Buffer.byteLength(p, "utf8") < 7500) await notify("pma_bus", { sid: delta.session_id, d: delta });
     },
     subscribe(sessionId, cb) {
+      // Deliveries are serialized in notification order: an event's row read must not let a later
+      // notification (or an inline delta) overtake it.
+      let chain: Promise<void> = Promise.resolve();
+      const inOrder = (fn: () => void | Promise<void>) => { chain = chain.then(fn).catch((e) => console.error("[pg-bus] delivery failed", e)); };
       return onLocal("pma_bus", (m) => {
         if (m.sid !== sessionId) return;
-        if (m.d) { cb(m.d as StreamDelta); return; }
-        if (typeof m.seq === "number") void pool.query<SessionEvent>("SELECT id, session_id, seq, type, payload, created_at FROM events WHERE session_id=$1 AND seq=$2", [sessionId, m.seq])
-          .then((r) => { const ev = r.rows[0]; if (ev) { const ca = ev.created_at as unknown; cb({ type: "event", event: { ...ev, seq: Number(ev.seq), created_at: ca instanceof Date ? ca.toISOString() : String(ca) } }); } });
+        if (m.d) { inOrder(() => cb(m.d as StreamDelta)); return; }
+        if (typeof m.seq === "number") {
+          const row = eventRow(sessionId, m.seq); // started now, so every subscriber of this notification shares one read
+          inOrder(async () => { const ev = await row; if (ev) cb({ type: "event", event: { ...ev } }); });
+        }
       });
     },
     async publishInterrupt(sessionId) { await notify("pma_ctl", { k: "int", sid: sessionId }); },
@@ -125,7 +188,7 @@ function pgBus(): Bus {
     async takeToolResult(sessionId, callId) { const r = await pool.query<{ payload: ToolResultMsg }>("DELETE FROM tool_result_msgs WHERE id = (SELECT id FROM tool_result_msgs WHERE session_id=$1 AND call_id=$2 ORDER BY id LIMIT 1) RETURNING payload", [sessionId, callId]); return r.rows[0]?.payload ?? null; },
     async publishProvidersChanged() { await notify("pma_ctl", { k: "prov" }); },
     onProvidersChanged(cb) { return onLocal("pma_ctl", (m) => { if (m.k === "prov") cb(); }); },
-    async close() { client?.release(); client = null; },
+    async close() { const c = client; client = null; listener = null; c?.release(); },
   };
 }
 

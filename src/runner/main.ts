@@ -1,5 +1,5 @@
 import { files, memoryStores, pluginStore, pool, principals, repos, sessionConfig, skills, toolOutputs, vaultSecrets } from "../infra/db.ts";
-import { appendEvents, listAllEvents } from "../infra/events.ts";
+import { appendEvents, foldSince, listEventsWindow } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { closeBus, onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, takeToolResult } from "../infra/pubsub.ts";
 import { anyWorkerAlive } from "../infra/byoc.ts";
@@ -9,11 +9,8 @@ import { createServer } from "node:http";
 import { counter, gauge, histogram, onScrape, render as renderMetrics } from "../infra/metrics.ts";
 import { log } from "../infra/log.ts";
 import { claimRun, findStrandedSessions, finishRun, heartbeat, HEARTBEAT_MS, recordUsage } from "../infra/runs.ts";
-import { runSession, type AgentPlugins, type ChildSpawn, type RunDeps } from "../harness/run-turn.ts";
-import { workspaceRoot } from "../sandbox/workspace.ts";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdir } from "node:fs/promises";
+import { runSession, type AgentPlugins, type RunDeps } from "../harness/run-turn.ts";
+import { children } from "./children.ts";
 import { buildModelRegistry, createModelRegistry } from "../harness/models.ts";
 import { PluginHost } from "../plugins/client.ts";
 import { buildHostBundle } from "../plugins/bundle.ts";
@@ -22,7 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxManager } from "../sandbox/provider.ts";
 import { env } from "../shared/env.ts";
-import type { RunJob, SandboxProviderName, SessionResource, WorkspaceRef } from "../shared/types.ts";
+import type { RunJob, SandboxProviderName } from "../shared/types.ts";
 
 const REAP_INTERVAL_MS = 60_000;
 
@@ -56,18 +53,21 @@ function pluginsFor(agent: Parameters<RunDeps["pluginsFor"]>[0]): Promise<AgentP
       const manifests = await ensurePackages(agent.id, packages);
       const content = await loadContent(manifests);
       let runner: Promise<PluginHost> | null = null;
+      let started: PluginHost | null = null;
       return {
         manifests,
         ...content,
-        runnerHost: () => (runner ??= (async () => {
+        // a host whose process died is replaced on the next session instead of failing it forever
+        runnerHost: () => { if (started?.exitReason) { console.warn(`[plugins] ${agent.id}: ${started.exitReason}; restarting the runner host`); runner = null; started = null; } return (runner ??= (async () => {
           const blocked = disallowedFor(packages, "runner");
           if (blocked.length) throw new Error(`packages ${blocked.join(", ")} are not allowed on the shared runner (PLUGIN_ALLOW); attach an environment with plugin_host=sandbox to run them isolated in the user's own sandbox`);
           return PluginHost.start(manifests, { agentId: agent.id, repoRoot: REPO_ROOT, extraReadDirs: [env.PI_AGENT_ROOT] });
         })().then((host) => {
+          started = host;
           for (const w of host.warnings) console.warn(`[plugins] ${agent.id}: ${w}`);
           console.log(`[plugins] ${agent.id} (runner host): tools=${host.tools.map((t) => t.name).join(",") || "-"} hooks=${[...host.hooks].join(",") || "-"} skills=${content.skills.map((s) => s.name).join(",") || "-"}`);
           return host;
-        })),
+        }, (e) => { runner = null; throw e; })); },
         bundle: () => { const blocked = disallowedFor(packages, "sandbox"); if (blocked.length) throw new Error(`packages ${blocked.join(", ")} are not allowed even in an isolated sandbox host (PLUGIN_ALLOW_SANDBOX)`); return buildHostBundle(manifests, REPO_ROOT); },
       };
     })();
@@ -76,86 +76,6 @@ function pluginsFor(agent: Parameters<RunDeps["pluginsFor"]>[0]): Promise<AgentP
   }
   return p;
 }
-
-const run = promisify(execFile);
-
-/** Fork a workspace for a child session: metadata refs are copied; `dir` refs are copied on disk (runner owns that volume). */
-async function forkWorkspace(parentWorkspaceId: string) {
-  const parent = await repos.workspaces.get(parentWorkspaceId);
-  if (!parent) throw new Error(`workspace ${parentWorkspaceId} not found`);
-  if (parent.ref.kind === "local") throw new Error("local workspaces cannot be forked");
-  const child = await repos.workspaces.create(parent.spec, parent.ref, parent.owner_id);
-  if (parent.ref.kind === "dir") {
-    const dest = path.join(workspaceRoot(), child.id);
-    await mkdir(dest, { recursive: true });
-    await run("cp", ["-R", `${parent.ref.path}/.`, dest]);
-    const ref: WorkspaceRef = { kind: "dir", path: dest };
-    await repos.workspaces.updateRef(child.id, ref, parent.ref);
-  }
-  return child;
-}
-
-const children: ChildSpawn = {
-  async spawn(parent, envRow, task, opts = {}) {
-    const ws = opts.shareWorkspace ? await repos.workspaces.get(envRow.workspace_id) : await forkWorkspace(envRow.workspace_id);
-    if (!ws) throw new Error(`workspace ${envRow.workspace_id} not found`);
-    const agent = { ...parent.agent };
-    if (opts.system) agent.system = opts.system;
-    if (opts.model) agent.model = opts.model;
-    if (opts.tools) agent.tools = agent.tools.filter((t) => opts.tools!.includes(t));
-    const child = await repos.sessions.create({
-      owner_id: parent.owner_id,
-      agent_id: parent.agent_id,
-      environment_id: envRow.environment_id,
-      workspace_id: ws.id,
-      agent,
-      environments: [{ key: "main", environment_id: envRow.environment_id, workspace_id: ws.id }],
-      parent_id: parent.id,
-      memory_stores: parent.memory_stores ?? [],
-      container_group: parent.container_group,
-    });
-    const brief = [opts.role ? `You are the "${opts.role}" agent${opts.name ? ` (${opts.name})` : ""} working for a parent agent.` : "You are a sub-agent working for a parent agent.", "Use report_to_parent for progress, questions, and your final report.", "", task].join("\n");
-    const [ev] = await appendEvents(child.id, [{ type: "user.message", content: [{ type: "text", text: brief }] }]);
-    await enqueueRun({ session_id: child.id, trigger_seq: ev!.seq, owner_id: child.owner_id });
-    return child;
-  },
-  async wait(childId, signal, opts = {}) {
-    const deadline = opts.timeoutMs ? Date.now() + opts.timeoutMs : Infinity;
-    for (;;) {
-      if (signal.aborted) throw new Error("parent run aborted while waiting for child session");
-      if (Date.now() > deadline) throw new Error(`timed out waiting for child ${childId}`);
-      const s = await repos.sessions.get(childId);
-      if (!s) throw new Error(`child session ${childId} disappeared`);
-      if (s.status === "terminated") return s;
-      if (s.status === "idle") {
-        // idle *after* having run (a child starts idle before its job is claimed)
-        const evs = await listAllEvents(childId);
-        if (evs.some((e) => e.type === "session.status_idle")) return s;
-      }
-      if (opts.untilQuestion) {
-        const evs = await listAllEvents(childId);
-        const q = [...evs].reverse().find((e) => e.type === "agent.thread_message_sent" && e.payload.type === "agent.thread_message_sent" && e.payload.kind === "question");
-        if (q && !evs.some((e) => e.seq > q.seq && e.type === "user.message")) return s;
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  },
-  async list(parentId) {
-    return (await repos.sessions.list()).filter((s) => s.parent_id === parentId);
-  },
-  async message(childId, text) {
-    const s = await repos.sessions.get(childId);
-    if (!s) throw new Error(`child session ${childId} not found`);
-    const [ev] = await appendEvents(childId, [{ type: "user.message", content: [{ type: "text", text }] }]);
-    if (s.status === "running") await pushSteer(childId, { seq: ev!.seq, content: ev!.payload.type === "user.message" ? ev!.payload.content : [] });
-    else if (s.status === "idle") await enqueueRun({ session_id: childId, trigger_seq: ev!.seq, owner_id: s.owner_id });
-  },
-  async stop(childId) {
-    const { publishInterrupt } = await import("../infra/pubsub.ts");
-    await publishInterrupt(childId);
-    await appendEvents(childId, [{ type: "session.status_terminated", reason: "stopped by parent" }], { status: "terminated" });
-  },
-};
 
 function makeDeps(_provider: SandboxProviderName): RunDeps {
   return {
@@ -178,7 +98,8 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     children,
     // runSession publishes each event itself (so deltas and events interleave in order).
     appendEvents: (id, payloads) => appendEvents(id, payloads, { publish: false }),
-    listEvents: (id) => listAllEvents(id),
+    listEvents: (id, opts) => listEventsWindow(id, opts),
+    foldSince,
     publish,
     onInterrupt,
     popSteer,
@@ -197,7 +118,7 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     toolOutputs,
     recordSystemPrompt: (id, prompt) => sessionConfig.recordSystemPrompt(id, prompt),
     files: { get: async (id) => { const f = await files.content(id); return f ? { name: f.meta.filename, mime: f.meta.mime_type, data: new Uint8Array(f.data) } : null; } },
-    getSkills: async (refs) => (await skills.getMany(refs.map((r) => r.skill_id))).map((s) => ({ name: s.name, description: s.description, body: s.body, source: `skill:${s.id}` })),
+    getSkills: async (refs, ownerId) => (await skills.getMany(refs.map((r) => r.skill_id), { owner: ownerId })).map((s) => ({ name: s.name, description: s.description, body: s.body, source: `skill:${s.id}` })),
     getMemoryStores: async (mounts) => {
       const stores = await memoryStores.getMany(mounts.map((m) => m.memory_store_id));
       return mounts.flatMap((m) => { const st = stores.find((x) => x.id === m.memory_store_id); return st ? [{ store: st, mount_path: m.mount_path }] : []; });
@@ -244,6 +165,11 @@ async function handleJob(job: RunJob): Promise<"done" | "retry"> {
   let outcomeLabel = "done";
   try {
     const outcome = await runSession(job.session_id, makeDeps(await providerFor(job.session_id)));
+    if (outcome.status === "terminated") {
+      jlog.info("run.session_terminated"); // never runs again: drop the job instead of retrying it forever
+      outcomeLabel = "terminated";
+      return "done";
+    }
     if (outcome.status === "busy") {
       jlog.info("run.busy_elsewhere");
       outcomeLabel = "busy";

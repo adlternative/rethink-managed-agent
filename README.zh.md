@@ -33,14 +33,17 @@
    ```
 3. 浏览器打开 **http://localhost:8080/** 看只读看板:会话列表、每个会话的事件时间线(消息、工具调用与结果、状态)、以及 SSE 实时 tail。
 
-用自带 CLI 手动操作(`PI_API` 默认 `http://localhost:8080`):
+用自带 CLI 手动操作(`npm run cli -- <命令>`;`PMA_API` 默认 `http://localhost:8080`,旧的 `PI_API` 仍可用;开启 `AUTH_REQUIRED=true` 时用 `PMA_API_KEY` 传 Bearer key):
 ```sh
-npm run cli -- agent create --name dev --provider qoder --model ultimate
-npm run cli -- env create --name local --provider local
-npm run cli -- session create --agent agent_xxx --env env_xxx
+npm run cli -- agents create dev qoder/ultimate          # 旧写法 agent create --name dev --provider qoder --model ultimate 仍可用
+npm run cli -- envs create local --provider local
+npm run cli -- sessions create --agent agent_xxx --env env_xxx
 npm run cli -- send sess_xxx "列出当前文件并加个 README" --wait
 npm run cli -- events sess_xxx
+npm run cli -- vaults create ci && npm run cli -- vaults credentials put vlt_xxx GITHUB_TOKEN --value-env GITHUB_TOKEN
+npm run cli -- --help                                    # 全部命令;<命令> --help 看单个命令的参数
 ```
+资源命令(agents/envs/sessions/vaults/memory-stores/files/skills/providers/sandboxes/models)与 `pma` 客户端一致,另有 `send`/`stream`/`events`/`interrupt` 和 BYOC 的 `worker --env <id> --key <worker_key>`。列表默认打表格,`--json` 输出原始 JSON;退出码 0 成功、1 API/网络/运行失败或超时、2 用法错误。
 
 ## 身份与归属(多租户)
 

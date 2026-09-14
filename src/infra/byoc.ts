@@ -27,6 +27,8 @@ const sbxQueue = (sbxId: string) => `byoc:sbx:${sbxId}:req`;
 const resQueue = (reqId: string) => `byoc:res:${reqId}`;
 const sbxWorker = (sbxId: string) => `byoc:sbx:${sbxId}:worker`;
 const workerAlive = (envId: string, workerId: string) => `byoc:env:${envId}:worker:${workerId}`;
+/** Per-env sorted set of live worker ids scored by heartbeat expiry (ms), so liveness is one ZCOUNT instead of a keyspace walk. */
+const envWorkers = (envId: string) => `byoc:env:${envId}:workers`;
 
 // ---- runner side ----
 export async function enqueue(envId: string, req: WorkerRequest): Promise<void> {
@@ -39,12 +41,18 @@ export async function enqueue(envId: string, req: WorkerRequest): Promise<void> 
 export async function awaitResult(reqId: string, opts: { timeoutMs: number; signal?: AbortSignal; onChunk?: (stream: "stdout" | "stderr", data: string) => void }): Promise<Extract<WorkerResult, { type: "done" }>> {
   const r = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
   const deadline = Date.now() + opts.timeoutMs;
+  // An abort interrupts the blocking BRPOP (disconnecting ends it) instead of waiting out its slice.
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => { onAbort = () => reject(new Error("aborted")); opts.signal?.addEventListener("abort", onAbort, { once: true }); });
+  aborted.catch(() => {});
   try {
     for (;;) {
       if (opts.signal?.aborted) throw new Error("aborted");
       const left = Math.max(1, Math.ceil((deadline - Date.now()) / 1000));
       if (deadline <= Date.now()) throw new Error(`byoc: worker did not answer within ${opts.timeoutMs}ms`);
-      const hit = await r.brpop(resQueue(reqId), Math.min(left, 5));
+      const pop = r.brpop(resQueue(reqId), Math.min(left, 5));
+      pop.catch(() => {}); // a disconnect after abort rejects it; nothing is waiting any more
+      const hit = await Promise.race([pop, aborted]);
       if (!hit) continue;
       const msg = JSON.parse(hit[1]) as WorkerResult;
       if (msg.type === "chunk") { opts.onChunk?.(msg.stream, msg.data); continue; }
@@ -52,6 +60,7 @@ export async function awaitResult(reqId: string, opts: { timeoutMs: number; sign
       return msg;
     }
   } finally {
+    if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
     r.disconnect();
   }
 }
@@ -60,14 +69,28 @@ export const newReqId = () => newId("req");
 export async function workerFor(sbxId: string): Promise<string | null> { return redis.get(sbxWorker(sbxId)); }
 export async function isWorkerAlive(envId: string, workerId: string): Promise<boolean> { return (await redis.exists(workerAlive(envId, workerId))) === 1; }
 export async function anyWorkerAlive(envId: string): Promise<boolean> {
-  const keys = await redis.keys(`byoc:env:${envId}:worker:*`);
-  return keys.length > 0;
+  if ((await redis.zcount(envWorkers(envId), Date.now(), "+inf")) > 0) return true;
+  // Not in the set: fall back to the per-worker keys (a worker last marked by a build without the set, during a
+  // rolling deploy). SCAN is incremental and never blocks Redis the way KEYS does; it only runs on the rare "no worker" path.
+  let cursor = "0";
+  do {
+    const [next, keys] = await redis.scan(cursor, "MATCH", `byoc:env:${envId}:worker:*`, "COUNT", 5000);
+    if (keys.length > 0) return true;
+    cursor = next;
+  } while (cursor !== "0");
+  return false;
 }
 
 // ---- API side (worker long-poll) ----
 /** Mark a worker live (heartbeat). Called at the top of every poll; also used to win the reconnect race before resuming paused sessions. */
 export async function markWorkerAlive(envId: string, workerId: string): Promise<void> {
-  await redis.set(workerAlive(envId, workerId), "1", "EX", WORKER_TTL_S);
+  const expiresAt = Date.now() + WORKER_TTL_S * 1000;
+  await redis.multi()
+    .set(workerAlive(envId, workerId), "1", "EX", WORKER_TTL_S)
+    .zadd(envWorkers(envId), expiresAt, workerId)
+    .zremrangebyscore(envWorkers(envId), "-inf", `(${Date.now()}`) // drop workers whose heartbeat lapsed
+    .expire(envWorkers(envId), WORKER_TTL_S)
+    .exec();
 }
 export async function pollForWorker(envId: string, workerId: string, sandboxIds: string[], waitS: number): Promise<WorkerRequest | null> {
   await markWorkerAlive(envId, workerId);

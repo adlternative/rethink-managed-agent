@@ -2,14 +2,14 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { migrate } from "../infra/migrate.ts";
 import { env } from "../shared/env.ts";
-import { ApiError, errorResponse } from "./errors.ts";
+import { ApiError, errorResponse, limitBody } from "./errors.ts";
 import { agents } from "./routes/agents.ts";
 import { environments } from "./routes/environments.ts";
 import { sessions } from "./routes/sessions.ts";
 import { sandboxes } from "./routes/sandboxes.ts";
 import { models } from "./routes/models.ts";
 import { providers, seedProviders } from "./routes/providers.ts";
-import { filesRoute } from "./routes/files.ts";
+import { filesRoute, MAX_FILE_BYTES } from "./routes/files.ts";
 import { skillsRoute } from "./routes/skills.ts";
 import { memoryStoresRoute } from "./routes/memories.ts";
 import { principalsRoute } from "./routes/principals.ts";
@@ -43,11 +43,14 @@ export const app = new Hono<{ Variables: { requestId: string } }>()
     httpDur.observe(seconds, { route });
     if (c.req.path !== "/healthz" && c.req.path !== "/metrics") log.info("http", { rid, ...labels, ms: Math.round(seconds * 1000) });
   })
-  // reject oversized JSON bodies early (the multipart /v1/files route streams and caps itself)
+  // reject oversized bodies: early on content-length, and while streaming (chunked bodies have no header).
+  // /v1/files gets its own larger cap (file size + multipart envelope slack).
   .use("*", async (c, next) => {
-    if (!c.req.path.startsWith("/v1/files") && (c.req.method === "POST" || c.req.method === "PATCH" || c.req.method === "PUT")) {
+    if (c.req.method === "POST" || c.req.method === "PATCH" || c.req.method === "PUT") {
+      const max = c.req.path.startsWith("/v1/files") ? MAX_FILE_BYTES + 64 * 1024 : env.API_MAX_BODY_BYTES;
       const len = Number(c.req.header("content-length") ?? 0);
-      if (len > env.API_MAX_BODY_BYTES) return errorResponse(c, new ApiError(413, "payload_too_large", `request body exceeds ${env.API_MAX_BODY_BYTES} bytes`));
+      if (len > max) return errorResponse(c, new ApiError(413, "payload_too_large", `request body exceeds ${max} bytes`));
+      c.req.raw = limitBody(c.req.raw, max);
     }
     await next();
   })

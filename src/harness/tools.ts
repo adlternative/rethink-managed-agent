@@ -42,7 +42,8 @@ export function truncateOutput(s: string, max = MAX_OUTPUT_CHARS, note = ""): st
 async function truncateWithSpill(ctx: ToolContext, toolUseId: string, toolName: string, s: string): Promise<string> {
   if (s.length <= MAX_OUTPUT_CHARS) return s;
   if (!ctx.spill) return truncateOutput(s);
-  await ctx.spill.put(toolUseId, toolName, s);
+  // the spill is a convenience: failing to store it must not turn a successful tool call into an error
+  try { await ctx.spill.put(toolUseId, toolName, s); } catch { return truncateOutput(s); }
   return truncateOutput(s, MAX_OUTPUT_CHARS, ` full ${s.length} chars kept: call tool_output with tool_use_id "${toolUseId}" and a grep pattern or offset/limit to read the rest`);
 }
 
@@ -81,7 +82,7 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
         let out = "";
         let code: number | undefined;
         // Always bounded: a runaway `sleep infinity` must not hold the runner and the lease forever.
-        const timeoutMs = Math.min(timeout ? timeout * 1000 : env.BASH_TIMEOUT_MS, env.BASH_MAX_TIMEOUT_MS);
+        const timeoutMs = Math.min(typeof timeout === "number" && timeout > 0 ? timeout * 1000 : env.BASH_TIMEOUT_MS, env.BASH_MAX_TIMEOUT_MS);
         const opts = { cwd: sb.workdir, timeoutMs, signal: signal ?? ctx.signal };
         for await (const chunk of sb.exec(command, opts)) {
           if (chunk.type === "exit") code = chunk.code;
@@ -107,7 +108,7 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
         const lines = (await readText(sb, resolvePath(sb, path))).split("\n");
         const start = Math.max(0, (offset ?? 1) - 1);
         if (start >= lines.length) throw new Error(`Offset ${offset} is beyond end of file (${lines.length} lines)`);
-        const end = limit === undefined ? lines.length : Math.min(start + limit, lines.length);
+        const end = limit === undefined || limit < 0 ? lines.length : Math.min(start + limit, lines.length);
         let out = lines
           .slice(start, end)
           .map((l, i) => `${String(start + i + 1).padStart(6)}\t${l}`)
@@ -145,6 +146,7 @@ const factories: Record<BuiltinToolName, (ctx: ToolContext) => AgentTool> = {
       async ({ path, oldText, newText, env: envKey }) => {
         const sb = await ctx.sandbox(envKey);
         const abs = resolvePath(sb, path);
+        if (oldText === "") throw new Error("oldText must not be empty; use write to create or replace a whole file");
         const src = await readText(sb, abs);
         const at = src.indexOf(oldText);
         if (at === -1) throw new Error(`oldText not found in ${path}`);

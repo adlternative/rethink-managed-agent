@@ -15,7 +15,8 @@ export interface PromptSections {
   plugins?: string;
 }
 
-const PLACEHOLDER = /\{\{(skills|memory|plugins)\}\}/g;
+const PLACEHOLDER = /\{\{(skills|memory|plugins)\}\}/g; // for replace() only: a /g regex carries lastIndex between test() calls
+const HAS_PLACEHOLDER = /\{\{(skills|memory|plugins)\}\}/;
 
 export function renderSkills(s: PromptSections): string {
   const items = [...(s.skills ?? []), ...(s.prompts ?? [])];
@@ -31,11 +32,10 @@ export function renderMemory(s: PromptSections): string {
 export function renderSystemPrompt(system: string | null | undefined, sections: PromptSections): string {
   const base = system?.trim() || DEFAULT_SYSTEM_PROMPT;
   const parts: Record<string, string> = { skills: renderSkills(sections), memory: renderMemory(sections), plugins: sections.plugins?.trim() ?? "" };
-  if (PLACEHOLDER.test(base)) {
-    PLACEHOLDER.lastIndex = 0;
+  if (HAS_PLACEHOLDER.test(base)) {
     return base.replace(PLACEHOLDER, (_m, k: string) => parts[k] ?? "").replace(/\n{3,}/g, "\n\n").trim();
   }
   return [base, parts.skills, parts.memory, parts.plugins].filter(Boolean).join("\n\n");
 }
 
-export const usesPlaceholders = (system: string | null | undefined) => { PLACEHOLDER.lastIndex = 0; return PLACEHOLDER.test(system ?? ""); };
+export const usesPlaceholders = (system: string | null | undefined) => HAS_PLACEHOLDER.test(system ?? "");

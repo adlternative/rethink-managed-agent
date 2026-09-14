@@ -51,7 +51,7 @@ export function sandboxEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 export function resolveInside(hostRoot: string, workdir: string, p: string): string {
   const inSandbox = path.posix.resolve(workdir, p);
   const rel = path.posix.relative(workdir, inSandbox);
-  if (rel.startsWith("..") || path.posix.isAbsolute(rel)) throw new Error(`path escapes workdir: ${p}`);
+  if (rel === ".." || rel.startsWith("../") || path.posix.isAbsolute(rel)) throw new Error(`path escapes workdir: ${p}`);
   return path.join(hostRoot, rel);
 }
 
@@ -87,10 +87,11 @@ export type { ExecOptions };
 /** Long-lived child with stdin, for hosting a plugin host process inside a sandbox. */
 export function spawnProcess(file: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }): SandboxProcess {
   const child = spawn(file, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+  child.stdin.on("error", () => {}); // EPIPE once the process is gone: its exit is reported through onExit
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   return {
-    write: (d) => { child.stdin.write(d); },
+    write: (d) => { if (!child.stdin.writable) throw new Error("process stdin is closed"); child.stdin.write(d); },
     end: () => { child.stdin.end(); },
     onStdout: (cb) => { child.stdout.on("data", cb); },
     onStderr: (cb) => { child.stderr.on("data", cb); },

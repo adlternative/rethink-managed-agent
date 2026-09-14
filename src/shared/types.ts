@@ -231,8 +231,8 @@ export interface SandboxProvider {
   destroyContainer(containerRef: string): Promise<void>;
   /** Materialize `ref` into a fresh workdir in the container; return a Sandbox bound to it. */
   addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef, secrets?: Record<string, string>): Promise<SandboxHandle>;
-  /** Re-attach a Sandbox to an existing mount. */
-  connectMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null>;
+  /** Re-attach a Sandbox to an existing mount; `secrets` are this lease's (a reused mount must not keep a previous run's). */
+  connectMount(containerRef: string, mountId: SandboxId, workdir: string, secrets?: Record<string, string>): Promise<Sandbox | null>;
   /** Remove one mount's workdir (leaves the container). */
   removeMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<void>;
   /** Capture a mount's current workspace state. */
@@ -402,11 +402,14 @@ export type UserEventInput =
 export type SessionEventPayload =
   | { type: "user.message"; content: ContentBlock[] }
   | { type: "user.interrupt" }
+  /** a plugin rewrote the text of the user.message at `target_seq` (slash command send / input hook); folds use this text */
+  | { type: "user.message_rewritten"; target_seq: number; text: string }
   | { type: "agent.message"; content: ContentBlock[]; /** full pi message for lossless refold */ pi: AgentMessage; /** matches the deltas that previewed this message */ stream_id?: string; /** reasoning text, when the model produced any */ thinking?: string }
   | { type: "agent.tool_use"; tool_use_id: string; name: string; input: unknown }
   | { type: "agent.tool_result"; tool_use_id: string; content: ContentBlock[]; is_error: boolean; /** full pi toolResult message */ pi: AgentMessage }
   | { type: "session.status_running" }
-  | { type: "session.status_idle"; stop_reason: StopReason }
+  /** `consumed_seq`: the newest user.message the finished run saw; a later one gets a follow-up run */
+  | { type: "session.status_idle"; stop_reason: StopReason; consumed_seq?: number }
   | { type: "session.status_terminated"; reason?: string }
   | { type: "session.error"; error: { type: string; message: string } }
   /** A byoc environment has no live worker: the run is paused, awaiting a worker (re)connection. */

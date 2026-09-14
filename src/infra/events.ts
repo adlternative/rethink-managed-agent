@@ -87,12 +87,76 @@ export async function listEvents(
   return (rows as Row[]).map(toEvent);
 }
 
-/** Whole log, paged — the fold must never see a truncated tail. */
-export async function listAllEvents(sessionId: string, pageSize = 5000): Promise<SessionEvent[]> {
+/** Whole log after `since` (default: all of it), paged — the fold must never see a truncated tail. */
+export async function listAllEvents(sessionId: string, pageSize = 5000, since = 0): Promise<SessionEvent[]> {
   const out: SessionEvent[] = [];
   for (;;) {
-    const page = await listEvents(sessionId, { since: out.at(-1)?.seq ?? 0, limit: pageSize });
+    const page = await listEvents(sessionId, { since: out.at(-1)?.seq ?? since, limit: pageSize });
     out.push(...page);
     if (page.length < pageSize) return out;
   }
+}
+
+/** Events with seq > `since`; with `limit`, only the newest `limit` of them. Seq order either way. */
+export async function listEventsWindow(sessionId: string, opts: { since?: number; limit?: number } = {}): Promise<SessionEvent[]> {
+  // Non-integer cursors (plugin input) are not pushed down: read wider and let the caller filter.
+  const since = Number.isInteger(opts.since) && opts.since! > 0 ? opts.since! : 0;
+  if (!Number.isInteger(opts.limit)) return listAllEvents(sessionId, 5000, since);
+  if (opts.limit! <= 0) return [];
+  const { rows } = await pool.query(`SELECT * FROM (SELECT * FROM events WHERE session_id=$1 AND seq>$2 ORDER BY seq DESC LIMIT $3) t ORDER BY seq ASC`, [sessionId, since, opts.limit]);
+  return (rows as Row[]).map(toEvent);
+}
+
+/** Newest seq in the log (0 when empty). A primary-key probe, not a log read. */
+export async function lastSeq(sessionId: string): Promise<number> {
+  const { rows } = await pool.query(`SELECT COALESCE(MAX(seq),0) AS max FROM events WHERE session_id=$1`, [sessionId]);
+  return Number(rows[0]?.max ?? 0);
+}
+
+/** The newest event of each of `types` (types never logged are absent), in seq order. One index probe per type. */
+export async function latestOfTypes(sessionId: string, types: string[]): Promise<SessionEvent[]> {
+  const { rows } = await pool.query(
+    `SELECT e.* FROM unnest($2::text[]) AS t(type) CROSS JOIN LATERAL (SELECT * FROM events WHERE session_id=$1 AND type=t.type ORDER BY seq DESC LIMIT 1) e ORDER BY e.seq`,
+    [sessionId, types],
+  );
+  return (rows as Row[]).map(toEvent);
+}
+
+/** The newest event of `type` whose payload contains `match` (jsonb @>), or null. */
+export async function latestMatching(sessionId: string, type: string, match: Record<string, unknown>): Promise<SessionEvent | null> {
+  const { rows } = await pool.query(`SELECT * FROM events WHERE session_id=$1 AND type=$2 AND payload @> $3::jsonb ORDER BY seq DESC LIMIT 1`, [sessionId, type, JSON.stringify(match)]);
+  return rows[0] ? toEvent(rows[0] as Row) : null;
+}
+
+/**
+ * The events a projection needs instead of the whole log, in seq order: every event of `types`, plus
+ * (when `toolNames` is non-empty) the agent.tool_use calls to those tools and the agent.tool_result
+ * rows answering them. The filter runs in Postgres, so unrelated rows (other tools' outputs, messages,
+ * spans) are never shipped or parsed. `payload.pi` (the full model message kept for the fold, which
+ * duplicates `content`) is left out: projections never read it.
+ */
+const PROJECTED = `id, session_id, seq, type, payload - 'pi' AS payload, created_at`;
+export async function listEventsForState(sessionId: string, types: string[], toolNames: string[] = []): Promise<SessionEvent[]> {
+  const { rows } = toolNames.length
+    ? await pool.query(
+        `SELECT ${PROJECTED} FROM events WHERE session_id=$1 AND (type = ANY($2::text[])
+           OR (type='agent.tool_use' AND payload->>'name' = ANY($3::text[]))
+           OR (type='agent.tool_result' AND payload->>'tool_use_id' IN (SELECT payload->>'tool_use_id' FROM events WHERE session_id=$1 AND type='agent.tool_use' AND payload->>'name' = ANY($3::text[]))))
+         ORDER BY seq`,
+        [sessionId, types, toolNames])
+    : await pool.query(`SELECT ${PROJECTED} FROM events WHERE session_id=$1 AND type = ANY($2::text[]) ORDER BY seq`, [sessionId, types]);
+  return (rows as Row[]).map(toEvent);
+}
+
+/**
+ * Cursor a fold can start after: everything before the latest compaction's first kept message is
+ * replaced by its summary, so the fold reads from min(first_kept_seq, the compaction's own seq). 0 when
+ * the session was never compacted (read the whole log).
+ */
+export async function foldSince(sessionId: string): Promise<number> {
+  const { rows } = await pool.query(`SELECT seq, payload->'first_kept_seq' AS first_kept FROM events WHERE session_id=$1 AND type='agent.thread_context_compacted' ORDER BY seq DESC LIMIT 1`, [sessionId]);
+  const r = rows[0] as { seq: string | number; first_kept: unknown } | undefined;
+  if (!r) return 0;
+  const firstKept = typeof r.first_kept === "number" && Number.isFinite(r.first_kept) ? r.first_kept : 0;
+  return Math.max(0, Math.min(firstKept, Number(r.seq)) - 1);
 }

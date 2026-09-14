@@ -65,9 +65,12 @@ export async function piCompatFactory(factory: (pi: Any) => unknown, api: Plugin
         if (ours === "context") {
           // pi's context hook rewrites messages; we cannot hand those out, only the prompt. Give an empty message list.
           const r = await handler({ type: "context", systemPrompt: ev.systemPrompt, messages: [] }, piCtx(ctx));
-          return r?.systemPrompt && r.systemPrompt !== ev.systemPrompt ? { appendSystemPrompt: r.systemPrompt } : undefined;
+          if (!r?.systemPrompt || r.systemPrompt === ev.systemPrompt) return undefined;
+          // pi returns the whole rewritten prompt; the runner appends, so pass only what was added to the base
+          const added = r.systemPrompt.startsWith(ev.systemPrompt) ? r.systemPrompt.slice(ev.systemPrompt.length).trim() : r.systemPrompt;
+          return added ? { appendSystemPrompt: added } : undefined;
         }
-        await handler({ type: event, ...ev }, piCtx(ctx));
+        await handler({ ...ev, type: event }, piCtx(ctx)); // handlers see pi's event name (session_shutdown), not ours
         return undefined;
       });
     },

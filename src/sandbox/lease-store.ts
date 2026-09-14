@@ -1,15 +1,28 @@
-import { pool } from "../infra/db.ts";
+import { pool, tx } from "../infra/db.ts";
 import { env } from "../shared/env.ts";
 import type { SandboxId, SandboxProviderName, SandboxRow } from "../shared/types.ts";
 
 /** A `busy` row older than this was left behind by a crashed runner (runs are capped at RUN_TIMEOUT_MS). */
 const ABANDONED_MS = env.RUN_TIMEOUT_MS + 5 * 60_000;
 
+/**
+ * Insert a mount row. A busy row with an affinity is the workspace's exclusive lease: under an advisory
+ * lock on (provider, affinity) it is only inserted if no other live lease holds that workspace, so two
+ * concurrent acquires cannot both win the check-then-insert race.
+ */
 export async function insert(row: Omit<SandboxRow, "last_used_at" | "created_at">): Promise<void> {
-  await pool.query(
-    `INSERT INTO sandboxes (id, owner_id, provider, status, workspace_id, affinity, external_ref, container_key, container_ref, workdir) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-    [row.id, row.owner_id ?? null, row.provider, row.status, row.workspace_id, row.affinity, row.external_ref, row.container_key, row.container_ref, row.workdir],
-  );
+  const params = [row.id, row.owner_id ?? null, row.provider, row.status, row.workspace_id, row.affinity, row.external_ref, row.container_key, row.container_ref, row.workdir];
+  const sql = `INSERT INTO sandboxes (id, owner_id, provider, status, workspace_id, affinity, external_ref, container_key, container_ref, workdir) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`;
+  if (row.status !== "busy" || !row.affinity) { await pool.query(sql, params); return; }
+  await tx(async (c) => {
+    await c.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sandbox:${row.provider}:${row.affinity}`]);
+    const busy = await c.query(
+      `SELECT 1 FROM sandboxes WHERE provider=$1 AND affinity=$2 AND status='busy' AND id<>$3 AND last_used_at > now() - ($4::bigint * interval '1 millisecond') LIMIT 1`,
+      [row.provider, row.affinity, row.id, ABANDONED_MS],
+    );
+    if (busy.rowCount) throw new Error(`workspace ${row.affinity} is in use by another running session; retry when it is idle`);
+    await c.query(sql, params);
+  });
 }
 
 /** Record the container + workdir a mount landed in (after addMount). */

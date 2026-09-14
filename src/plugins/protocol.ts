@@ -53,7 +53,9 @@ export function encode(f: Frame): string {
 export class Rpc {
   private next = 1;
   private pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
-  private buf = "";
+  /** Chunks of the incomplete trailing line (joined once its newline arrives, so a large frame is not rescanned per chunk). */
+  private partial: string[] = [];
+  private closed: string | null = null;
   private write: (line: string) => void;
   private handle: (method: string, params: unknown) => Promise<unknown>;
   // no parameter properties: this file runs under Node's native type stripping in the plugin host
@@ -63,13 +65,20 @@ export class Rpc {
   }
 
   feed(chunk: string): void {
-    this.buf += chunk;
+    let from = 0;
     let i: number;
-    while ((i = this.buf.indexOf("\n")) >= 0) {
-      const line = this.buf.slice(0, i).trim();
-      this.buf = this.buf.slice(i + 1);
-      if (line) void this.onFrame(JSON.parse(line) as Frame);
+    while ((i = chunk.indexOf("\n", from)) >= 0) {
+      const piece = chunk.slice(from, i);
+      const line = (this.partial.length ? this.partial.join("") + piece : piece).trim();
+      this.partial.length = 0;
+      from = i + 1;
+      if (!line) continue;
+      // Anything that is not a frame (a plugin writing to stdout, say) is skipped, never thrown out of the stream listener.
+      let frame: Frame;
+      try { frame = JSON.parse(line) as Frame; } catch { continue; }
+      if (frame && typeof frame === "object" && typeof (frame as { id?: unknown }).id === "number") void this.onFrame(frame);
     }
+    if (from < chunk.length) this.partial.push(from === 0 ? chunk : chunk.slice(from));
   }
 
   private async onFrame(f: Frame): Promise<void> {
@@ -91,15 +100,17 @@ export class Rpc {
   }
 
   call<T = unknown>(method: string, params: unknown): Promise<T> {
+    if (this.closed) return Promise.reject(new Error(this.closed));
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.write(encode({ id, method, params }));
+      try { this.write(encode({ id, method, params })); } catch (e) { this.pending.delete(id); reject(e instanceof Error ? e : new Error(String(e))); }
     });
   }
 
-  /** Fail every in-flight call (host died). */
+  /** Fail every in-flight call and every later one (host died): nothing would ever answer them. */
   abortAll(reason: string): void {
+    this.closed = reason;
     for (const p of this.pending.values()) p.reject(new Error(reason));
     this.pending.clear();
   }

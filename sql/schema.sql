@@ -260,3 +260,16 @@ CREATE TABLE IF NOT EXISTS vault_credentials (
 
 -- Vaults whose secrets are injected into this session's sandboxes.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS vault_ids TEXT[] NOT NULL DEFAULT '{}';
+
+-- Hot-path indexes. A non-concurrent index build blocks writes to its table: on a large existing
+-- deployment, build these beforehand with the CONCURRENTLY option (same names) and this becomes a no-op.
+-- Session list pages: WHERE owner_id ORDER BY created_at DESC, id DESC LIMIT n (no sort of the whole tenant).
+CREATE INDEX IF NOT EXISTS sessions_owner_created ON sessions(owner_id, created_at DESC, id DESC);
+-- Sub-agent lookups (childrenOf, subagent routes, runner children.list).
+CREATE INDEX IF NOT EXISTS sessions_parent ON sessions(parent_id, created_at) WHERE parent_id IS NOT NULL;
+-- BYOC worker reconnect: idle sessions of an environment.
+CREATE INDEX IF NOT EXISTS sessions_env_status ON sessions(environment_id, status);
+-- Reaper / lease store: live mounts of a container.
+CREATE INDEX IF NOT EXISTS sandboxes_container_ref ON sandboxes(container_ref) WHERE status <> 'destroyed';
+-- Latest event of a type without walking the log (status/user.message probes, compaction cut, turns).
+CREATE INDEX IF NOT EXISTS events_session_type_seq ON events(session_id, type, seq);

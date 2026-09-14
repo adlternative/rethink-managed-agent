@@ -40,14 +40,14 @@ export class SandboxManager {
     if (mine?.container_ref && mine.workdir) {
       if (mine.status === "paused") await provider.resume?.(mine.container_ref).catch((e) => console.warn(`[sandbox] resume ${mine.container_ref} failed: ${e?.message ?? e}`));
       if (await provider.connectContainer(mine.container_ref).catch(() => false)) {
-        const sandbox = await provider.connectMount(mine.container_ref, mine.id, mine.workdir).catch(() => null);
+        const sandbox = await provider.connectMount(mine.container_ref, mine.id, mine.workdir, req.secrets).catch(() => null);
         if (sandbox) return this.lease(provider, mine.id, { sandbox, containerRef: mine.container_ref, workdir: mine.workdir }, mine.status === "paused" ? "resumed" : "reused");
       }
-      // stale mount: retire the row and fall through to make a fresh one
-      await this.store.setStatus(mine.id, "destroyed");
+      // stale mount: remove what is left of it (and its container, if now empty), then make a fresh one
+      await this.dropMount(mine);
     } else if (mine) {
-      // conflict: another run holds this workspace's mount
-      if (await this.store.findBusyByAffinity(name, req.affinity!)) throw new Error(`workspace ${req.affinity} is in use by another running session; retry when it is idle`);
+      // a claimed row that never got a container/workdir (e.g. a legacy row): we hold it now, so retire it.
+      // (findBusyByAffinity would only find this very row, which our claim just marked busy.)
       await this.store.setStatus(mine.id, "destroyed");
     } else if (req.affinity && (await this.store.findBusyByAffinity(name, req.affinity))) {
       throw new Error(`workspace ${req.affinity} is in use by another running session; retry when it is idle`);
@@ -78,7 +78,15 @@ export class SandboxManager {
 
   private lease(provider: SandboxProvider, id: SandboxId, handle: SandboxHandle, origin: SandboxLease["origin"]): SandboxLease {
     this.held.set(id, { provider, handle });
-    return { sandbox: handle.sandbox, origin, release: async () => { this.held.delete(id); await this.store.setStatus(id, "ready"); } };
+    return {
+      sandbox: handle.sandbox,
+      origin,
+      release: async () => {
+        this.held.delete(id);
+        // only a still-leased row goes back to ready; one destroyed (or marked) meanwhile stays retired
+        if ((await this.store.get(id))?.status === "busy") await this.store.setStatus(id, "ready");
+      },
+    };
   }
 
   async capture(sb: Sandbox, prev: WorkspaceRef): Promise<WorkspaceRef> {
@@ -125,14 +133,20 @@ export class SandboxManager {
       for (const r of rows) (byContainer.get(r.container_ref!) ?? byContainer.set(r.container_ref!, []).get(r.container_ref!)!).push(r);
       const idleRows = new Set((await this.store.listIdle(p.name, idleTtlMs)).map((r) => r.id));
       const destroyRows = new Set((await this.store.listToDestroy(p.name, pausedTtlMs)).map((r) => r.id));
-      for (const [containerRef, mounts] of byContainer) {
-        const anyToDestroy = mounts.some((m) => destroyRows.has(m.id));
-        const allPaused = mounts.every((m) => m.status === "paused");
-        if (anyToDestroy && (allPaused || mounts.every((m) => destroyRows.has(m.id)))) {
+      for (const [containerRef, all] of byContainer) {
+        const doomed = all.filter((m) => destroyRows.has(m.id));
+        if (doomed.length && (doomed.length === all.length || all.every((m) => m.status === "paused"))) {
           await p.destroyContainer(containerRef).catch((e) => console.error(`[reaper] ${p.name} destroy ${containerRef} failed`, e));
-          for (const m of mounts) { this.held.delete(m.id); await this.store.setStatus(m.id, "destroyed"); out[p.name].destroyed.push(m.id); }
+          for (const m of all) { this.held.delete(m.id); await this.store.setStatus(m.id, "destroyed"); out[p.name].destroyed.push(m.id); }
           continue;
         }
+        // Mounts to destroy beside live siblings go one by one; the container stays for the others.
+        for (const m of doomed) {
+          await this.dropMount(m).catch((e) => console.error(`[reaper] ${p.name} drop mount ${m.id} failed`, e));
+          out[p.name].destroyed.push(m.id);
+        }
+        const mounts = all.filter((m) => !destroyRows.has(m.id));
+        if (mounts.length === 0) continue;
         // every mount ready and idle past ttl -> pause (or destroy without pause support)
         if (mounts.every((m) => m.status === "ready" && idleRows.has(m.id))) {
           if (p.pause) {

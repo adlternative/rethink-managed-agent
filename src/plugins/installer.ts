@@ -5,7 +5,7 @@ import { disallowedEverywhere } from "./allow.ts";
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { env } from "../shared/env.ts";
@@ -48,7 +48,8 @@ async function installOne(source: string, root: string): Promise<string> {
 async function readManifest(dir: string, source: string): Promise<PackageManifest> {
   const pkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8").catch(() => "{}")) as { name?: string; pma?: Record<string, string[]>; pi?: Record<string, string[]> };
   const m = pkg.pma ?? pkg.pi;
-  const kind: PackageManifest["kind"] = pkg.pma ? "pma" : "pi";
+  // only an explicit "pi" manifest selects the pi adapter; a conventional package is a pma plugin
+  const kind: PackageManifest["kind"] = pkg.pi && !pkg.pma ? "pi" : "pma";
   // conventional dirs when the manifest omits a field (pi does the same)
   const exists = async (p: string) => !!(await stat(path.join(dir, p)).catch(() => null));
   const plugins = m?.plugins ?? m?.extensions ?? ((await exists("index.ts")) ? ["index.ts"] : (await exists("index.js")) ? ["index.js"] : []);
@@ -63,34 +64,55 @@ async function readManifest(dir: string, source: string): Promise<PackageManifes
   };
 }
 
+/** Installs into one agent dir run one at a time (npm in the same dir, and the cache file, are not concurrency-safe). */
+const installing = new Map<string, Promise<unknown>>();
+
 /** Install (cached by source list) and return manifests. */
 export async function ensurePackages(agentId: string, sources: string[]): Promise<PackageManifest[]> {
   const blocked = disallowedEverywhere(sources); // fail fast only if a package can run in NO placement
   if (blocked.length) throw new Error(`plugin packages allowed in no placement: ${blocked.join(", ")}`);
   const root = agentDirFor(agentId);
+  const prev = installing.get(root) ?? Promise.resolve();
+  const job = prev.catch(() => {}).then(() => install(agentId, root, sources));
+  installing.set(root, job);
+  void job.catch(() => {}).finally(() => { if (installing.get(root) === job) installing.delete(root); });
+  return job;
+}
+
+async function install(agentId: string, root: string, sources: string[]): Promise<PackageManifest[]> {
   await mkdir(root, { recursive: true });
   const cache = path.join(root, "packages.json");
   const key = createHash("sha256").update(JSON.stringify(sources)).digest("hex");
-  const cached = JSON.parse(await readFile(cache, "utf8").catch(() => "null")) as { key: string; manifests: PackageManifest[] } | null;
-  if (cached?.key === key) return cached.manifests;
+  let cached: { key: string; manifests: PackageManifest[] } | null = null;
+  try { cached = JSON.parse(await readFile(cache, "utf8")); } catch { /* missing or corrupt: reinstall */ }
+  if (cached?.key === key && Array.isArray(cached.manifests)) return cached.manifests;
   const manifests: PackageManifest[] = [];
   for (const source of sources) {
     console.log(`[plugins] installing ${source} for ${agentId}`);
     manifests.push(await readManifest(await installOne(source, root), source));
   }
-  await writeFile(cache, JSON.stringify({ key, manifests }, null, 2));
+  // write-then-rename, so a crash mid-write never leaves a truncated cache
+  const tmp = `${cache}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify({ key, manifests }, null, 2));
+  await rename(tmp, cache);
   return manifests;
 }
 
 function frontmatter(raw: string): { meta: Record<string, string>; body: string } {
-  const m = /^---\n([\s\S]*?)\n---\n?/.exec(raw);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/.exec(raw);
   if (!m) return { meta: {}, body: raw };
   const meta: Record<string, string> = {};
-  for (const line of m[1]!.split("\n")) {
+  for (const line of m[1]!.split(/\r?\n/)) {
     const i = line.indexOf(":");
     if (i > 0) meta[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, "");
   }
   return { meta, body: raw.slice(m[0].length) };
+}
+
+/** `p` if it (following symlinks) stays inside the package dir, else null: package content must never pull in runner-host files. */
+async function insidePackage(pkgRoot: string, p: string): Promise<string | null> {
+  const [root, real] = await Promise.all([realpath(pkgRoot).catch(() => null), realpath(p).catch(() => null)]);
+  return root && real && (real === root || real.startsWith(root + path.sep)) ? p : null;
 }
 
 /** SKILL.md files (pi layout: <dir>/<name>/SKILL.md) and prompt templates (<dir>/*.md). */
@@ -99,13 +121,14 @@ export async function loadContent(manifests: PackageManifest[]): Promise<{ skill
   const prompts: PromptTemplate[] = [];
   for (const m of manifests) {
     for (const rel of m.skills) {
-      const root = path.resolve(m.dir, rel);
+      const root = await insidePackage(m.dir, path.resolve(m.dir, rel));
+      if (!root) continue;
       const walk = async (d: string, depth: number): Promise<void> => {
         if (depth > 3) return;
         for (const e of await readdir(d, { withFileTypes: true }).catch(() => [])) {
           const p = path.join(d, e.name);
           if (e.isDirectory()) await walk(p, depth + 1);
-          else if (e.name === "SKILL.md") {
+          else if (e.name === "SKILL.md" && (await insidePackage(m.dir, p))) {
             const { meta, body } = frontmatter(await readFile(p, "utf8"));
             skills.push({ name: meta.name ?? path.basename(d), description: meta.description ?? "", body: body.trim(), source: m.source });
           }
@@ -115,7 +138,8 @@ export async function loadContent(manifests: PackageManifest[]): Promise<{ skill
       else await walk(root, 0);
     }
     for (const rel of m.prompts) {
-      const root = path.resolve(m.dir, rel);
+      const root = await insidePackage(m.dir, path.resolve(m.dir, rel));
+      if (!root) continue;
       for (const e of await readdir(root, { withFileTypes: true }).catch(() => [])) {
         if (!e.isFile() || !e.name.endsWith(".md")) continue;
         const { meta, body } = frontmatter(await readFile(path.join(root, e.name), "utf8"));

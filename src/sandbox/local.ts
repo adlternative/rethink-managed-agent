@@ -46,8 +46,8 @@ export class LocalProvider implements SandboxProvider {
     const workdir = await materialize(ref, path.join(containerDir(containerRef), mountId));
     return { sandbox: makeSandbox(mountId, workdir, secrets), containerRef, workdir };
   }
-  async connectMount(_containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null> {
-    return (await dirExists(workdir)) ? makeSandbox(mountId, workdir) : null;
+  async connectMount(_containerRef: string, mountId: SandboxId, workdir: string, secrets?: Record<string, string>): Promise<Sandbox | null> {
+    return (await dirExists(workdir)) ? makeSandbox(mountId, workdir, secrets) : null;
   }
   async removeMount(_containerRef: string, _mountId: SandboxId, workdir: string): Promise<void> {
     if (workdir.startsWith(root() + path.sep)) await rm(workdir, { recursive: true, force: true });

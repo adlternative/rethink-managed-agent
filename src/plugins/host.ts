@@ -15,6 +15,12 @@ import { piCompatFactory } from "./pi-compat.ts";
 // Sandbox mode (PMA_HOST_LOCKDOWN=0): the sandbox is the boundary; plugins may use fs/net directly.
 if (process.env.PMA_HOST_LOCKDOWN !== "0") lockdown();
 
+// stdout carries the RPC stream: plugin console output goes to stderr (the runner logs it) instead of corrupting it.
+for (const k of ["log", "info", "debug"] as const) console[k] = (...args: unknown[]) => console.error(...args);
+// One plugin's stray async error must not kill the host that serves every session of the agent.
+process.on("uncaughtException", (e) => console.error("[plugin host] uncaught exception in a plugin:", e));
+process.on("unhandledRejection", (e) => console.error("[plugin host] unhandled rejection in a plugin:", e));
+
 type Handler = (event: HookEvent, ctx: PluginContext) => unknown;
 /** Hook result fields that are single-owner (first writer wins) instead of composable middleware tweaks. */
 const OVERRIDE_FIELDS: Partial<Record<HookName, string[]>> = { before_compact: ["summary", "keepRecentTokens"] };
@@ -33,7 +39,8 @@ const rpc = new Rpc(
         const t = tools.get(p.name);
         if (!t) throw new Error(`plugin host: unknown tool ${p.name}`);
         const r = await t.spec.execute(p.input as never, makeContext(p.session, t.source));
-        return typeof r === "string" ? { content: [{ type: "text", text: r }] } : r;
+        if (typeof r === "string") return { content: [{ type: "text", text: r }] };
+        return r && typeof r === "object" ? { ...r, content: Array.isArray((r as { content?: unknown }).content) ? (r as { content: unknown[] }).content : [] } : { content: [] }; // nothing returned: empty content
       }
       case "command.run": {
         const p = params as { session: SessionInfo; name: string; args: string };

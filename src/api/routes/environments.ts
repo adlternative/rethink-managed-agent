@@ -29,7 +29,7 @@ export function validateWorkspaceSpec(spec: unknown): WorkspaceSpec {
     if (!env.LOCAL_WORKSPACE_ALLOW_ROOT) throw invalid("workspace kind 'local' is disabled (set LOCAL_WORKSPACE_ALLOW_ROOT on the api to allow it)");
     const root = path.resolve(env.LOCAL_WORKSPACE_ALLOW_ROOT);
     const p = path.resolve(root, s.path);
-    if (p !== root && !p.startsWith(root + path.sep)) throw invalid(`workspace.path must be under ${root}`);
+    if (p !== root && !p.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) throw invalid(`workspace.path must be under ${root}`);
     return { kind: "local", path: p };
   }
   throw invalid("workspace must be {kind:'empty'} | {kind:'git',remote,ref?} | {kind:'local',path}");

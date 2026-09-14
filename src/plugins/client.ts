@@ -10,7 +10,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import type { HookEvent, HookResultFor, PackageManifest } from "./api.ts";
 import type { Sandbox, SandboxProcess } from "../shared/types.ts";
-import { SANDBOX_HOST_DIR, type HostBundle } from "./bundle.ts";
+import { bundleDir, SANDBOX_HOST_DIR, type HostBundle } from "./bundle.ts";
 import { Rpc, type RunnerMethods, type SessionInfo } from "./protocol.ts";
 
 export interface Capabilities {
@@ -46,10 +46,11 @@ export interface LoadedTools { name: string; description: string; parameters: un
 const HOST_ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "host.ts");
 
 function localTransport(child: ChildProcess): SandboxProcess {
+  child.stdin!.on("error", () => {}); // EPIPE after the host died: the exit handler fails the calls
   child.stdout!.setEncoding("utf8");
   child.stderr!.setEncoding("utf8");
   return {
-    write: (d) => { child.stdin!.write(d); },
+    write: (d) => { if (child.stdin!.writable) child.stdin!.write(d); else throw new Error("plugin host stdin is closed"); },
     end: () => { child.stdin!.end(); },
     onStdout: (cb) => { child.stdout!.on("data", cb); },
     onStderr: (cb) => { child.stderr!.on("data", cb); },
@@ -63,6 +64,8 @@ export class PluginHost {
   private rpc: Rpc;
   private sessions = new Map<string, Capabilities>();
   private exited: Promise<string>;
+  /** Set once the host process has exited; every later call rejects with it. */
+  public exitReason: string | null = null;
   public tools: LoadedTools[] = [];
   public commands: LoadedCommand[] = [];
   public hooks = new Set<string>();
@@ -79,7 +82,7 @@ export class PluginHost {
     );
     proc.onStdout((c) => this.rpc.feed(c));
     proc.onStderr((c) => process.stderr.write(`[plugin-host:${mode}] ${c}`));
-    this.exited = new Promise((resolve) => proc.onExit((code) => { const why = `plugin host exited (${code})`; this.rpc.abortAll(why); resolve(why); }));
+    this.exited = new Promise((resolve) => proc.onExit((code) => { const why = `plugin host exited (${code})`; this.exitReason = why; this.rpc.abortAll(why); resolve(why); }));
   }
 
   private static async load(host: PluginHost, packages: PackageManifest[], agentId: string): Promise<PluginHost> {
@@ -102,25 +105,32 @@ export class PluginHost {
    */
   static async startInSandbox(sandbox: Sandbox, bundle: HostBundle, opts: { agentId: string }): Promise<PluginHost> {
     if (!sandbox.spawn) throw new Error(`sandbox provider ${sandbox.provider} cannot host plugins (no spawn support)`);
-    const tgz = `${SANDBOX_HOST_DIR}.tgz`;
+    // The bundle's own dir (its manifests point there); an already-unpacked bundle is reused as is,
+    // since a running host may be using it. Temp names are unique so concurrent starts do not collide.
+    const hostDir = bundleDir(bundle.key);
+    const nonce = Math.random().toString(36).slice(2, 10);
+    const tgz = `${hostDir}.${nonce}.tgz`;
     // The bundle lives outside the workspace, where writeFile (workspace-confined by design) cannot
     // reach: stream it through a process's stdin instead.
     await new Promise<void>((resolve, reject) => {
-      sandbox.spawn!(`base64 -d > ${tgz}`).then((up) => {
+      sandbox.spawn!(`mkdir -p ${SANDBOX_HOST_DIR} && base64 -d > ${tgz}`).then((up) => {
         let err = "";
         up.onStderr((c) => { err += c; });
         up.onExit((code) => (code === 0 ? resolve() : reject(new Error(`bundle upload failed (${code}): ${err.trim()}`))));
-        const b64 = Buffer.from(bundle.tgz).toString("base64");
-        for (let i = 0; i < b64.length; i += 65536) up.write(b64.slice(i, i + 65536) + "\n");
-        up.end();
+        try {
+          const b64 = Buffer.from(bundle.tgz).toString("base64");
+          for (let i = 0; i < b64.length; i += 65536) up.write(b64.slice(i, i + 65536) + "\n");
+          up.end();
+        } catch (e) { reject(e); }
       }, reject);
     });
     let out = "";
-    for await (const c of sandbox.exec(`command -v node >/dev/null || { echo "node is not installed in the sandbox image" >&2; exit 127; }; rm -rf ${SANDBOX_HOST_DIR} && mkdir -p ${SANDBOX_HOST_DIR} && tar xzf ${tgz} -C ${SANDBOX_HOST_DIR} && rm -f ${tgz} && node --version`, { timeoutMs: 60_000 })) {
+    const unpack = `if [ -f ${hostDir}/src/plugins/host.ts ]; then rm -f ${tgz}; else rm -rf ${hostDir}.${nonce} && mkdir -p ${hostDir}.${nonce} && tar xzf ${tgz} -C ${hostDir}.${nonce} && rm -f ${tgz} && { mv ${hostDir}.${nonce} ${hostDir} 2>/dev/null || rm -rf ${hostDir}.${nonce}; }; fi`;
+    for await (const c of sandbox.exec(`command -v node >/dev/null || { echo "node is not installed in the sandbox image" >&2; exit 127; }; ${unpack} && node --version`, { timeoutMs: 60_000 })) {
       if (c.type === "exit" && c.code !== 0) throw new Error(`plugin host bundle setup failed in sandbox: ${out.trim()}`);
       if (c.data) out += c.data;
     }
-    const proc = await sandbox.spawn(`exec node ${SANDBOX_HOST_DIR}/src/plugins/host.ts`, { env: { PMA_HOST_LOCKDOWN: "0", PMA_PLUGIN_HOST: "1" } });
+    const proc = await sandbox.spawn(`exec node ${hostDir}/src/plugins/host.ts`, { env: { PMA_HOST_LOCKDOWN: "0", PMA_PLUGIN_HOST: "1" } });
     return PluginHost.load(new PluginHost(proc, "sandbox"), bundle.manifests, opts.agentId);
   }
 
@@ -192,9 +202,10 @@ export class PluginHost {
       parameters: t.parameters as TSchema,
       executionMode: "sequential",
       execute: async (_id, params) => {
-        const r = await this.rpc.call<{ content: { type: "text"; text: string }[]; isError?: boolean }>("tool.execute", { session, name: t.name, input: params });
-        if (r.isError) throw new Error(r.content.map((c) => c.text).join("") || "plugin tool failed");
-        return { content: r.content, details: {} };
+        const r = await this.rpc.call<{ content?: { type: "text"; text: string }[]; isError?: boolean } | null>("tool.execute", { session, name: t.name, input: params });
+        const content = Array.isArray(r?.content) ? r.content : [];
+        if (r?.isError) throw new Error(content.map((c) => c.text).join("") || "plugin tool failed");
+        return { content, details: {} };
       },
     }));
   }

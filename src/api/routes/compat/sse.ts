@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { listEvents } from "../../../infra/events.ts";
+import { repos } from "../../../infra/db.ts";
 import { subscribe } from "../../../infra/pubsub.ts";
 import type { ContentBlock, SessionId, StreamDelta } from "../../../shared/types.ts";
 
@@ -34,6 +35,8 @@ export function toOpenAiEvent(delta: StreamDelta, sessionId: string, clientTools
   }
 }
 
+const REPLAY_PAGE = 1000;
+
 /** True once this delta ends the current turn (the compat stream closes here). */
 function isTurnEnd(delta: StreamDelta): boolean {
   return delta.type === "event" && (delta.event.payload.type === "session.status_idle" || delta.event.payload.type === "session.status_terminated");
@@ -48,28 +51,47 @@ export function streamOpenAiEvents(c: Context, sessionId: SessionId, since: numb
   return streamSSE(c, async (stream) => {
     let last = since;
     let done = false;
+    // Resolved when the turn ends or the client leaves: the handler parks on it instead of polling `done`.
+    let wake = () => {};
+    const ended = new Promise<void>((r) => { wake = r; });
+    const end = () => { done = true; wake(); };
     const send = async (m: { event: string; data: Record<string, unknown> } | null) => { if (m) await stream.writeSSE({ event: m.event, data: JSON.stringify(m.data) }); };
 
     if (opts.synthCreated) await send({ event: "session.created", data: { type: "session.created", session_id: sessionId, ...opts.synthCreated } });
 
-    let chain: Promise<void> = Promise.resolve();
-    const pump = (delta: StreamDelta) => {
-      chain = chain.then(async () => {
-        if (done) return;
-        if (delta.type === "event") { if (delta.event.seq <= last) return; last = delta.event.seq; }
-        await send(toOpenAiEvent(delta, sessionId, clientTools));
-        if (isTurnEnd(delta)) { done = true; }
-      }).catch((e) => console.error("[compat sse] send failed", e));
+    let unsub: (() => void | Promise<void>) | null = null;
+    const cleanup = () => { const u = unsub; unsub = null; if (u) void u(); }; // exactly once
+    stream.onAbort(() => { end(); cleanup(); });
+    const sendDelta = async (delta: StreamDelta) => {
+      if (delta.type === "event") { if (delta.event.seq <= last) return; last = delta.event.seq; }
+      await send(toOpenAiEvent(delta, sessionId, clientTools));
+      if (isTurnEnd(delta)) end();
     };
-
-    const unsub = await subscribe(sessionId, pump);
-    stream.onAbort(() => { done = true; void unsub(); });
-    // Replay anything already stored past the cursor, then let live deltas continue.
-    for (const ev of await listEvents(sessionId, { since: last })) pump({ type: "event", event: ev });
+    /** Stored events with last < seq < upTo, paged (seqs are contiguous, so this also fills gaps). */
+    const replay = async (upTo = Infinity) => {
+      while (!done && last < upTo - 1) {
+        const page = await listEvents(sessionId, { since: last, limit: Math.min(REPLAY_PAGE, upTo - 1 - last) });
+        for (const ev of page) if (!done) await sendDelta({ type: "event", event: ev });
+        if (page.length < REPLAY_PAGE) return;
+      }
+    };
+    // One serialized chain: replay first, then live deltas; a live event ahead of `last` pulls the stored ones before it.
+    let chain: Promise<void> = Promise.resolve();
+    const enqueue = (fn: () => Promise<void>) => { chain = chain.then(() => (done ? undefined : fn())).catch((e) => console.error("[compat sse] send failed", e)); };
+    const off = await subscribe(sessionId, (delta) => enqueue(async () => {
+      if (delta.type === "event" && delta.event.seq > last + 1) await replay(delta.event.seq);
+      await sendDelta(delta);
+    }));
+    if (done) { void off(); return; } // the client left while subscribe() was pending
+    unsub = off;
+    enqueue(() => replay());
+    await chain;
+    // a terminated session whose terminal event is behind the cursor would otherwise never end the stream
+    if (!done && (await repos.sessions.get(sessionId))?.status === "terminated") enqueue(async () => { await send({ event: "session.completed", data: { type: "session.completed", session_id: sessionId, reason: "terminated" } }); end(); });
 
     // Wait until the turn ends (or the client disconnects).
-    while (!done) { await stream.sleep(500); }
+    await ended;
     await chain;
-    void unsub();
+    cleanup();
   });
 }

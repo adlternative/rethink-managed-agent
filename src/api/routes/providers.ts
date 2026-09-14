@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { repos } from "../../infra/db.ts";
 import { publishProvidersChanged } from "../../infra/pubsub.ts";
-import { defaultProviders } from "../../harness/models.ts";
+import { defaultProviders, isOperatorOwner } from "../../harness/models.ts";
 import { seal, secretsConfigured } from "../../infra/secrets.ts";
 import type { ProviderApi, ProviderAuth, ProviderModel, ProviderResource } from "../../shared/types.ts";
 import { ApiError, invalid, notFound, readJson } from "../errors.ts";
@@ -26,14 +26,19 @@ function validate(body: Record<string, unknown>, owner: string, existing?: Provi
     auth = seal(authIn.key.trim());
   } else if (authIn.type === "env") {
     if (!/^[A-Z][A-Z0-9_]*$/.test(authIn.name ?? "")) throw invalid("auth.name must be an env var name");
-    auth = authIn;
-  } else if (authIn.type === "none" || authIn.type === "encrypted") auth = authIn;
+    if (!isOperatorOwner(existing?.owner_id ?? owner)) throw invalid("auth type 'env' reads runner env vars and is reserved for operator providers; use {type:'key'} (BYOK)");
+    auth = { type: "env", name: authIn.name };
+  } else if (authIn.type === "none") auth = { type: "none" };
+  else if (authIn.type === "encrypted" && existing?.auth.type === "encrypted") auth = existing.auth; // the masked GET shape round-trips: keep the sealed key
+  else if (authIn.type === "encrypted") throw invalid("auth {type:'encrypted'} cannot be supplied; send {type:'key', key} to store a key");
   else throw invalid("auth.type must be 'key' (BYOK, sealed at rest) | 'env' | 'none'");
   const models = (body.models ?? existing?.models ?? []) as ProviderModel[];
   if (!Array.isArray(models) || models.some((m) => !m || typeof m.id !== "string" || typeof m.context_window !== "number")) throw invalid("models must be [{id, context_window, ...}]");
   const headers = (body.headers ?? existing?.headers ?? {}) as Record<string, string>;
-  if (typeof headers !== "object" || Object.values(headers).some((v) => typeof v !== "string")) throw invalid("headers must be a string map");
-  return { id, owner_id: existing?.owner_id ?? owner, name: String(body.name ?? existing?.name ?? id), api, base_url, headers, auth, models, enabled: (body.enabled ?? existing?.enabled ?? true) as boolean };
+  if (!headers || typeof headers !== "object" || Array.isArray(headers) || Object.values(headers).some((v) => typeof v !== "string")) throw invalid("headers must be a string map");
+  const enabled = body.enabled ?? existing?.enabled ?? true;
+  if (typeof enabled !== "boolean") throw invalid("enabled must be a boolean");
+  return { id, owner_id: existing?.owner_id ?? owner, name: String(body.name ?? existing?.name ?? id), api, base_url, headers, auth, models, enabled };
 }
 
 /** First start: seed the built-in definitions so existing agents (model qoder/…) keep working. */
@@ -57,7 +62,9 @@ export const providers = new Hono()
   .post("/", async (c) => {
     const body = await readJson<Record<string, unknown>>(c);
     if (typeof body.id === "string" && (await repos.providers.get(body.id))) throw new ApiError(409, "already_exists", `provider ${body.id} exists; use PATCH`); // global id namespace
+    // the upsert only updates a row of the same owner, so a concurrent POST by another owner cannot take the id over
     const p = await repos.providers.upsert(validate(body, ownerId(c)));
+    if (!p) throw new ApiError(409, "already_exists", `provider ${String(body.id)} exists; use PATCH`);
     await publishProvidersChanged();
     return c.json(mask(p), 201);
   })
@@ -67,6 +74,7 @@ export const providers = new Hono()
     const body = await readJson<Record<string, unknown>>(c);
     delete body.id;
     const p = await repos.providers.upsert(validate(body, ownerId(c), existing));
+    if (!p) throw notFound("provider", c.req.param("id"));
     await publishProvidersChanged();
     return c.json(mask(p));
   })

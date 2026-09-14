@@ -1,3 +1,4 @@
+import path from "node:path";
 import { env } from "../shared/env.ts";
 
 /**
@@ -17,9 +18,31 @@ function rules(placement: Placement): string[] {
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+/**
+ * The form a source is matched in, or null when it cannot be matched safely against a prefix:
+ * npm specs whose version part is an alias / git / url / file spec (npm:@acme/x@npm:evil installs
+ * "evil"), and paths are normalized first (so '..' cannot climb out of an allowed dir).
+ */
+function canonical(pkg: string): string | null {
+  if (!pkg || /\s/.test(pkg)) return null;
+  if (pkg.startsWith("npm:")) {
+    const m = /^(@[a-z0-9._~-]+\/[a-z0-9._~-]+|[a-z0-9._~-]+)(?:@(.*))?$/i.exec(pkg.slice(4));
+    if (!m || m[1]!.split("/").some((seg) => seg === "." || seg === ".." || seg === "@." || seg === "@..")) return null;
+    if (m[2] !== undefined && /[:/\\]/.test(m[2])) return null;
+    return pkg;
+  }
+  if (path.isAbsolute(pkg)) return path.posix.normalize(pkg);
+  return pkg;
+}
+
 export function isPackageAllowed(pkg: string, placement: Placement): boolean {
   const rs = rules(placement);
-  return rs.includes("*") || rs.some((r) => pkg === r || pkg.startsWith(r));
+  if (rs.includes("*")) return true;
+  const c = canonical(pkg);
+  if (c === null) return false;
+  // A rule ending in "/" is a directory/scope prefix; otherwise it names one package or dir exactly
+  // (plus its version / ref, or anything below it) and never a sibling that merely shares the prefix.
+  return rs.some((r) => (r.endsWith("/") ? c.startsWith(r) : c === r || c.startsWith(`${r}/`) || c.startsWith(`${r}@`)));
 }
 
 /** Disallowed entries for a specific placement (empty = all allowed there). */

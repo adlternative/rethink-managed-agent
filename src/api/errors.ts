@@ -15,9 +15,53 @@ export function errorResponse(c: Context, err: unknown): Response {
 }
 
 export async function readJson<T>(c: Context): Promise<T> {
+  let body: unknown;
   try {
-    return (await c.req.json()) as T;
-  } catch {
+    body = await c.req.json();
+  } catch (err) {
+    if (err instanceof ApiError) throw err; // e.g. the body-size guard aborting the stream
     throw invalid("body must be valid JSON");
   }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) throw invalid("body must be a JSON object");
+  return body as T;
+}
+
+/** An integer query parameter within [min, max]; absent -> `def`, anything else -> 400 (never NaN into SQL). */
+export function queryInt(c: Context, name: string, def: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  const raw = c.req.query(name);
+  if (raw === undefined || raw === "") return def;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < min || n > max) throw invalid(`${name} must be an integer between ${min} and ${max}`);
+  return n;
+}
+
+/** Parse a multipart body; a malformed one is the client's fault (400), not a server error. */
+export async function readForm(c: Context): Promise<FormData> {
+  try {
+    return await c.req.formData();
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw invalid("body must be valid multipart/form-data");
+  }
+}
+
+/**
+ * Wrap a request so its body errors with 413 once more than `max` bytes have been read. The header
+ * check alone is bypassed by chunked uploads, and handlers buffer bodies (json/formData/arrayBuffer).
+ */
+export function limitBody(req: Request, max: number): Request {
+  if (!req.body) return req;
+  const reader = req.body.getReader();
+  let size = 0;
+  const body = new ReadableStream<Uint8Array>({
+    async pull(ctrl) {
+      const { done, value } = await reader.read();
+      if (done) return ctrl.close();
+      size += value.byteLength;
+      if (size > max) { reader.cancel().catch(() => {}); return ctrl.error(new ApiError(413, "payload_too_large", `request body exceeds ${max} bytes`)); }
+      ctrl.enqueue(value);
+    },
+    cancel(reason) { return reader.cancel(reason); },
+  });
+  return new Request(req, { body, duplex: "half" } as RequestInit);
 }

@@ -41,6 +41,7 @@ export class McpHttpClient {
       headers: this.headers(),
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
+      redirect: "error", // the URL was allowlist-checked; a redirect could lead anywhere
     });
     const sid = res.headers.get("mcp-session-id");
     if (sid) this.sessionId = sid;
@@ -55,13 +56,13 @@ export class McpHttpClient {
 
   /** Fire-and-forget JSON-RPC notification (no id, no response expected). */
   private async notify(method: string, params?: unknown): Promise<void> {
-    await fetch(this.url, { method: "POST", headers: this.headers(), body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }), signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000) }).catch(() => {});
+    await fetch(this.url, { method: "POST", headers: this.headers(), body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }), signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000), redirect: "error" }).catch(() => {});
   }
 
   private parseSse(body: string): unknown[] {
     const out: unknown[] = [];
-    for (const frame of body.split(/\n\n/)) {
-      const data = frame.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+    for (const frame of body.split(/\r?\n\r?\n/)) { // SSE allows CRLF line endings
+      const data = frame.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
       if (data) { try { out.push(JSON.parse(data)); } catch { /* skip */ } }
     }
     return out;
@@ -72,9 +73,17 @@ export class McpHttpClient {
     await this.notify("notifications/initialized");
   }
 
+  /** All tools, following nextCursor pagination (bounded, in case a server keeps returning a cursor). */
   async listTools(): Promise<McpToolInfo[]> {
-    const r = (await this.rpc("tools/list")) as { tools?: McpToolInfo[] };
-    return r.tools ?? [];
+    const out: McpToolInfo[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 100; page++) {
+      const r = (await this.rpc("tools/list", cursor ? { cursor } : undefined)) as { tools?: McpToolInfo[]; nextCursor?: string };
+      out.push(...(r.tools ?? []));
+      if (typeof r.nextCursor !== "string" || !r.nextCursor || r.nextCursor === cursor) break;
+      cursor = r.nextCursor;
+    }
+    return out;
   }
 
   async callTool(name: string, args: unknown): Promise<McpCallResult> {

@@ -52,10 +52,24 @@ function insidePath(workdir: string, p: string): string {
   return abs;
 }
 
-function makeSandbox(mountId: SandboxId, container: string, shell: "bash" | "sh", workdir: string): Sandbox {
+/** Env for the docker CLI itself: the sandbox allowlist plus how to reach the daemon (never forwarded into the container). */
+const DOCKER_CLI_VARS = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "DOCKER_CONFIG"];
+function dockerCliEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const out = sandboxEnv(extra);
+  for (const k of DOCKER_CLI_VARS) if (process.env[k] !== undefined && out[k] === undefined) out[k] = process.env[k];
+  return out;
+}
+
+/**
+ * Vault secrets are per mount, passed on every exec (`-e NAME`, value from the CLI env): a container
+ * shared by several sessions must not hand one session's secrets to another, and a reused mount gets
+ * the current run's secrets.
+ */
+function makeSandbox(mountId: SandboxId, container: string, shell: "bash" | "sh", workdir: string, secrets: Record<string, string> = {}): Sandbox {
+  const envOf = (opts: ExecOptions) => ({ ...secrets, ...opts.env });
   const execArgs = (cmd: string, opts: ExecOptions) => {
     const args = ["exec", "-i", "-w", opts.cwd ? path.posix.resolve(workdir, opts.cwd) : workdir];
-    for (const k of Object.keys(opts.env ?? {})) args.push("-e", k);
+    for (const k of Object.keys(envOf(opts))) args.push("-e", k);
     args.push(container, shell, "-lc", cmd);
     return args;
   };
@@ -63,10 +77,10 @@ function makeSandbox(mountId: SandboxId, container: string, shell: "bash" | "sh"
     id: mountId,
     provider: "docker",
     workdir,
-    exec: (cmd, opts = {}) => streamProcess("docker", execArgs(cmd, opts), { env: sandboxEnv(opts.env), timeoutMs: opts.timeoutMs, signal: opts.signal }),
+    exec: (cmd, opts = {}) => streamProcess("docker", execArgs(cmd, opts), { env: dockerCliEnv(envOf(opts)), timeoutMs: opts.timeoutMs, signal: opts.signal }),
     async readFile(p) { return new Uint8Array(await execIn(container, workdir, ["cat", "--", insidePath(workdir, p)])); },
     async writeFile(p, data) { await execIn(container, workdir, ["sh", "-c", 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', "sh", insidePath(workdir, p)], data); },
-    async spawn(cmd, opts = {}): Promise<SandboxProcess> { return spawnProcess("docker", execArgs(cmd, opts), { env: sandboxEnv(opts.env) }); },
+    async spawn(cmd, opts = {}): Promise<SandboxProcess> { return spawnProcess("docker", execArgs(cmd, opts), { env: dockerCliEnv(envOf(opts)) }); },
   };
 }
 
@@ -85,9 +99,8 @@ export class DockerProvider implements SandboxProvider {
       "--pids-limit", env.SANDBOX_DOCKER_PIDS, "--memory", env.SANDBOX_DOCKER_MEMORY, "--cpus", env.SANDBOX_DOCKER_CPUS,
       "--label", "pi.sandbox=1", "--label", `pi.container=${containerId}`,
     ];
-    for (const k of Object.keys(req.secrets ?? {})) args.push("-e", k);
     args.push("--", image, "sleep", "infinity");
-    await docker("docker", args, { env: sandboxEnv(req.secrets) });
+    await docker("docker", args, { env: dockerCliEnv() });
     return containerId;
   }
 
@@ -99,15 +112,15 @@ export class DockerProvider implements SandboxProvider {
     if (dir.startsWith(root() + path.sep)) await rm(dir, { recursive: true, force: true });
   }
 
-  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef): Promise<SandboxHandle> {
+  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef, secrets?: Record<string, string>): Promise<SandboxHandle> {
     await materialize(ref, mountHostDir(containerRef, mountId)); // host-side; appears at /host/<mountId> via the bind mount
-    return { sandbox: makeSandbox(mountId, containerRef, await pickShell(containerRef), mountWorkdir(mountId)), containerRef, workdir: mountWorkdir(mountId) };
+    return { sandbox: makeSandbox(mountId, containerRef, await pickShell(containerRef), mountWorkdir(mountId), secrets), containerRef, workdir: mountWorkdir(mountId) };
   }
 
-  async connectMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null> {
+  async connectMount(containerRef: string, mountId: SandboxId, workdir: string, secrets?: Record<string, string>): Promise<Sandbox | null> {
     const dirOk = await stat(mountHostDir(containerRef, mountId)).then((st) => st.isDirectory(), () => false);
     if (!dirOk || !(await isRunning(containerRef))) return null;
-    return makeSandbox(mountId, containerRef, await pickShell(containerRef), workdir);
+    return makeSandbox(mountId, containerRef, await pickShell(containerRef), workdir, secrets);
   }
 
   async removeMount(containerRef: string, _mountId: SandboxId, workdir: string): Promise<void> {

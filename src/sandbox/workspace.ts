@@ -49,11 +49,22 @@ export async function materialize(ws: WorkspaceSpec | WorkspaceRef, targetHostDi
   return targetHostDir;
 }
 
+/**
+ * git on a repo the sandbox could write: its .git/config and .gitattributes are attacker-controlled,
+ * so every config knob that makes git run a command is neutralized (fsmonitor, hooks, external diff,
+ * textconv, and each clean/smudge/process filter the config defines).
+ */
+async function untrustedGit(cwd: string, ...args: string[]) {
+  const { stdout: filters } = await git(cwd, "config", "--includes", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$").catch(() => ({ stdout: "" }));
+  const off = filters.split("\n").map((l) => l.split(" ")[0]!).filter(Boolean).flatMap((k) => ["-c", `${k}=`]);
+  return run("git", ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "diff.external=", ...off, ...args], { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } });
+}
+
 /** Captures HEAD + working-tree diff (untracked files included) as a git WorkspaceRef. */
 export async function captureGit(dir: string, prev: Extract<WorkspaceRef, { kind: "git" }>): Promise<WorkspaceRef> {
-  const { stdout: head } = await git(dir, "rev-parse", "HEAD");
-  await git(dir, "add", "-N", "--all");
-  const { stdout: patch } = await git(dir, "diff", "HEAD", "--binary");
+  const { stdout: head } = await untrustedGit(dir, "rev-parse", "HEAD");
+  await untrustedGit(dir, "add", "-N", "--all");
+  const { stdout: patch } = await untrustedGit(dir, "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--binary");
   const ref: WorkspaceRef = { kind: "git", remote: prev.remote, base: head.trim() };
   if (patch.trim()) ref.patch = patch;
   return ref;

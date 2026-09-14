@@ -54,12 +54,12 @@ It is the same good idea, decoupled and made portable. See `docs/POSITIONING.md`
 
 Open **http://localhost:8080/** in a browser for a read-only dashboard: the session list, each session's event timeline (messages, tool calls + results, status), and a live tail over SSE.
 
-Talking to it by hand with the bundled CLI (`PI_API` defaults to `http://localhost:8080`):
+Talking to it by hand with the bundled CLI (`npm run cli -- <command>`; see [CLI](#cli) for every command):
 
 ```sh
-npm run cli -- agent create --name dev --provider qoder --model ultimate
-npm run cli -- env create --name local --provider local            # or --provider docker --image node:22-alpine, or --provider e2b --image base
-npm run cli -- session create --agent agent_xxx --env env_xxx
+npm run cli -- agents create dev qoder/ultimate                  # legacy form still works: agent create --name dev --provider qoder --model ultimate
+npm run cli -- envs create local --provider local                # or --provider docker --image node:22-alpine, or --provider e2b --image base
+npm run cli -- sessions create --agent agent_xxx --env env_xxx
 npm run cli -- send sess_xxx "list the files here and add a README" --wait
 npm run cli -- events sess_xxx
 ```
@@ -174,7 +174,7 @@ scripts/e2e.sh
 
 `SANDBOX_LOCAL_ROOT` (default `./data/sandboxes`) is where the `local` provider (and the `docker` provider's bind mounts) put workspaces. `WORKSPACE_ROOT` (default `./data/workspaces`) is where captured `dir` workspaces live; the reaper never touches it. Run more runners for more concurrency: they share one consumer group; a job pending longer than 120s is re-examined by any runner, and `claimRun` (`UPDATE sessions ... WHERE status='idle'`, or `running` with a heartbeat older than 90s) decides whether that run is alive (job stays pending) or dead (taken over). The `local` provider is dev-only: commands run on the runner host with an allow-listed env; use `docker` for untrusted code (containers get `--network none`, `--cap-drop ALL`, pids/memory/cpu limits — see the `SANDBOX_DOCKER_*` variables).
 
-Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sandbox), `npm run cli -- <cmd>`.
+Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sandbox), `npm run cli -- <cmd>` (see [CLI](#cli)).
 
 ## Configuration
 
@@ -287,7 +287,7 @@ the compacted context. Defaults match pi (16384 / 20000); `COMPACTION_ENABLED=0`
 
 ```bash
 pma envs create my-laptop --provider byoc            # -> worker_key (shown once)
-pma worker --env env_x --key wk_… --workdir ~/pma-work   # on the machine that should run the tools
+pma worker --env env_x --key "$WORKER_KEY" --workdir ~/pma-work   # on the machine that should run the tools
 pma sessions create --agent <agent> --env env_x --message "uname -a"
 ```
 
@@ -315,7 +315,7 @@ creates a child session (`parent_id`) on a *fork* of the workspace with its own 
 `session.thread_created` / `agent.thread_message_received` with the child's report and patch. See DESIGN.md §11.
 
 ```bash
-pma sessions create --environments "main=$LOCAL_ENV,dk=$DOCKER_ENV"     # two sandboxes, one conversation
+pma sessions create --agent "$AGENT" --environments "main=$LOCAL_ENV,dk=$DOCKER_ENV"   # two sandboxes, one conversation
 pma sessions attach sess_x browser=$E2B_ENV:fork                         # later, on a fork of main's workspace
 ```
 
@@ -358,8 +358,13 @@ pma agents create coder qoder/kmodel --packages /app/plugins/goal,/app/plugins/f
 
 ## CLI
 
-`pma-cli/` is a terminal client modelled on qca-cli: subcommands for every resource plus an Ink TUI with
-streaming, tool folding and slash commands. See [pma-cli/README.md](pma-cli/README.md).
+There are two clients with the same resource commands:
+
+- **`npm run cli -- <command>`** (`src/cli/`, no build step): the scriptable client used by `scripts/e2e.sh`. Every
+  `pma <command>` line in this README and in `docs/` also runs as `npm run cli -- <command>` (except `login`/`config`
+  and the TUI).
+- **`pma`** (`pma-cli/`): the same subcommands plus an Ink TUI with streaming, tool folding and slash commands,
+  modelled on qca-cli. See [pma-cli/README.md](pma-cli/README.md).
 
 ```bash
 make install          # builds pma-cli and puts `pma` in ~/.local/bin
@@ -367,9 +372,29 @@ pma login --host http://localhost:8080
 pma --help
 ```
 
-Other targets: `make up` / `make down` / `make logs` (compose), `make e2e`, `make test`, `make diagram`.
+Bundled CLI commands (`npm run cli -- --help`, and `<command> --help` for the flags of one):
 
-The older single-file `npm run cli` client is kept for scripts/e2e.sh.
+| Command | Subcommands |
+|---|---|
+| `agents` | `list`, `get <id>`, `create <name> <provider/model> [--system S \| --system-file F] [--tools a,b] [--packages p1,p2] [--skills s1,s2]`, `update <id> [...]` (the API has no agent delete) |
+| `envs` | `list`, `get <id>`, `create <name> --provider local\|docker\|e2b\|byoc [--image I] [--network none\|bridge] [--plugin-host runner\|sandbox] [--git URL [--ref R]]` (byoc prints the `worker_key` once) |
+| `sessions` | `list [--status S] [--all]`, `get`, `create --agent A --env E [--model p/m] [--message T] [--memory-stores mem[:path],..] [--environments main=env,k=env[:fork]] [--parent sess]`, `delete`, `archive`, `prompt`, `set-system`, `attach`, `mount`, `unmount`, `skill add\|remove` |
+| `send` | `send <session> <text...> [--file a.png,b.pdf] [--wait [--timeout SEC]]` |
+| `stream` / `events` / `interrupt` | `stream <session> [--since SEQ]`, `events <session> [--since SEQ] [--limit N]` (follows every page), `interrupt <session>` |
+| `vaults` | `list`, `get`, `create [name]`, `delete`, `credentials list <vault>`, `credentials put <vault> <name> --value-env VAR \| --value-stdin \| --value V`, `credentials delete <vault> <name>` |
+| `memory-stores`, `files`, `skills`, `providers`, `sandboxes`, `models`, `me` | `list` / `get` / `create` / `delete` where the API has them; `files upload <path>` and `download <id> [--out F]`, `skills version`, `providers update`, `sandboxes pause` |
+| `worker` | `worker --env <id> --key <worker_key> [--workdir DIR]`: the BYOC worker loop (see [BYOC](#byoc-self-hosted-sandboxes)) |
+
+Singular aliases (`agent create`, `env create`, `session create`, `vault credential put`) keep older scripts working.
+Configuration: `PMA_API` (base URL, default `http://localhost:8080`; the legacy `PI_API` is still read) and
+`PMA_API_KEY` (sent as `Authorization: Bearer`, needed with `AUTH_REQUIRED=true`; `PMA_TOKEN` is also read).
+List and `events` commands print tables, `--json` prints the raw API JSON; `create`/`get` print JSON.
+`send --wait` subscribes from the message's own seq (nothing between the POST and the subscription is missed),
+reconnects from the last seen seq when the stream drops, and exits once the run that consumed the message is
+idle. Exit codes: `0` ok, `1` API / network error, a run that ended in error, a terminated session or a
+`--timeout`, `2` usage error. Secret values given to `vaults credentials put` are only sent to the API, never printed.
+
+Other targets: `make up` / `make down` / `make logs` (compose), `make e2e`, `make test`, `make diagram`.
 
 ## Sandbox providers
 

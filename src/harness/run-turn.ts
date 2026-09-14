@@ -38,7 +38,7 @@ import type { PackageManifest, PromptTemplate, Skill } from "../plugins/api.ts";
 import { PluginHost, type Capabilities } from "../plugins/client.ts";
 import type { HostBundle } from "../plugins/bundle.ts";
 import type { SessionInfo } from "../plugins/protocol.ts";
-import { foldEvents, toContentBlocks, type FoldFiles } from "./fold.ts";
+import { foldEvents, settledAfterLastMessage, toContentBlocks, userContentFromBlocks, type FoldFiles } from "./fold.ts";
 import { mountMemories, syncMemoriesBack, writeAttachments, type Mounted } from "./mounts.ts";
 import { DEFAULT_SYSTEM_PROMPT, renderSystemPrompt, type PromptSections } from "./system-prompt.ts";
 import { compactMessages, contextTokens, needsCompaction, settingsFromEnv } from "./compaction.ts";
@@ -97,8 +97,13 @@ export interface RunDeps {
   awaitToolResult(sessionId: SessionId, callId: string, signal: AbortSignal, timeoutMs: number): Promise<{ content: ContentBlock[]; isError: boolean } | null>;
   /** Append events (seq assigned by the store). Must NOT publish; runSession publishes each appended event. */
   appendEvents(sessionId: SessionId, payloads: SessionEventPayload[]): Promise<SessionEvent[]>;
-  /** The whole log, untruncated. */
-  listEvents(sessionId: SessionId): Promise<SessionEvent[]>;
+  /**
+   * The log, untruncated: every event with seq > `opts.since` (all when omitted); with `opts.limit`, only
+   * the newest `limit` of those. The options are a pushdown hint: callers still filter, so a store may ignore them.
+   */
+  listEvents(sessionId: SessionId, opts?: { since?: number; limit?: number }): Promise<SessionEvent[]>;
+  /** Cursor the run-start fold may read after (the latest compaction cut); absent or 0 = read the whole log. */
+  foldSince?(sessionId: SessionId): Promise<number>;
   publish(delta: StreamDelta): void | Promise<void>;
   /** Subscribe to interrupt requests for this session; resolves once live; returns an unsubscribe. */
   onInterrupt(sessionId: SessionId, handler: () => void): Unsubscribe | Promise<Unsubscribe>;
@@ -111,21 +116,21 @@ export interface RunDeps {
   getEnvironment(id: string): Promise<EnvironmentResource | null>;
   /** Replace the ref only if it still equals `expected`; false means another run captured first. */
   updateWorkspaceRef(id: WorkspaceId, ref: WorkspaceRef, expected: WorkspaceRef): Promise<boolean>;
-  /** Atomically idle -> running (+ status_running event, not published). null = another run owns the session. */
-  claimRun(sessionId: SessionId): Promise<SessionEvent[] | null>;
+  /** Atomically idle -> running (+ status_running event, not published). null = another run owns the session; "terminated" = it never runs again. */
+  claimRun(sessionId: SessionId): Promise<SessionEvent[] | null | "terminated">;
   /**
    * Atomically running -> idle (+ status_idle event, not published). `unconsumedSeq` is the newest
    * user.message this run never saw (seq > consumedSeq); the caller should enqueue a follow-up run.
    */
-  finishRun(sessionId: SessionId, stopReason: StopReason, consumedSeq: number): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }>;
+  finishRun(sessionId: SessionId, stopReason: StopReason, consumedSeq: number, opts?: { claimSeq?: number }): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }>;
   /** Accumulate one model request's usage on the session row. */
   recordUsage(sessionId: SessionId, usage: Omit<Usage, "requests">, context: ContextSize): Promise<Usage>;
   /** Store the system prompt actually sent this run (GET /v1/sessions/:id/system_prompt). */
   recordSystemPrompt(sessionId: SessionId, prompt: string): Promise<void>;
   /** Uploaded files (for image blocks and document attachments). */
   files: FoldFiles;
-  /** Skill resources referenced by the agent / session. */
-  getSkills(refs: SkillRef[]): Promise<Skill[]>;
+  /** Skill resources referenced by the agent / session, restricted to those owned by `ownerId`. */
+  getSkills(refs: SkillRef[], ownerId: string): Promise<Skill[]>;
   /** Memory stores mounted into the session, resolved to store + mount path. */
   getMemoryStores(mounts: MemoryMount[]): Promise<Mounted[]>;
   updateMemoryRef(id: string, ref: WorkspaceRef): Promise<void>;
@@ -133,7 +138,7 @@ export interface RunDeps {
   toolOutputs: { put(sessionId: SessionId, toolUseId: string, toolName: string, content: string): Promise<void>; get(sessionId: SessionId, toolUseId: string): Promise<{ tool_name: string; content: string; bytes: number } | null> };
 }
 
-export type RunOutcome = { status: "busy" } | { status: "done"; stopReason: StopReason; unconsumedSeq: number | null };
+export type RunOutcome = { status: "busy" } | { status: "terminated" } | { status: "done"; stopReason: StopReason; unconsumedSeq: number | null };
 
 
 const LLM_ROLES = new Set(["user", "assistant", "toolResult"]);
@@ -143,6 +148,17 @@ function textBlocks(content: { type: string; text?: string }[]): Extract<Content
   return content.flatMap((c) => (c.type === "text" && c.text !== undefined ? [{ type: "text" as const, text: c.text }] : []));
 }
 const blocksText = (content: { type: string; text?: string }[]) => textBlocks(content).map((b) => b.text).join("");
+/** User content with its text replaced by `text` (where the first text block was); image blocks are kept. */
+function withText(content: UserMessage["content"], text: string): Exclude<UserMessage["content"], string> {
+  const out: Exclude<UserMessage["content"], string> = [];
+  let placed = false;
+  for (const b of typeof content === "string" ? [] : content) {
+    if (b.type !== "text") out.push(b);
+    else if (!placed) { out.push({ type: "text", text }); placed = true; }
+  }
+  if (!placed) out.push({ type: "text", text });
+  return out;
+}
 const userText = (m: AgentMessage): string => {
   const c = (m as { content: unknown }).content;
   return typeof c === "string" ? c : blocksText(c as { type: string; text?: string }[]);
@@ -207,7 +223,11 @@ function clientTool(
     // the OpenAI-compat adapter derives required_actions (agent.tool_use minus agent.tool_result).
     execute: async (toolCallId, params, signal) => {
       const r = await awaitResult(toolCallId, signal ?? new AbortController().signal);
-      if (r) { const t = textBlocks(r.content); return { content: t.length ? t : [{ type: "text", text: JSON.stringify(r.content) }], details: { client_tool: decl.name } }; }
+      if (r) {
+        const t = textBlocks(r.content);
+        if (r.isError) throw new Error(t.map((b) => b.text).join("") || JSON.stringify(r.content)); // the loop records a thrown tool as an error result
+        return { content: t.length ? t : [{ type: "text", text: JSON.stringify(r.content) }], details: { client_tool: decl.name } };
+      }
       return { content: [{ type: "text", text: `No tool_result received for ${decl.name} (call ${toolCallId}) within the wait window.` }], details: { client_tool: decl.name, timed_out: true } };
     },
   };
@@ -224,24 +244,32 @@ function mcpTool(label: string, info: { name: string; description?: string; inpu
     execute: async (_id, params) => {
       const r = await client.callTool(info.name, params);
       const t = textBlocks(r.content);
-      return { content: t.length ? t : [{ type: "text", text: JSON.stringify(r.content) }], details: { mcp: label, isError: r.isError } };
+      if (r.isError) throw new Error(t.map((b) => b.text).join("") || JSON.stringify(r.content)); // the loop records a thrown tool as an error result
+      return { content: t.length ? t : [{ type: "text", text: JSON.stringify(r.content) }], details: { mcp: label } };
     },
   };
 }
 
-/** Connect to each declared MCP server (fetch-allowlist gated, fails soft) and return its tools. */
+/**
+ * Connect to each declared MCP server (fetch-allowlist gated, fails soft) and return its tools. Servers are
+ * connected concurrently (a slow one no longer delays the rest); tools and notes keep the declaration order.
+ */
 async function mcpTools(servers: McpServerDecl[], fetchAllow: string[], allowUrl: (u: string, a: string[]) => boolean, emit: (p: SessionEventPayload) => Promise<void>): Promise<AgentTool[]> {
-  const out: AgentTool[] = [];
-  for (const server of servers) {
-    if (!allowUrl(server.url, fetchAllow)) { await emit({ type: "plugin.message", plugin: `mcp:${server.label}`, content: [{ type: "text", text: `MCP server ${server.label} (${server.url}) blocked by the fetch allowlist` }] }); continue; }
+  const results = await Promise.all(servers.map(async (server): Promise<{ tools: AgentTool[]; note?: string }> => {
+    if (!allowUrl(server.url, fetchAllow)) return { tools: [], note: `MCP server ${server.label} (${server.url}) blocked by the fetch allowlist` };
     const client = new McpHttpClient(server.url, { authorization: server.authorization, headers: server.headers });
     try {
       await client.connect();
       const allow = server.allowed_tools ? new Set(server.allowed_tools) : null;
-      for (const t of await client.listTools()) if (!allow || allow.has(t.name)) out.push(mcpTool(server.label, t, client));
+      return { tools: (await client.listTools()).filter((t) => !allow || allow.has(t.name)).map((t) => mcpTool(server.label, t, client)) };
     } catch (e) {
-      await emit({ type: "plugin.message", plugin: `mcp:${server.label}`, content: [{ type: "text", text: `MCP server ${server.label} unavailable: ${(e as Error)?.message ?? e}` }] });
+      return { tools: [], note: `MCP server ${server.label} unavailable: ${(e as Error)?.message ?? e}` };
     }
+  }));
+  const out: AgentTool[] = [];
+  for (const [i, r] of results.entries()) {
+    if (r.note) await emit({ type: "plugin.message", plugin: `mcp:${servers[i]!.label}`, content: [{ type: "text", text: r.note }] });
+    out.push(...r.tools);
   }
   return out;
 }
@@ -262,6 +290,19 @@ function skillTool(skills: Skill[], prompts: PromptTemplate[]): AgentTool | null
       return { content: [{ type: "text", text: s.body }], details: {} };
     },
   };
+}
+
+/** fetch that re-checks the allowlist on every redirect hop (an allowed host must not bounce a request to an internal address). */
+async function allowlistedFetch(url: string, init: RequestInit, allow: string[]): Promise<Response> {
+  for (let hop = 0; ; hop++) {
+    if (!isAllowedUrl(url, allow)) throw new Error(`fetch blocked by the principal's fetch allowlist: ${url}`);
+    const r = await globalThis.fetch(url, { ...init, redirect: "manual" });
+    const location = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
+    if (!location) return r;
+    if (hop >= 5) throw new Error(`fetch: too many redirects from ${url}`);
+    url = new URL(location, url).toString();
+    if (r.status === 303 || ((r.status === 301 || r.status === 302) && init.method && init.method !== "GET" && init.method !== "HEAD")) init = { ...init, method: "GET", body: undefined };
+  }
 }
 
 function isAllowedUrl(url: string, allow: string[]): boolean {
@@ -305,14 +346,15 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   });
 
   const claimed = await deps.claimRun(sessionId);
-  if (!claimed) {
+  if (!claimed || claimed === "terminated") {
     await unsubscribe();
-    return { status: "busy" };
+    return claimed === "terminated" ? { status: "terminated" } : { status: "busy" };
   }
-  await publishAll(claimed);
+  // The run's own status_running: finishRun uses it to tell whether this run was superseded by a takeover.
+  const claimSeq = [...claimed].reverse().find((e) => e.type === "session.status_running")?.seq;
 
-  // Vault secrets for this session, injected into every sandbox it leases (as container env vars).
-  const runSecrets = (await deps.vaultSecrets?.(session)) ?? {};
+  // Vault secrets for this session, injected into every sandbox it leases (as container env vars); loaded inside the try below.
+  let runSecrets: Record<string, string> = {};
   // One lazily leased sandbox per attached environment; read in `finally` for capture + release.
   const held = new Map<string, { lease: SandboxLease | null; acquiring: Promise<SandboxLease> | null }>();
   const ctx: ToolContext = {
@@ -348,7 +390,8 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   };
 
   // Newest user.message seq this run has seen (folded or steered); finishRun uses it to spot stragglers.
-  let consumedSeq = 0;
+  // Everything before the claim is this run's input even if it fails before folding (no follow-up loop).
+  let consumedSeq = claimSeq ?? 0;
   const wallClock = setTimeout(() => {
     if (loopDone) return;
     stopReason = "error";
@@ -362,9 +405,15 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   let host: PluginHost | null = null;
   const hostRef: { current: PluginHost | null } = { current: null };
   let ownHost = false; // sandbox-hosted: started for this run, stopped with it
+  let turnEndedByTool = false; // report_to_parent(question) ends the turn by aborting: that is end_turn, not an interrupt
 
   try {
-    const folded = await foldEvents(await deps.listEvents(sessionId), deps.files);
+    // Everything after the claim runs inside try/finally, so a failure still finishes the run and unsubscribes.
+    await publishAll(claimed);
+    runSecrets = (await deps.vaultSecrets?.(session)) ?? {};
+    // Events before the latest compaction cut are replaced by its summary, so the fold reads from the cut.
+    const foldFrom = (await deps.foldSince?.(sessionId)) ?? 0;
+    const folded = await foldEvents(await deps.listEvents(sessionId, foldFrom > 0 ? { since: foldFrom } : undefined), deps.files);
     const { seqOf } = folded;
     let messages = folded.messages;
     let lastSummary = folded.summary;
@@ -373,7 +422,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     // switched mid-run by a plugin (ctx.session.setModel / setActiveTools); the switch takes effect
     // on the next turn via prepareNextTurn (pi's AgentLoopTurnUpdate). model drives compaction and
     // the context-window budget too, so switching to a bigger/smaller window is respected.
-    let model = resolveModel(deps.models, session.agent.model);
+    let model = resolveModel(deps.models, session.agent.model, session.owner_id);
     let modelSwitched = false;
     let activeTools: AgentTool[] = [];
     const compaction = settingsFromEnv();
@@ -402,8 +451,6 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       await hostRef.current?.emit(info, { type: "after_compact", summary: r.summary, tokensBefore: r.tokensBefore, tokensAfter: r.tokensAfter });
       return r.messages;
     };
-    // History may already be over budget (long session resumed): compact before the first request.
-    messages = await maybeCompact(messages);
     const plugins = await deps.pluginsFor(session.agent);
     const builtinTools = createTools(session.agent.tools, ctx);
 
@@ -426,8 +473,14 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         if (p.type === "user.message" && pendingQuestion && blocksText(p.content).startsWith(`[reply to question ${pendingQuestion.id}]`)) pendingQuestion = undefined;
         if (p.type === "agent.message" && !lastReport) { const t = blocksText(p.content); if (t) lastReport = t; }
       }
-      const finished = c.status === "terminated" || (c.status === "idle" && ran);
+      const finished = c.status === "terminated" || (c.status === "idle" && ran && settledAfterLastMessage(evs));
       return { sessionId: childId, status: c.status, finished, stopReason, lastReport, updates, pendingQuestion };
+    };
+    /** The multi-agent capabilities only act on this session's own children (never a sibling or another tenant's session). */
+    const ownChild = async (childId: SessionId) => {
+      const c = await deps.getSession(childId);
+      if (!c || c.parent_id !== sessionId || c.owner_id !== session.owner_id) throw new Error(`session ${childId} is not a child of this session`);
+      return c;
     };
     if (plugins.manifests.length > 0) {
       if (environment.plugin_host === "sandbox" && environment.provider !== "local") {
@@ -445,7 +498,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
 
     // Skill resources (DB) join package skills; memories and document attachments need the main
     // sandbox, so they force an early lease when present.
-    const dbSkills = await deps.getSkills(session.agent.skills ?? []);
+    const dbSkills = await deps.getSkills(session.agent.skills ?? [], session.owner_id);
     memoryStores = await deps.getMemoryStores(session.memory_stores ?? []);
     if (folded.attachments.length > 0 || memoryStores.length > 0) {
       const sb = await ctx.sandbox("main");
@@ -481,9 +534,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
           const other = await deps.getSession(sid);
           if (!other || other.owner_id !== session.owner_id) throw new Error(`session ${sid} not found for this owner`);
         }
-        let evs = await deps.listEvents(sid);
+        let evs = await deps.listEvents(sid, { since: typeof opts.since === "number" ? opts.since : undefined, limit: typeof opts.limit === "number" ? opts.limit : undefined });
         if (typeof opts.since === "number") evs = evs.filter((e) => e.seq > opts.since!);
-        if (typeof opts.limit === "number") evs = evs.slice(-opts.limit);
+        if (typeof opts.limit === "number") evs = opts.limit > 0 ? evs.slice(-opts.limit) : [];
         return evs.map((e) => ({ seq: e.seq, type: e.type, payload: e.payload }));
       },
       async modelComplete(prompt, opts) {
@@ -528,8 +581,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         return last;
       },
       async fetch(url, init) {
-        if (!isAllowedUrl(url, fetchAllow)) throw new Error(`fetch blocked by the principal's fetch allowlist: ${url}`);
-        const r = await globalThis.fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]) });
+        const r = await allowlistedFetch(url, { method: init.method, headers: init.headers, body: init.body, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]) }, fetchAllow);
         const headers: Record<string, string> = {};
         r.headers.forEach((v, k) => { headers[k] = v; });
         return { status: r.status, headers, body: truncateOutput(await r.text(), 200_000) };
@@ -544,25 +596,27 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         await emit({ type: "session.thread_created", child_session_id: child.id, env: e.key, task, role: o.role as string | undefined, name: o.name as string | undefined });
         return { sessionId: child.id, name: o.name as string | undefined, role: o.role as string | undefined };
       },
-      agentsWait: async (child, o) => { await deps.children.wait(child, abort.signal, o); return childStatus(child); },
-      agentsStatus: (child) => childStatus(child),
+      agentsWait: async (child, o) => { await ownChild(child); await deps.children.wait(child, abort.signal, o); return childStatus(child); },
+      agentsStatus: async (child) => { await ownChild(child); return childStatus(child); },
       agentsSteer: async (child, text) => {
+        await ownChild(child);
         await deps.children.message(child, text);
         await emit({ type: "agent.thread_message_sent", to_session_id: child, kind: "steer", content: [{ type: "text", text }] });
       },
       agentsReply: async (child, questionId, text) => {
+        await ownChild(child);
         await deps.children.message(child, `[reply to question ${questionId}] ${text}`);
         await emit({ type: "agent.thread_message_sent", to_session_id: child, kind: "reply", content: [{ type: "text", text }], question_id: questionId });
       },
-      agentsStop: (child) => deps.children.stop(child),
+      agentsStop: async (child) => { await ownChild(child); await deps.children.stop(child); },
       agentsList: async () => Promise.all((await deps.children.list(sessionId)).map((c) => childStatus(c.id))),
-      agentsPatch: async (child) => { const c = await deps.getSession(child); const ws = c ? await deps.getWorkspace(c.workspace_id) : null; return ws?.ref.kind === "git" ? ws.ref.patch ?? null : null; },
+      agentsPatch: async (child) => { const c = await ownChild(child); const ws = await deps.getWorkspace(c.workspace_id); return ws?.ref.kind === "git" ? ws.ref.patch ?? null : null; },
       sessionNote: async (plugin, text) => { await emit({ type: "plugin.message", plugin, content: [{ type: "text", text }] }); },
       // Mid-run runtime switches (applied on the next turn via prepareNextTurn).
       sessionSetModel: async (ref) => {
         const [provider, ...rest] = ref.split("/");
         if (!provider || rest.length === 0) throw new Error(`model must be "provider/id", got "${ref}"`);
-        model = resolveModel(deps.models, { provider, id: rest.join("/") }); // throws if unknown
+        model = resolveModel(deps.models, { provider, id: rest.join("/") }, session.owner_id); // throws if unknown (or another tenant's)
         modelSwitched = true;
         await emit({ type: "plugin.message", plugin: "runtime", content: [{ type: "text", text: `model switched to ${model.provider}/${model.id}` }] });
         return { model: `${model.provider}/${model.id}` };
@@ -578,18 +632,23 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     };
     detachPlugins = host?.attach(info, caps) ?? null;
 
-    const tools: AgentTool[] = [...builtinTools, ...(host?.agentTools(info) ?? [])];
+    const tools: AgentTool[] = [];
     activeTools = tools; // setActiveTools narrows this; prepareNextTurn feeds it to the next turn
-    if (session.parent_id) tools.push(reportToParentTool(session.parent_id, emit, () => { stopReason = "end_turn"; abort.abort(); }));
+    // Tool names must be unique for the model: a later tool with a taken name is skipped with a note.
+    const skipped: string[] = [];
+    const addTool = (t: AgentTool) => { if (tools.some((x) => x.name === t.name)) skipped.push(t.name); else tools.push(t); };
+    for (const t of [...builtinTools, ...(host?.agentTools(info) ?? [])]) addTool(t);
+    if (session.parent_id) addTool(reportToParentTool(session.parent_id, emit, () => { stopReason = "end_turn"; turnEndedByTool = true; abort.abort(); }));
     // Client/function tools (OpenAI Agents API): results supplied by the API caller via tool_result.
     for (const decl of session.agent.client_tools ?? []) {
-      tools.push(clientTool(decl, (callId, sig) => deps.awaitToolResult(sessionId, callId, sig, env.CLIENT_TOOL_WAIT_MS)));
+      addTool(clientTool(decl, (callId, sig) => deps.awaitToolResult(sessionId, callId, sig, env.CLIENT_TOOL_WAIT_MS)));
     }
     // Remote MCP servers: connect and register their tools (server-side; gated by the fetch allowlist).
-    if (session.agent.mcp_servers?.length) tools.push(...(await mcpTools(session.agent.mcp_servers, fetchAllow, isAllowedUrl, emit)));
+    if (session.agent.mcp_servers?.length) for (const t of await mcpTools(session.agent.mcp_servers, fetchAllow, isAllowedUrl, emit)) addTool(t);
     const allSkills = [...plugins.skills, ...dbSkills];
     const st = skillTool(allSkills, plugins.prompts);
-    if (st) tools.push(st);
+    if (st) addTool(st);
+    if (skipped.length) await emit({ type: "plugin.message", plugin: "runtime", content: [{ type: "text", text: `duplicate tool names skipped: ${skipped.join(", ")}` }] });
     // The prompt is the user's text plus minimal sections; plugins contribute through {{plugins}}.
     const sections: PromptSections = {
       skills: allSkills.map((x) => ({ name: x.name, description: x.description })),
@@ -606,6 +665,9 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     };
 
     await host?.emit(info, { type: "session_start", sessionId });
+    // History may already be over budget (long session resumed): compact before the first request,
+    // now that the plugin host is attached (before_compact / after_compact apply here too).
+    messages = await maybeCompact(messages);
 
     // The trigger (last user message) passes through `input` hooks and slash-command dispatch.
     // A command answers the user directly (plugin.message) and may or may not send a prompt on.
@@ -625,10 +687,12 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         else if (r?.text !== undefined && r.text !== text) text = r.text;
       }
       if (!skipModel && text !== userText(trigger)) {
-        const rewritten: UserMessage = { role: "user", content: [{ type: "text", text }], timestamp: trigger.timestamp };
+        const rewritten: UserMessage = { role: "user", content: withText((trigger as UserMessage).content, text), timestamp: trigger.timestamp };
         const seq = seqOf.get(trigger);
         if (seq !== undefined) seqOf.set(rewritten, seq);
         messages = [...messages.slice(0, -1), rewritten];
+        // persisted, so later runs fold the prompt the model actually answered (not the raw command)
+        if (seq !== undefined) await emit({ type: "user.message_rewritten", target_seq: seq, text });
       }
       if (!skipModel) {
         const pre = await host?.emit(info, { type: "before_agent_start", systemPrompt: baseSystemPrompt, messageCount: messages.length, trigger: text });
@@ -642,7 +706,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         }
       }
     }
-    const context: AgentContext = { systemPrompt: await systemPromptFor(messages), messages, tools };
+    const context: AgentContext = { systemPrompt: await systemPromptFor(messages), messages, tools: activeTools };
     await deps.recordSystemPrompt(sessionId, context.systemPrompt);
     const config: AgentLoopConfig = {
       model,
@@ -656,7 +720,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
           const r = await host?.emit(info, { type: "input", text, source: "steer" });
           if (r?.cancel) continue;
           if (r?.text !== undefined) text = r.text;
-          const m: UserMessage = { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+          // keep image/document blocks: resolve files like the fold does (documents go to the workspace)
+          const converted = await userContentFromBlocks(st.content, deps.files);
+          if (converted.attachments.length) await writeAttachments(await ctx.sandbox("main"), converted.attachments, deps.files);
+          const m: UserMessage = { role: "user", content: withText(converted.content, text), timestamp: Date.now() };
           seqOf.set(m, st.seq);
           out.push(m);
         }
@@ -751,7 +818,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
             // pi-ai reports "error" (not "aborted") when the signal was already aborted before the
             // request started — e.g. an interrupt that landed during the previous tool call.
             if (m.stopReason === "aborted" || (m.stopReason === "error" && abort.signal.aborted)) {
-              if (stopReason === "end_turn") stopReason = "interrupted";
+              if (stopReason === "end_turn" && !turnEndedByTool) stopReason = "interrupted";
             } else if (m.stopReason === "error") {
               stopReason = "error";
               await emit({ type: "session.error", error: { type: "model_error", message: m.errorMessage ?? "unknown model error" } });
@@ -775,7 +842,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
     }
   } catch (err) {
     if (abort.signal.aborted) {
-      if (stopReason === "end_turn") stopReason = "interrupted";
+      if (stopReason === "end_turn" && !turnEndedByTool) stopReason = "interrupted";
     } else {
       stopReason = "error";
       const e = err instanceof Error ? err : new Error(String(err));
@@ -816,7 +883,10 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         const err2 = err instanceof Error ? err : new Error(String(err));
         await emit({ type: "session.error", error: { type: "capture_failed", message: `${key}: ${err2.message}` } });
       } finally {
-        await lease.release();
+        // a failing release must not skip the other environments or finishRun
+        try { await lease.release(); } catch (err) {
+          await emit({ type: "session.error", error: { type: "release_failed", message: `${key}: ${err instanceof Error ? err.message : String(err)}` } }).catch(() => {});
+        }
         await emit({ type: "sandbox.released", sandbox_id: lease.sandbox.id, env: key });
         await hostRef.current?.emit(info, { type: "sandbox_released", sandboxId: lease.sandbox.id, provider: lease.sandbox.provider, env: key }).catch(() => {});
       }
@@ -824,7 +894,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
   }
   // Stragglers (user messages steered after the last pop) are detected by seq inside finishRun;
   // whatever is left in the steer list is deduped by seq on the next run.
-  const finished = await deps.finishRun(sessionId, stopReason, consumedSeq);
+  const finished = await deps.finishRun(sessionId, stopReason, consumedSeq, { claimSeq });
   await publishAll(finished.events);
   return { status: "done", stopReason, unconsumedSeq: finished.unconsumedSeq };
 }

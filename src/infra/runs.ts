@@ -9,11 +9,12 @@ export const HEARTBEAT_MS = 20_000;
 /**
  * Atomically move the session idle -> running and append `session.status_running`.
  * A `running` session with a stale heartbeat is taken over (its runner died mid-run);
- * a live one (or a terminated session) yields null and the caller must not run.
+ * a live one yields null (retry later), a terminated one "terminated" (drop the job: it never runs again).
  */
-export async function claimRun(sessionId: string): Promise<SessionEvent[] | null> {
+export async function claimRun(sessionId: string): Promise<SessionEvent[] | null | "terminated"> {
   return withSession(sessionId, async (c, s) => {
     const payloads: SessionEventPayload[] = [];
+    if (s.status === "terminated") return "terminated";
     if (s.status === "running" && s.idle_ms > RUN_STALE_MS) {
       payloads.push({ type: "session.error", error: { type: "run_lost", message: "previous runner stopped heartbeating; resuming" } });
     } else if (s.status !== "idle") return null;
@@ -28,17 +29,25 @@ export async function claimRun(sessionId: string): Promise<SessionEvent[] | null
  * Atomically append `session.status_idle` and flip the column. Under the same lock, detect
  * user messages that arrived while running but were never consumed (`seq > consumedSeq`) —
  * the API steered them instead of enqueueing, so the caller must enqueue a follow-up run.
+ * `claimSeq` (the seq of this run's status_running) is the run's ownership token: if a newer run
+ * start exists, this runner was taken over as stale and must leave the session to the new run.
  */
 export async function finishRun(
   sessionId: string,
   stopReason: StopReason,
   consumedSeq: number,
+  opts: { claimSeq?: number } = {},
 ): Promise<{ events: SessionEvent[]; unconsumedSeq: number | null }> {
   return withSession(sessionId, async (c, s) => {
+    if (opts.claimSeq !== undefined) {
+      const latest = await c.query<{ max: string | number | null }>(`SELECT MAX(seq) AS max FROM events WHERE session_id=$1 AND type='session.status_running'`, [sessionId]);
+      const max = latest.rows[0]?.max;
+      if (max != null && Number(max) > opts.claimSeq) return { events: [], unconsumedSeq: null }; // superseded
+    }
     const u = await c.query<{ usage: Usage; context: ContextSize | null }>(`SELECT usage, context FROM sessions WHERE id=$1`, [sessionId]);
     const events = await appendIn(c, sessionId, [
       { type: "session.usage", usage: u.rows[0]!.usage, context: u.rows[0]!.context },
-      { type: "session.status_idle", stop_reason: stopReason },
+      { type: "session.status_idle", stop_reason: stopReason, consumed_seq: consumedSeq },
     ]);
     // A session archived mid-run stays terminated.
     if (s.status !== "terminated") await setStatusIn(c, sessionId, "idle");
@@ -63,7 +72,7 @@ export async function findStrandedSessions(graceMs: number): Promise<{ session_i
     `SELECT s.id AS session_id, s.owner_id AS owner_id, u.seq AS trigger_seq
      FROM sessions s
      JOIN LATERAL (SELECT seq, created_at FROM events WHERE session_id = s.id AND type = 'user.message' ORDER BY seq DESC LIMIT 1) u ON true
-     LEFT JOIN LATERAL (SELECT seq FROM events WHERE session_id = s.id AND type IN ('session.status_running','session.status_idle','session.status_terminated') ORDER BY seq DESC LIMIT 1) st ON true
+     LEFT JOIN LATERAL (SELECT seq FROM events WHERE session_id = s.id AND type IN ('session.status_running','session.status_idle','session.status_terminated','session.environment_disconnected') ORDER BY seq DESC LIMIT 1) st ON true
      WHERE s.status = 'idle' AND (st.seq IS NULL OR u.seq > st.seq) AND u.created_at < now() - ($1::bigint * interval '1 millisecond')`,
     [graceMs],
   );

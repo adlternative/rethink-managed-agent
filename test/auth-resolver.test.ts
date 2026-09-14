@@ -25,13 +25,13 @@ describe("bearerApiKeyResolver", () => {
     expect(await bearerApiKeyResolver.resolve(req({}))).toBeNull();
   });
   it("resolves a valid token to its principal", async () => {
-    queue = [[{ principal_id: "prc_a" }], [{ id: "prc_a", kind: "user", handle: "a", display_name: "A" }]];
+    queue = [[{ id: "prc_a", kind: "user", handle: "a", display_name: "A" }]]; // one statement: key lookup + throttled touch + principal
     const id = await bearerApiKeyResolver.resolve(req({ authorization: "Bearer pma_secret" }));
     expect(id?.actor.id).toBe("prc_a");
     expect(id?.owner).toBeUndefined(); // owner defaults to actor in the middleware
   });
   it("throws 401 for an unknown token", async () => {
-    queue = [[]]; // UPDATE ... RETURNING finds no key
+    queue = [[]]; // no api_keys row for the hash
     await expect(bearerApiKeyResolver.resolve(req({ authorization: "Bearer nope" }))).rejects.toMatchObject({ status: 401 });
   });
 });

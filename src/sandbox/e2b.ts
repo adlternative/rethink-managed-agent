@@ -19,6 +19,8 @@ const TEMPLATE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 const GIT_ARG_RE = /^[^\s-][^\s]*$/;
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const mountWorkdir = (mountId: SandboxId) => `${MNT}/${mountId}`;
+/** A unique /tmp path in the (possibly shared) remote sandbox: concurrent mount ops must not share temp files. */
+const tmpName = (prefix: string, ext: string) => `/tmp/${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
 
 function insidePath(workdir: string, p: string): string {
   const abs = path.posix.resolve(workdir, p);
@@ -47,25 +49,27 @@ async function materializeRemote(sbx: E2bSandbox, workdir: string, ref: Workspac
   if (ref.kind === "git") {
     await sh(sbx, `git clone --quiet -- ${gitArg("remote", ref.remote)} ${q(workdir)}`);
     if (ref.base) await sh(sbx, `cd ${q(workdir)} && git checkout --quiet --detach ${gitArg("ref", ref.base)}`);
-    if (ref.patch) { await sbx.files.write("/tmp/pi-ws.patch", ref.patch); await sh(sbx, `cd ${q(workdir)} && git apply --whitespace=nowarn /tmp/pi-ws.patch && rm -f /tmp/pi-ws.patch`); }
+    if (ref.patch) { const pf = tmpName("pi-ws", "patch"); await sbx.files.write(pf, ref.patch); await sh(sbx, `cd ${q(workdir)} && git apply --whitespace=nowarn ${pf} && rm -f ${pf}`); }
     return;
   }
   // dir
   const tgz = path.join(await mkdtemp(path.join(tmpdir(), "e2b-up-")), "ws.tgz");
   try {
     await run("tar", ["czf", tgz, "-C", ref.path, "."]);
-    await sbx.files.write("/tmp/pi-ws.tgz", new Blob([await readFile(tgz)]));
-    await sh(sbx, `tar xzf /tmp/pi-ws.tgz -C ${q(workdir)} && rm -f /tmp/pi-ws.tgz`);
+    const remote = tmpName("pi-ws", "tgz");
+    await sbx.files.write(remote, new Blob([await readFile(tgz)]));
+    await sh(sbx, `tar xzf ${remote} -C ${q(workdir)} && rm -f ${remote}`);
   } finally { await rm(path.dirname(tgz), { recursive: true, force: true }); }
 }
 
-function makeSandbox(id: SandboxId, sbx: E2bSandbox, workdir: string): Sandbox {
+/** Vault secrets ride on every command (not the shared sandbox's env), so sessions sharing it never see each other's. */
+function makeSandbox(id: SandboxId, sbx: E2bSandbox, workdir: string, secrets: Record<string, string> = {}): Sandbox {
   return {
     id, provider: "e2b", workdir,
     async *exec(cmd: string, o: ExecOptions = {}): AsyncIterable<ExecChunk> {
       const queue: ExecChunk[] = []; let notify: (() => void) | null = null;
       const push = (c: ExecChunk) => { queue.push(c); notify?.(); };
-      const handle = await sbx.commands.run(cmd, { background: true, cwd: o.cwd ? path.posix.resolve(workdir, o.cwd) : workdir, envs: o.env, timeoutMs: o.timeoutMs ?? 0, onStdout: (d) => push({ type: "stdout", data: d }), onStderr: (d) => push({ type: "stderr", data: d }) });
+      const handle = await sbx.commands.run(cmd, { background: true, cwd: o.cwd ? path.posix.resolve(workdir, o.cwd) : workdir, envs: { ...secrets, ...o.env }, timeoutMs: o.timeoutMs ?? 0, onStdout: (d) => push({ type: "stdout", data: d }), onStderr: (d) => push({ type: "stderr", data: d }) });
       const kill = () => { void handle.kill(); };
       o.signal?.addEventListener("abort", kill, { once: true });
       void handle.wait().then((r) => push({ type: "exit", code: r.exitCode }), (e: { exitCode?: number }) => push({ type: "exit", code: e.exitCode ?? 1 }));
@@ -95,7 +99,7 @@ export class E2bProvider implements SandboxProvider {
   async openContainer(containerId: SandboxId, req: SandboxRequest): Promise<string> {
     const template = req.image || env.E2B_TEMPLATE;
     if (!TEMPLATE_RE.test(template)) throw new Error(`e2b provider: invalid template name ${JSON.stringify(template)}`);
-    const sbx = await E2bSandbox.create(template, { ...opts(), timeoutMs: env.E2B_SANDBOX_TIMEOUT_MS, metadata: { "pi.container": containerId }, envs: req.secrets });
+    const sbx = await E2bSandbox.create(template, { ...opts(), timeoutMs: env.E2B_SANDBOX_TIMEOUT_MS, metadata: { "pi.container": containerId } });
     live.set(sbx.sandboxId, sbx);
     return sbx.sandboxId;
   }
@@ -104,16 +108,16 @@ export class E2bProvider implements SandboxProvider {
   }
   async destroyContainer(containerRef: string): Promise<void> { live.delete(containerRef); await E2bSandbox.kill(containerRef, opts()).catch(() => {}); }
 
-  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef): Promise<SandboxHandle> {
+  async addMount(containerRef: string, mountId: SandboxId, ref: WorkspaceRef, secrets?: Record<string, string>): Promise<SandboxHandle> {
     const sbx = await sandboxFor(containerRef);
     const workdir = mountWorkdir(mountId);
     await materializeRemote(sbx, workdir, ref);
-    return { sandbox: makeSandbox(mountId, sbx, workdir), containerRef, workdir };
+    return { sandbox: makeSandbox(mountId, sbx, workdir, secrets), containerRef, workdir };
   }
-  async connectMount(containerRef: string, mountId: SandboxId, workdir: string): Promise<Sandbox | null> {
+  async connectMount(containerRef: string, mountId: SandboxId, workdir: string, secrets?: Record<string, string>): Promise<Sandbox | null> {
     const sbx = await sandboxFor(containerRef).catch(() => null);
     if (!sbx) return null;
-    return makeSandbox(mountId, sbx, workdir);
+    return makeSandbox(mountId, sbx, workdir, secrets);
   }
   async removeMount(containerRef: string, _mountId: SandboxId, workdir: string): Promise<void> {
     const sbx = await sandboxFor(containerRef).catch(() => null);
@@ -129,9 +133,10 @@ export class E2bProvider implements SandboxProvider {
     }
     const tmp = await mkdtemp(path.join(tmpdir(), "e2b-cap-"));
     try {
-      await sh(sbx, `cd ${q(workdir)} && tar czf /tmp/pi-cap.tgz .`);
-      const bytes = await sbx.files.read("/tmp/pi-cap.tgz", { format: "bytes" });
-      await sh(sbx, "rm -f /tmp/pi-cap.tgz");
+      const remote = tmpName("pi-cap", "tgz");
+      await sh(sbx, `cd ${q(workdir)} && tar czf ${remote} .`);
+      const bytes = await sbx.files.read(remote, { format: "bytes" });
+      await sh(sbx, `rm -f ${remote}`);
       const tgz = path.join(tmp, "ws.tgz"); const dir = path.join(tmp, "ws");
       await writeFile(tgz, bytes); await mkdir(dir); await run("tar", ["xzf", tgz, "-C", dir]);
       return await captureDir(dir, prev, path.posix.basename(workdir));

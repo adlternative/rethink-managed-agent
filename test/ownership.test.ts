@@ -77,6 +77,7 @@ describe("ownership threading", () => {
   });
 
   it("sandbox rows carry owner_id and the ops view filters by owner (phase 2)", async () => {
+    nextRows = [[], [], [], [], []]; // BEGIN, advisory lock, no other busy lease on the affinity, INSERT, COMMIT
     await leaseStore.insert({ id: "sbx_1", owner_id: "prc_a", provider: "local", status: "busy", workspace_id: "ws_1", affinity: "ws_1", external_ref: null, container_key: "prc_a/g/env", container_ref: "c1", workdir: "/w" } as never);
     const ins = find("INSERT INTO sandboxes");
     expect(ins.sql).toMatch(/INSERT INTO sandboxes \(id, owner_id,/);

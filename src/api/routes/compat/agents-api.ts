@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { repos } from "../../../infra/db.ts";
-import { listEvents } from "../../../infra/events.ts";
+import { stateEvents } from "./openai-agents.ts";
+import { lastSeq } from "../../../infra/events.ts";
 import type { SessionResource, WorkspaceRef } from "../../../shared/types.ts";
-import { invalid, notFound, readJson } from "../../errors.ts";
+import { invalid, notFound, queryInt, readJson } from "../../errors.ts";
 import { scope, ownerId } from "../../auth.ts";
 import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
@@ -27,6 +28,9 @@ export const agentsApi = new Hono()
   .post("/sessions", async (c) => {
     const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; stream?: boolean }>(c);
     if (!body.agent) throw invalid("agent is required");
+    if (body.input !== undefined && typeof body.input !== "string") throw invalid("input must be a string");
+    // the stream follows the turn the input triggers; without one it would never end
+    if (body.stream && !body.input) throw invalid("stream:true needs a non-empty input");
     const owner = ownerId(c);
     const draft = openaiAgentToRethink(body.agent);
     const environmentId = openaiEnvToEnvironmentId(body.environment);
@@ -44,25 +48,25 @@ export const agentsApi = new Hono()
       await sendUserEvents(session, [{ type: "user.message", content: [{ type: "text", text: body.input }] }]);
     }
     if (body.stream) return streamOpenAiEvents(c, session.id, since, { synthCreated: { environment: { environment_id: environmentId }, ignored: draft.ignored }, clientTools: draft.client_tools.map((t) => t.name) });
-    return c.json(toOpenAiSession(session, await listEvents(session.id), environmentId), 201);
+    return c.json(toOpenAiSession(session, await stateEvents(session), environmentId), 201);
   })
   .get("/sessions/:id", async (c) => {
     const session = await loadSession(c);
-    return c.json(toOpenAiSession(session, await listEvents(session.id), envIdOf(session)));
+    return c.json(toOpenAiSession(session, await stateEvents(session), envIdOf(session)));
   })
   /** Continue the turn / add input (session.stream(input=...)). */
   .post("/sessions/:id", async (c) => {
     const session = await loadSession(c);
     const body = await readJson<{ input?: unknown; stream?: boolean }>(c);
-    const before = await listEvents(session.id);
-    const since = before.length ? before[before.length - 1]!.seq : 0;
+    if (body.input !== undefined && typeof body.input !== "string") throw invalid("input must be a string");
+    // reattaching to a running turn needs no input; on an idle session nothing would ever end the stream
+    if (body.stream && !body.input && session.status !== "running") throw invalid("stream:true on an idle session needs a non-empty input");
+    const since = await lastSeq(session.id);
     if (typeof body.input === "string" && body.input.length > 0) {
       await sendUserEvents(session, [{ type: "user.message", content: [{ type: "text", text: body.input }] }]);
-    } else if (body.input !== undefined) {
-      throw invalid("input must be a string");
     }
     if (body.stream) return streamOpenAiEvents(c, session.id, since, { clientTools: clientToolNames(session) });
-    return c.json(toOpenAiSession(await loadSession(c), await listEvents(session.id), envIdOf(session)));
+    return c.json(toOpenAiSession(await loadSession(c), await stateEvents(session), envIdOf(session)));
   })
   /** Submit a client/function tool result (or a human approval decision). */
   .post("/sessions/:id/tool_result", async (c) => {
@@ -81,5 +85,5 @@ export const agentsApi = new Hono()
   /** Reattach an SSE stream (resume after action_required), from a cursor. */
   .get("/sessions/:id/events/stream", async (c) => {
     const session = await loadSession(c);
-    return streamOpenAiEvents(c, session.id, Number(c.req.query("since") ?? 0), { clientTools: clientToolNames(session) });
+    return streamOpenAiEvents(c, session.id, queryInt(c, "since", 0, 0), { clientTools: clientToolNames(session) });
   });

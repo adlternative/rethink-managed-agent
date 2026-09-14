@@ -33,8 +33,13 @@ export function contextTokens(messages: AgentMessage[]): number {
   let base = 0;
   for (let i = messages.length - 1; i > summaryIdx; i--) {
     const m = messages[i]!;
-    if (m.role === "assistant" && (m as { usage?: Parameters<typeof calculateContextTokens>[0] }).usage) {
-      base = calculateContextTokens((m as { usage: Parameters<typeof calculateContextTokens>[0] }).usage);
+    // Like pi's getAssistantUsage: an aborted/errored reply, or a provider that reported no usage (all
+    // zeros), says nothing about the context size, so it must not become the base.
+    if (m.role !== "assistant" || m.stopReason === "aborted" || m.stopReason === "error") continue;
+    const usage = (m as { usage?: Parameters<typeof calculateContextTokens>[0] }).usage;
+    const tokens = usage ? calculateContextTokens(usage) : 0;
+    if (tokens > 0) {
+      base = tokens;
       lastUsageIdx = i;
       break;
     }
@@ -108,5 +113,7 @@ export async function compactMessages(opts: {
   }
   const summary = opts.summaryOverride ?? await generateSummary(older, opts.model, opts.settings.reserveTokens, undefined, undefined, opts.signal, opts.instructions, previous, "off", opts.streamFn);
   const messages: AgentMessage[] = [summaryMessage(summary), ...opts.messages.slice(cut)];
-  return { messages, summary, firstKeptIndex: cut, tokensBefore, tokensAfter: contextTokens(messages) };
+  // Usage carried by kept assistant messages describes the pre-compaction context: estimate instead.
+  const tokensAfter = messages.reduce((n, m) => n + estimateTokens(m), 0);
+  return { messages, summary, firstKeptIndex: cut, tokensBefore, tokensAfter };
 }
