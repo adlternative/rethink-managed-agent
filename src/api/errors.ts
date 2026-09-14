@@ -45,23 +45,3 @@ export async function readForm(c: Context): Promise<FormData> {
   }
 }
 
-/**
- * Wrap a request so its body errors with 413 once more than `max` bytes have been read. The header
- * check alone is bypassed by chunked uploads, and handlers buffer bodies (json/formData/arrayBuffer).
- */
-export function limitBody(req: Request, max: number): Request {
-  if (!req.body) return req;
-  const reader = req.body.getReader();
-  let size = 0;
-  const body = new ReadableStream<Uint8Array>({
-    async pull(ctrl) {
-      const { done, value } = await reader.read();
-      if (done) return ctrl.close();
-      size += value.byteLength;
-      if (size > max) { reader.cancel().catch(() => {}); return ctrl.error(new ApiError(413, "payload_too_large", `request body exceeds ${max} bytes`)); }
-      ctrl.enqueue(value);
-    },
-    cancel(reason) { return reader.cancel(reason); },
-  });
-  return new Request(req, { body, duplex: "half" } as RequestInit);
-}

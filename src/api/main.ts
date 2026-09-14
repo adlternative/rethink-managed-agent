@@ -2,7 +2,8 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { migrate } from "../infra/migrate.ts";
 import { env } from "../shared/env.ts";
-import { ApiError, errorResponse, limitBody } from "./errors.ts";
+import { ApiError, errorResponse } from "./errors.ts";
+import { bodyLimit } from "./body-limit.ts";
 import { agents } from "./routes/agents.ts";
 import { environments } from "./routes/environments.ts";
 import { sessions } from "./routes/sessions.ts";
@@ -43,17 +44,9 @@ export const app = new Hono<{ Variables: { requestId: string } }>()
     httpDur.observe(seconds, { route });
     if (c.req.path !== "/healthz" && c.req.path !== "/metrics") log.info("http", { rid, ...labels, ms: Math.round(seconds * 1000) });
   })
-  // reject oversized bodies: early on content-length, and while streaming (chunked bodies have no header).
-  // /v1/files gets its own larger cap (file size + multipart envelope slack).
-  .use("*", async (c, next) => {
-    if (c.req.method === "POST" || c.req.method === "PATCH" || c.req.method === "PUT") {
-      const max = c.req.path.startsWith("/v1/files") ? MAX_FILE_BYTES + 64 * 1024 : env.API_MAX_BODY_BYTES;
-      const len = Number(c.req.header("content-length") ?? 0);
-      if (len > max) return errorResponse(c, new ApiError(413, "payload_too_large", `request body exceeds ${max} bytes`));
-      c.req.raw = limitBody(c.req.raw, max);
-    }
-    await next();
-  })
+  // reject oversized bodies (on content-length and while streaming) and drain unread leftovers so the
+  // keep-alive connection stays usable; /v1/files gets its own larger cap (file size + multipart slack).
+  .use("*", bodyLimit((path) => (path.startsWith("/v1/files") ? MAX_FILE_BYTES + 64 * 1024 : env.API_MAX_BODY_BYTES)))
   .get("/healthz", (c) => c.json({ ok: true }))
   .get("/metrics", async (c) => c.text(await renderMetrics(), 200, { "content-type": "text/plain; version=0.0.4" }))
   .route("/", ui)

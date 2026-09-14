@@ -82,6 +82,10 @@ export const env = {
   RUNNER_METRICS_PORT: Number(process.env.RUNNER_METRICS_PORT ?? 9090),
   /** max JSON request body (bytes) on the API; the multipart /v1/files route has its own larger cap */
   API_MAX_BODY_BYTES: Number(process.env.API_MAX_BODY_BYTES ?? 4_000_000),
+  /** after a rejected or partly-read request body, read and drop at most this much of the rest (keeps the keep-alive connection usable); beyond it the connection is closed */
+  API_DRAIN_MAX_BYTES: Number(process.env.API_DRAIN_MAX_BYTES ?? 64 * 1024 * 1024),
+  /** ...and for at most this long (a slow/stalled uploader); beyond it the connection is closed */
+  API_DRAIN_MAX_MS: Number(process.env.API_DRAIN_MAX_MS ?? 30_000),
   MAX_TURNS: Number(process.env.MAX_TURNS ?? 50),
   /** Default and hard cap for a single bash tool call. */
   BASH_TIMEOUT_MS: Number(process.env.BASH_TIMEOUT_MS ?? 600000),

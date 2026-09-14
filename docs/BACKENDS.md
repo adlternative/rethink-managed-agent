@@ -64,7 +64,11 @@ out of scope until a concrete need appears.
   `{ data, has_more, next_cursor }` (newest first). Other list endpoints follow the same shape as
   they grow.
 - **Body limit**: JSON bodies over `API_MAX_BODY_BYTES` (default 4 MB) get 413; the multipart
-  `/v1/files` route keeps its own 32 MB cap.
+  `/v1/files` route keeps its own 32 MB cap. The limit is checked on `Content-Length` and again while
+  the body streams (chunked uploads). After a response that did not consume the whole body (413, 401,
+  404, a handler that ignores it) the rest is read and dropped so the keep-alive connection stays usable
+  for the client's next request; this drain is bounded by `API_DRAIN_MAX_BYTES` (default 64 MB) and
+  `API_DRAIN_MAX_MS` (default 30 s), past which the connection is closed instead.
 - **Errors**: uniform `{type:"error", error:{type, message}}`; statuses 400/401/404/413/500.
 
 ## Plugin placement, governance & the getEvents capability
