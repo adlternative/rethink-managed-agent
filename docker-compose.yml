@@ -33,7 +33,10 @@ services:
       BLOB_ACCESS_KEY: pma
       BLOB_SECRET_KEY: pma-secret
       PMA_SECRET_KEY: ${PMA_SECRET_KEY:-}
+      WORKSPACE_ROOT: /data/workspaces
     ports: ["${API_PORT:-8080}:8080"]
+    volumes:
+      - workspaces:/data/workspaces   # serve/manage session artifacts (files) from captured `dir` workspaces
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, minio: { condition: service_healthy } }
   runner:
     build: .

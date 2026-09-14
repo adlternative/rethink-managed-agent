@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import { repos, vaults, vaultCredentials } from "../../../infra/db.ts";
 import { listEvents } from "../../../infra/events.ts";
 import { secretsConfigured } from "../../../infra/secrets.ts";
+import { listArtifacts, readArtifact, deleteArtifact } from "../../../infra/artifacts.ts";
 import type { SessionEvent, SessionResource, UserEventInput, WorkspaceRef } from "../../../shared/types.ts";
 import { invalid, notFound, readJson } from "../../errors.ts";
 import { scope, ownerId } from "../../auth.ts";
@@ -103,6 +104,15 @@ export function toTurns(session: SessionResource, events: SessionEvent[]) {
     }
   }
   return turns;
+}
+
+// Artifact id <-> workspace-relative path (base64url, so any path round-trips through the URL).
+const artifactId = (p: string) => `art_${Buffer.from(p, "utf8").toString("base64url")}`;
+const artifactPath = (id: string) => Buffer.from(id.replace(/^art_/, ""), "base64url").toString("utf8");
+const EXT_TYPES: Record<string, string> = { ".txt": "text/plain", ".md": "text/markdown", ".json": "application/json", ".js": "text/javascript", ".ts": "text/plain", ".html": "text/html", ".csv": "text/csv", ".png": "image/png", ".jpg": "image/jpeg", ".pdf": "application/pdf" };
+const contentType = (p: string) => EXT_TYPES[p.slice(p.lastIndexOf(".")).toLowerCase()] ?? "application/octet-stream";
+function toArtifact(session: SessionResource, e: { path: string; size: number; mtimeSec: number }) {
+  return { id: artifactId(e.path), object: "agent.session.artifact" as const, path: e.path, size: e.size, environment_id: session.environment_id, created_at: e.mtimeSec };
 }
 
 /** Project a child (sub-agent) session into the SDK's Subagent object. */
@@ -251,6 +261,39 @@ export const openaiAgents = new Hono()
     const turn = toTurns(session, await listEvents(session.id)).find((t) => t.id === c.req.param("turnId"));
     if (!turn) throw notFound("turn", c.req.param("turnId"));
     return c.json(turn);
+  })
+  // ---- Artifacts (client.beta.agents.sessions.artifacts.*) — files in the captured workspace ----
+  .get("/agents/sessions/:id/artifacts", async (c) => {
+    const session = await loadSession(c);
+    const ws = await repos.workspaces.get(session.workspace_id, scope(c));
+    const entries = await listArtifacts(ws?.ref);
+    const data = entries.map((e) => toArtifact(session, e));
+    return c.json({ object: "list", data, has_more: false });
+  })
+  .get("/agents/sessions/:id/artifacts/:artifactId/content", async (c) => {
+    const session = await loadSession(c);
+    const ws = await repos.workspaces.get(session.workspace_id, scope(c));
+    const p = artifactPath(c.req.param("artifactId"));
+    const f = await readArtifact(ws?.ref, p);
+    if (!f) throw notFound("artifact", c.req.param("artifactId"));
+    // Return a fresh ArrayBuffer slice so the framework sets an accurate content-length.
+    const buf = f.bytes.buffer.slice(f.bytes.byteOffset, f.bytes.byteOffset + f.bytes.byteLength);
+    return c.body(buf as ArrayBuffer, 200, { "content-type": contentType(p) });
+  })
+  .get("/agents/sessions/:id/artifacts/:artifactId", async (c) => {
+    const session = await loadSession(c);
+    const ws = await repos.workspaces.get(session.workspace_id, scope(c));
+    const p = artifactPath(c.req.param("artifactId"));
+    const f = await readArtifact(ws?.ref, p);
+    if (!f) throw notFound("artifact", c.req.param("artifactId"));
+    return c.json(toArtifact(session, { path: p, size: f.size, mtimeSec: f.mtimeSec }));
+  })
+  .delete("/agents/sessions/:id/artifacts/:artifactId", async (c) => {
+    const session = await loadSession(c);
+    const ws = await repos.workspaces.get(session.workspace_id, scope(c));
+    const p = artifactPath(c.req.param("artifactId"));
+    if (!(await deleteArtifact(ws?.ref, p))) throw notFound("artifact", c.req.param("artifactId"));
+    return c.json({ id: c.req.param("artifactId"), object: "agent.session.artifact.deleted", deleted: true });
   })
   // ---- Subagents (client.beta.agents.sessions.subagents.*) ----
   .get("/agents/sessions/:id/subagents", async (c) => {

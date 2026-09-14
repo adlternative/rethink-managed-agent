@@ -497,9 +497,16 @@ function calls / function-call outputs) and `GET .../turns[/{turnId}]` (one `Tur
 `status_running`, closed by `status_idle`).
 
 **Phase 2** adds `create({ stream: true })` (POST /agents/sessions returning the turn's SSE straight
-from create, verified live) and **subagents** (`client.beta.agents.sessions.subagents.*`) — our child
+from create, verified live), **subagents** (`client.beta.agents.sessions.subagents.*`) — our child
 sessions (`parent_id`) projected into `agent.session.subagent` with their own `items`/`turns` (reusing
-`toItems`/`toTurns` on the child's log). Only `artifacts` (workspace outputs) remain. The contract is
+`toItems`/`toTurns` on the child's log) — and **artifacts** (`client.beta.agents.sessions.artifacts.*`):
+a session's produced files read straight from its captured `dir`/`local` workspace (`src/infra/
+artifacts.ts`, path-confined, no sandbox lease), listed / retrieved / streamed as content / deleted.
+The API mounts the `workspaces` volume to read them. Verified live: a run wrote `report.txt`, then
+`artifacts.list` + `artifacts.content` returned it.
+
+**The whole Agents API surface is now covered** (sessions, events, items, turns, subagents, artifacts,
+vaults) and every resource group has been exercised live with the real `openai@7.15.0`. The contract is
 derived by reading the pinned SDK's TypeScript declarations (`npm pack openai@7.15.0`), not guessed.
 
 **Verified live** against the running stack (rebuilt API): the real `openai@7.15.0` SDK created a
