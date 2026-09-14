@@ -7,6 +7,7 @@ import { checkModelAccess, checkSkillAccess, validateModel, validatePackages, va
 import { validateSkillRefs } from "./skills.ts";
 import { validateMounts } from "./memories.ts";
 import { validateVaultIds } from "./vaults.ts";
+import { redactMcpServers } from "../../infra/mcp-credentials.ts";
 import { sessionConfig, skills as skillsRepo } from "../../infra/db.ts";
 import { parseSessionCursor } from "../../shared/cursor.ts";
 import { renderSystemPrompt } from "../../harness/system-prompt.ts";
@@ -16,6 +17,11 @@ import { scope, ownerId } from "../auth.ts";
 import type { Scope } from "../../infra/db.ts";
 
 type AgentInput = string | { type: "agent_with_overrides"; id: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown };
+
+/** A session as the API returns it: MCP server credentials are never echoed, neither plaintext nor ciphertext. */
+export function publicSession<T extends SessionResource>(s: T): T {
+  return s.agent?.mcp_servers?.length ? { ...s, agent: { ...s.agent, mcp_servers: redactMcpServers(s.agent.mcp_servers) } } : s;
+}
 
 export function initialRef(spec: WorkspaceSpec): WorkspaceRef {
   if (spec.kind === "git") return { kind: "git", remote: spec.remote, base: spec.ref ?? "HEAD" };
@@ -110,7 +116,7 @@ export const sessions = new Hono()
       vault_ids,
     });
     if (initial) await sendUserEvents(session, initial);
-    return c.json(session, 201);
+    return c.json(publicSession(session), 201);
   })
   /** Change this session's system prompt (next turn). `null` restores the default. */
   .patch("/:id", async (c) => {
@@ -120,7 +126,7 @@ export const sessions = new Hono()
     const system = body.system === null ? null : String(body.system);
     await sessionConfig.setSystem(s.id, system);
     await appendEvents(s.id, [{ type: "session.updated", changes: { system } }]);
-    return c.json({ ...s, agent: { ...s.agent, system } });
+    return c.json(publicSession({ ...s, agent: { ...s.agent, system } }));
   })
   /**
    * The system prompt as it is actually sent: the one recorded by the last run, or a preview rendered
@@ -144,14 +150,14 @@ export const sessions = new Hono()
     const next = await sessionConfig.addMemoryStore(s.id, mount!);
     if (!next) throw invalid("already mounted (same store or mount_path)");
     await appendEvents(s.id, [{ type: "session.updated", changes: { memory_stores: next } }]);
-    return c.json({ ...s, memory_stores: next }, 201);
+    return c.json(publicSession({ ...s, memory_stores: next }), 201);
   })
   .delete("/:id/memory_stores/:storeId", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
     const next = await sessionConfig.removeMemoryStore(s.id, c.req.param("storeId"));
     if (!next) throw notFound("mounted memory_store", c.req.param("storeId"));
     await appendEvents(s.id, [{ type: "session.updated", changes: { memory_stores: next } }]);
-    return c.json({ ...s, memory_stores: next });
+    return c.json(publicSession({ ...s, memory_stores: next }));
   })
   .post("/:id/skills", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
@@ -159,14 +165,14 @@ export const sessions = new Hono()
     const next = await sessionConfig.addSkill(s.id, ref!);
     if (!next) throw invalid("skill already attached");
     await appendEvents(s.id, [{ type: "session.updated", changes: { skills: next } }]);
-    return c.json({ ...s, agent: { ...s.agent, skills: next } }, 201);
+    return c.json(publicSession({ ...s, agent: { ...s.agent, skills: next } }), 201);
   })
   .delete("/:id/skills/:skillId", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
     const next = await sessionConfig.removeSkill(s.id, c.req.param("skillId"));
     if (!next) throw notFound("attached skill", c.req.param("skillId"));
     await appendEvents(s.id, [{ type: "session.updated", changes: { skills: next } }]);
-    return c.json({ ...s, agent: { ...s.agent, skills: next } });
+    return c.json(publicSession({ ...s, agent: { ...s.agent, skills: next } }));
   })
   /** Attach another environment (own sandbox) to an existing session; takes effect on the next turn. */
   .post("/:id/environments", async (c) => {
@@ -178,13 +184,14 @@ export const sessions = new Hono()
     if (!body.key || body.key === "main") throw invalid("key is required and cannot be 'main'");
     const e = await resolveEnvironment(body, s.environments, ownerId(c), scope(c));
     if (!(await repos.sessions.attachEnvironment(id, e))) throw new ApiError(409, "conflict_error", `environment key ${e.key} is already attached`);
-    return c.json({ ...s, environments: [...s.environments, e] }, 201);
+    return c.json(publicSession({ ...s, environments: [...s.environments, e] }), 201);
   })
   .get("/", async (c) => {
     const limit = queryInt(c, "limit", 50, 1);
     const cursor = c.req.query("cursor") || undefined;
     if (cursor) try { parseSessionCursor(cursor); } catch { throw invalid("cursor must be a next_cursor from a previous page"); }
-    return c.json(await repos.sessions.listPage(scope(c), { limit, cursor })); // { data, has_more, next_cursor }
+    const page = await repos.sessions.listPage(scope(c), { limit, cursor });
+    return c.json({ ...page, data: page.data.map(publicSession) }); // { data, has_more, next_cursor }
   })
   /** Full text of a tool result that was truncated for the model. */
   .get("/:id/tool-outputs/:toolUseId", async (c) => {
@@ -196,7 +203,7 @@ export const sessions = new Hono()
   .get("/:id", async (c) => {
     const s = await repos.sessions.get(c.req.param("id"), scope(c));
     if (!s) throw notFound("session", c.req.param("id"));
-    return c.json(s);
+    return c.json(publicSession(s));
   })
   .delete("/:id", async (c) => {
     const id = c.req.param("id");
@@ -211,6 +218,6 @@ export const sessions = new Hono()
     if (s.status !== "terminated") {
       await appendEvents(id, [{ type: "session.status_terminated", reason: "archived" }], { status: "terminated" });
     }
-    return c.json({ ...s, status: "terminated" });
+    return c.json(publicSession({ ...s, status: "terminated" as const }));
   })
   .route("/:id/events", events);

@@ -455,7 +455,10 @@ addition is **client/function tools**.
     loop unwinds normally, and the history stays valid for the LLM.
 - **Tool types**: builtin names (`bash/read/write/edit`) pass through into the sandbox; `{type:'mcp'}` is
   connected for real by a server-side MCP-over-HTTP client (`src/harness/mcp.ts`, Streamable HTTP, gated by
-  the fetch allowlist, failing soft), which lists and calls its tools; `web_search` maps to the existing
+  the fetch allowlist, failing soft), which lists and calls its tools. Its `authorization` / `headers` are
+  sealed with `PMA_SECRET_KEY` before the session is stored (refused with 400 when no key is set), only the
+  runner opens them (`src/infra/mcp-credentials.ts`), API output shows `"[redacted]"` markers — never the
+  value or the ciphertext — and `migrate` reseals plaintext left by older versions; `web_search` maps to the existing
   `plugins/web-search` pi plugin (`COMPAT_WEBSEARCH_PACKAGE`, needs `plugin_host=sandbox`+`network=bridge`);
   `multi_agent` maps to the team plugin (`COMPAT_TEAM_PACKAGE`, with `max_concurrent_subagents` advisory);
   `programmatic_tool_calling` stays accepted-and-ignored.

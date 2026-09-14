@@ -42,8 +42,14 @@ export interface FunctionToolDecl {
 export interface McpServerDecl {
   label: string;
   url: string;
+  /** plaintext credentials are request input only: they are sealed into `secret` before a session is stored */
   authorization?: string;
   headers?: Record<string, string>;
+  /** `{authorization, headers}` sealed with PMA_SECRET_KEY — the stored form, opened only by the runner */
+  secret?: { type: "encrypted"; v: 1; iv: string; ct: string; tag: string };
+  /** which credentials are sealed (values stay sealed), so API output can show what is set */
+  header_names?: string[];
+  has_authorization?: boolean;
   /** if set, only these tool names are exposed to the model */
   allowed_tools?: string[];
 }

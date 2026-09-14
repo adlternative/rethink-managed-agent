@@ -3,6 +3,7 @@ import { appendEvents, foldSince, listEventsWindow } from "../infra/events.ts";
 import { migrate } from "../infra/migrate.ts";
 import { closeBus, onInterrupt, onProvidersChanged, popSteer, publish, pushSteer, takeToolResult } from "../infra/pubsub.ts";
 import { anyWorkerAlive } from "../infra/byoc.ts";
+import { openMcpCredentials } from "../infra/mcp-credentials.ts";
 import { consumeRuns, enqueueRun, queueDepth } from "../infra/queue.ts";
 import { disallowedFor } from "../plugins/allow.ts";
 import { createServer } from "node:http";
@@ -84,6 +85,7 @@ function makeDeps(_provider: SandboxProviderName): RunDeps {
     pluginStore,
     principalFetchAllow: async (ownerId) => (await principals.get(ownerId))?.fetch_allow ?? null,
     vaultSecrets: (session) => vaultSecrets(session.owner_id, session.vault_ids ?? []),
+    mcpCredentials: (server) => openMcpCredentials(server),
     awaitToolResult: async (sessionId, callId, signal, timeoutMs) => {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
