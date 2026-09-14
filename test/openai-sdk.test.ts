@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import OpenAI from "openai7";
 import { toAgentSession } from "../src/api/routes/compat/openai-agents.ts";
 import { projectDelta, newTurnCtx } from "../src/api/routes/compat/openai-stream.ts";
-import { toItems, toTurns } from "../src/api/routes/compat/openai-agents.ts";
+import { toItems, toTurns, toSubagent } from "../src/api/routes/compat/openai-agents.ts";
 import { environmentActions } from "../src/api/routes/compat/required-actions.ts";
 
 /**
@@ -88,6 +88,23 @@ describe("items & turns projection (phase 1c)", () => {
     const turns = toTurns(session, evlog as any);
     expect(turns).toHaveLength(1);
     expect(turns[0]).toMatchObject({ id: "turn_1", object: "agent.session.turn", status: "completed" });
+  });
+});
+
+describe("subagents projection (phase 2)", () => {
+  it("projects a child session into an agent.session.subagent, and the SDK hits the right path", async () => {
+    const child = { ...session, id: "sess_child", status: "terminated", agent: { ...session.agent, name: "reviewer", system: "review code" }, updated_at: new Date("2026-01-01T00:01:00Z").toISOString() } as any;
+    const sub = toSubagent(child);
+    expect(sub).toMatchObject({ id: "sess_child", object: "agent.session.subagent", name: "reviewer", status: "closed" });
+    expect(sub.closed_at).not.toBeNull();
+    const cap: { req?: any } = {};
+    const fetch = async (url: string | URL, init?: RequestInit) => {
+      cap.req = { url: url.toString(), method: init?.method ?? "GET" };
+      return new Response(JSON.stringify({ object: "list", data: [], has_more: false }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const c = new OpenAI({ apiKey: "x", baseURL: "http://local/openai/v1", fetch: fetch as any });
+    for await (const _ of c.beta.agents.sessions.subagents.list("sess_abc")) void _;
+    expect(new URL(cap.req.url).pathname).toBe("/openai/v1/agents/sessions/sess_abc/subagents");
   });
 });
 

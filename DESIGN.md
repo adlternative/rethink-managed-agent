@@ -494,9 +494,13 @@ real `sessions.stream(id, {input, toolHandlers})` over our projection and assert
 handler with our item's arguments, submits the result, and terminates — no server needed.
 **Phase 1c** adds the read projections `GET /agents/sessions/{id}/items` (event log → messages /
 function calls / function-call outputs) and `GET .../turns[/{turnId}]` (one `Turn` per
-`status_running`, closed by `status_idle`). `artifacts`/`subagents` are the remaining phases. The
-contract is derived by reading the pinned SDK's TypeScript declarations (`npm pack openai@7.15.0`),
-not guessed.
+`status_running`, closed by `status_idle`).
+
+**Phase 2** adds `create({ stream: true })` (POST /agents/sessions returning the turn's SSE straight
+from create, verified live) and **subagents** (`client.beta.agents.sessions.subagents.*`) — our child
+sessions (`parent_id`) projected into `agent.session.subagent` with their own `items`/`turns` (reusing
+`toItems`/`toTurns` on the child's log). Only `artifacts` (workspace outputs) remain. The contract is
+derived by reading the pinned SDK's TypeScript declarations (`npm pack openai@7.15.0`), not guessed.
 
 **Verified live** against the running stack (rebuilt API): the real `openai@7.15.0` SDK created a
 session, ran `sessions.stream()` with a `get_time` toolHandler, and the actual model called the

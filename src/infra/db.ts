@@ -237,6 +237,10 @@ export const repos = {
       const envs = await many<SessionEnvironment & { session_id: string }>(pool, `SELECT session_id, key, environment_id, workspace_id FROM session_environments ORDER BY (key <> 'main'), created_at`);
       return rows.map((r) => ({ ...r, environments: envs.filter((e) => e.session_id === r.id).map(({ key, environment_id, workspace_id }) => ({ key, environment_id, workspace_id })) }));
     },
+    /** Child (sub-agent) sessions of a parent, oldest first. */
+    async childrenOf(parentId: string, scope?: Scope): Promise<SessionResource[]> {
+      return isoAll(await many<SessionResource>(pool, `SELECT * FROM sessions WHERE parent_id=$1${scope ? " AND owner_id=$2" : ""} ORDER BY created_at`, scope ? [parentId, scope.owner] : [parentId]));
+    },
     /** Cursor-paginated, newest first. cursor = the previous page's next_cursor (a created_at ISO). */
     async listPage(scope: Scope, opts: { limit?: number; cursor?: string } = {}): Promise<{ data: SessionResource[]; has_more: boolean; next_cursor: string | null }> {
       const lim = Math.min(Math.max(opts.limit ?? 50, 1), 200);

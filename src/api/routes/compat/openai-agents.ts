@@ -19,8 +19,9 @@ import { streamAgentSessionEvents } from "./openai-stream.ts";
  * event union — as a pure adapter over rethink's native engine (events-as-truth, sandbox leases,
  * principals). The hand-written /agents-api/v1 (showcase shape) is kept alongside, untouched.
  *
- * Phase 1a: session lifecycle + event submission/listing (non-streaming). Streaming turn projection
- * (agent.session.turn.* SSE) and items/turns/artifacts/subagents are the next phases.
+ * Covers: sessions (create incl. stream / retrieve / update / list / delete), events (submit + list +
+ * SSE stream), items, turns, subagents (+items/turns), and vaults (+credentials). Streaming and the
+ * turn projection live in ./openai-stream.ts. Artifacts are the remaining resource.
  */
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -104,6 +105,21 @@ export function toTurns(session: SessionResource, events: SessionEvent[]) {
   return turns;
 }
 
+/** Project a child (sub-agent) session into the SDK's Subagent object. */
+export function toSubagent(child: SessionResource) {
+  const opened = Math.floor(new Date(child.created_at as unknown as string).getTime() / 1000) || nowSec();
+  const closed = child.status === "terminated" ? Math.floor(new Date(child.updated_at as unknown as string).getTime() / 1000) || opened : null;
+  return {
+    id: child.id,
+    object: "agent.session.subagent" as const,
+    name: child.agent.name ?? null,
+    instructions: child.agent.system ? [{ type: "output_text", text: child.agent.system }] : null,
+    status: child.status === "terminated" ? "closed" : child.status === "running" ? "active" : "idle",
+    opened_at: opened,
+    closed_at: closed,
+  };
+}
+
 /** Map the SDK's `agent.session.input.*` events onto rethink user events. */
 function inputEventsToUserEvents(events: unknown[]): UserEventInput[] {
   const out: UserEventInput[] = [];
@@ -152,7 +168,6 @@ async function loadSession(c: Context): Promise<SessionResource> {
 export const openaiAgents = new Hono()
   .post("/agents/sessions", async (c) => {
     const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; metadata?: unknown; vault_ids?: string[]; stream?: boolean }>(c);
-    if (body.stream) throw invalid("stream is not supported yet on /openai/v1 (phase 1b); omit it and poll GET /agents/sessions/{id}");
     if (!body.agent) throw invalid("agent (with a model) is required; agent_id references are not supported yet");
     const owner = ownerId(c);
     const draft = openaiAgentToRethink(body.agent);
@@ -166,6 +181,13 @@ export const openaiAgents = new Hono()
     const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot, vault_ids: Array.isArray(body.vault_ids) ? body.vault_ids : [] });
     const inputs = createInputToUserEvents(body.input);
     if (inputs.length) await sendUserEvents(session, inputs);
+    // stream:true -> SSE of AgentSessionEvents for the turn the input just triggered. Start at the
+    // input's seq so the run's events (status_running, deltas, …) that follow are all captured.
+    if (body.stream) {
+      const existing = await listEvents(session.id);
+      const inputSeq = existing.filter((e) => e.payload.type === "user.message")[0]?.seq ?? 0;
+      return streamAgentSessionEvents(c, session, Math.max(0, inputSeq));
+    }
     return c.json(toAgentSession(session, await listEvents(session.id), environmentId), 201);
   })
   .get("/agents/sessions", async (c) => {
@@ -229,6 +251,30 @@ export const openaiAgents = new Hono()
     const turn = toTurns(session, await listEvents(session.id)).find((t) => t.id === c.req.param("turnId"));
     if (!turn) throw notFound("turn", c.req.param("turnId"));
     return c.json(turn);
+  })
+  // ---- Subagents (client.beta.agents.sessions.subagents.*) ----
+  .get("/agents/sessions/:id/subagents", async (c) => {
+    const session = await loadSession(c);
+    const kids = await repos.sessions.childrenOf(session.id, scope(c));
+    return c.json({ object: "list", data: kids.map(toSubagent), has_more: false });
+  })
+  .get("/agents/sessions/:id/subagents/:subId", async (c) => {
+    const session = await loadSession(c);
+    const child = (await repos.sessions.childrenOf(session.id, scope(c))).find((k) => k.id === c.req.param("subId"));
+    if (!child) throw notFound("subagent", c.req.param("subId"));
+    return c.json(toSubagent(child));
+  })
+  .get("/agents/sessions/:id/subagents/:subId/items", async (c) => {
+    const session = await loadSession(c);
+    const child = (await repos.sessions.childrenOf(session.id, scope(c))).find((k) => k.id === c.req.param("subId"));
+    if (!child) throw notFound("subagent", c.req.param("subId"));
+    return c.json({ object: "list", data: toItems(child, await listEvents(child.id)), has_more: false });
+  })
+  .get("/agents/sessions/:id/subagents/:subId/turns", async (c) => {
+    const session = await loadSession(c);
+    const child = (await repos.sessions.childrenOf(session.id, scope(c))).find((k) => k.id === c.req.param("subId"));
+    if (!child) throw notFound("subagent", c.req.param("subId"));
+    return c.json({ object: "list", data: toTurns(child, await listEvents(child.id)), has_more: false });
   })
   // ---- Vaults (client.beta.agents.vaults.*) ----
   .post("/vaults", async (c) => {
