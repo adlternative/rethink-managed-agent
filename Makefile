@@ -1,4 +1,4 @@
-.PHONY: help up up-min down logs e2e test typecheck cli-build install uninstall diagram demo
+.PHONY: help up up-min down logs e2e test typecheck cli-build install install-dev uninstall diagram demo
 
 help:
 	@echo "make up          start the full stack (postgres/redis/minio/api/runner)"
@@ -7,7 +7,8 @@ help:
 	@echo "make logs        tail api + runner logs"
 	@echo "make e2e         run scripts/e2e.sh against the running stack"
 	@echo "make test        typecheck + vitest (server) and typecheck (cli)"
-	@echo "make install     build pma-cli and install 'pma' into ~/.local/bin"
+	@echo "make install     build pma-cli and install 'pma' into ~/.local/bin (a copy: rerun after changes)"
+	@echo "make install-dev install 'pma' as a live wrapper over this working copy (no rebuild after edits)"
 	@echo "make uninstall   remove ~/.local/bin/pma"
 	@echo "make diagram     render docs/architecture.html from the archify spec"
 	@echo "make demo         run the architecture demos (no stack needed; docker optional)"
@@ -42,6 +43,16 @@ install: cli-build
 	@printf '#!/bin/bash\nexec node ~/.local/bin/pma.js "$$@"\n' > ~/.local/bin/pma
 	@chmod +x ~/.local/bin/pma
 	@echo "✓ installed ~/.local/bin/pma  (run: pma login --host http://localhost:8080)"
+
+# Development install: the wrapper runs this working copy's sources through tsx, so an edit is live on
+# the next `pma` with no rebuild and no reinstall. Slower to start than the bundle; use `make install`
+# for the real thing.
+install-dev:
+	@mkdir -p ~/.local/bin
+	@rm -f ~/.local/bin/pma.js
+	@printf '#!/bin/bash\nexec npx --yes tsx %s/pma-cli/src/index.ts "$$@"\n' "$(CURDIR)" > ~/.local/bin/pma
+	@chmod +x ~/.local/bin/pma
+	@echo "✓ installed ~/.local/bin/pma -> $(CURDIR)/pma-cli/src (live; no rebuild needed)"
 
 uninstall:
 	@rm -f ~/.local/bin/pma ~/.local/bin/pma.js

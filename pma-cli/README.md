@@ -8,7 +8,9 @@ subcommands over `fetch`, plus an Ink TUI for interactive chat with streaming, t
 ```bash
 cd pma-cli && npm install && npm run build       # -> bundle/pma.js (single file, node >= 20)
 make install                                    # from the repo root: rebuild + copy into ~/.local/bin
-                                                # (the installed copy is a snapshot — rerun it after pulling)
+                                                # (a snapshot — rerun after pulling or editing)
+make install-dev                                # or: a wrapper that runs this working copy live,
+                                                # so edits need no rebuild and no reinstall
 alias pma="node $PWD/bundle/pma.js"
 
 pma login --host http://localhost:8080           # ~/.pma/config.json
