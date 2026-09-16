@@ -749,7 +749,7 @@ deliberately is not. Each is refused at the edge (400 with the reason) or report
 | --- | --- |
 | **Vendor model ids** (`claude-opus-5`, `gpt-…`) | A model here resolves through rethink's provider table; a bare vendor id only works if a provider row is named that way, or via `COMPAT_MODEL_MAP`. Self-hosting means you bring the model. |
 | **`budget` / list cost** (CMA) | Billing in currency is an Anthropic-hosted concept. rethink meters tokens (`session.usage`) and has no price list. |
-| **Outcomes** (`user.define_outcome`, `span.outcome_evaluation_*`) | A second evaluator model grading the run. That is a product feature, not a protocol one — a plugin's job here. |
+| **Outcomes** (`user.define_outcome`, `span.outcome_evaluation_*`) | Supported, but by a plugin rather than the engine — see §21.4. A file rubric, `span.outcome_evaluation_ongoing`, and the `failed`/`interrupted` results are not produced. |
 | **`session.usage` in the CMA SSE allowlist** | The 0.123.0 SDK drops the frame; it is in `events.list` instead (a vendor SDK bug, not ours). |
 | **Anthropic skills / `skill_id`** (`xlsx`, …) | Anthropic-hosted skill artifacts. rethink has its own skills API with its own ids. |
 | **`model.speed` / `inference_geo`** | Knobs of Anthropic's inference fleet. |
@@ -767,7 +767,32 @@ deliberately is not. Each is refused at the edge (400 with the reason) or report
 | **`file` / `github_repository` session resources** (CMA) | A file is attached to a message (`{type:"document", source:{type:"file", file_id}}`), and a repository is the environment's workspace (`{kind:"git", remote}`). Both exist; they are declared elsewhere. |
 | **`always_ask` on sandbox tools** (CMA) | Confirmation is implemented for MCP tools, where the call leaves the deployment. A sandbox tool is already confined by the sandbox, and holding every `bash` would make the loop unusable. |
 
-### 21.3 Tool confirmation
+### 21.3 Outcomes are a plugin, and that is the point
+
+CMA's outcomes — "define what done means, grade the run against it, send the agent back until it is
+met" — are a behavior of the agent loop, which is exactly what this project puts in plugins rather
+than in the engine. `plugins/outcome` implements the whole loop with the ordinary hooks: `context`
+puts the rubric in the system prompt, `session_end` gathers evidence with a read-only sub-agent
+(`ctx.agent.run`), judges it (`ctx.model.complete`), and on "needs revision" sends feedback back as a
+user message (`ctx.session.send`) — which simply starts the next run. The iteration counter and the
+verdicts live in `ctx.store`.
+
+The dialect is then a thin wiring on top: `user.define_outcome` writes the plugin's store record at
+the session's workspace scope and attaches `COMPAT_OUTCOME_PACKAGE` to that session's agent snapshot;
+the plugin records each verdict as a **structured note** (`plugin.message` with `data`), which the CMA
+layer projects into `span.outcome_evaluation_start` / `_end`; and `session.outcome_evaluations` reads
+the same store record. The plugin knows nothing about Anthropic's API — a second surface would project
+the same notes its own way.
+
+Verified live: an agent told only to "create greet.sh" was graded against a rubric that also demanded
+a README, came back `needs_revision` ("README.md is missing"), was sent back automatically, and the
+second evaluation returned `satisfied` — two turns, four evaluation spans, no client involvement.
+
+What the plugin does not reproduce: a `file` rubric (pass the text), `span.outcome_evaluation_ongoing`,
+the `failed`/`interrupted` results, and per-evaluation `usage` (the judge's tokens land in the
+session's usage, unattributed). One outcome per session.
+
+### 21.4 Tool confirmation
 
 CMA defaults MCP tools to `always_ask`, so honoring it is a correctness matter: a compat layer that
 runs a tool the caller meant to gate has silently escalated privilege.

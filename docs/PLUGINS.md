@@ -65,7 +65,7 @@ model. The handler's `reply` is persisted as `plugin.message` (shown to the user
 
 | capability | what it does | where it runs |
 |---|---|---|
-| `ctx.session.note(text)` | persist a note for the user (`plugin.message`; not model context) | runner |
+| `ctx.session.note(text, data?)` | persist a note for the user (`plugin.message`; not model context). `data` is an optional machine-readable payload a surface can project instead of parsing the text | runner |
 | `ctx.session.send(text)` | queue a user-role message: steers the running turn or starts the next run | runner |
 | `ctx.session.interrupt()` | abort the current run | runner |
 | `ctx.session.setModel("provider/id")` | switch the model for the rest of the run (next turn onward); compaction + context budget follow it | runner |
@@ -140,7 +140,7 @@ Hooks and tools are wired into the pi-agent-core loop in `src/harness/run-turn.t
 | `web-fetch` | `web_fetch` tool over `ctx.fetch` plus a `web-research` skill |
 | `team` | agent teams: roles (`explorer`, `planner`, `worker`, `reviewer`, custom via `/team set`), tools `spawn_agent` / `wait_agents` / `message_agent` / `list_agents` / `agent_patch`; children run in parallel on forked workspaces and talk back with `report_to_parent` |
 | `workflow` | `run_workflow` tool: a deterministic JS script with `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, `args` (the pi-subagents / Claude Code `Workflow` shape) over child sessions; `Date.now` / `Math.random` throw. **See [docs/WORKFLOWS.md](./WORKFLOWS.md).** |
-| `outcome` | Managed-Agents-style outcomes: `/outcome <goal> \| rubric: … \| max: N`; at `session_end` a read-only sub-agent gathers evidence, the model judges it, and `needs_revision` feedback is sent back as a new turn until satisfied or the cap |
+| `outcome` | Managed-Agents-style outcomes: `/outcome <goal> \| rubric: … \| max: N`; at `session_end` a read-only sub-agent gathers evidence, the model judges it, and `needs_revision` feedback is sent back as a new turn until satisfied or the cap. Each verdict is also a **structured note** (`ctx.session.note(text, data)`), which is how the Claude Managed Agents surface projects `span.outcome_evaluation_*` and fills `session.outcome_evaluations` without the plugin knowing that dialect exists (`COMPAT_OUTCOME_PACKAGE`; DESIGN §21.3) |
 | `webhook` | `/webhook set <url> [secret]`; POSTs `session.started` / `session.ended` / `session.error` through `ctx.fetch` with an HMAC-SHA256 `x-pma-signature` |
 | `compactor` | the reference **override-hook** plugin: a `before_compact` handler that reads `ctx.events`, writes a structured summary with `ctx.model`, and returns it as `summary` (skipping the built-in summarizer); the cut point stays the harness's |
 | `_template` | annotated starter — copy the directory, rename it, edit `index.ts`. Shows a tool, a command, a middleware hook, an override hook, and the full `ctx` cheat-sheet |

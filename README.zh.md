@@ -62,6 +62,8 @@ rethink 在同一个引擎上讲三种方言:自己的原生 API,加上两家厂
 
 两个厂商接口都用厂商自己的 SDK(`openai@7.15.0`、`@anthropic-ai/sdk@0.123.0`)驱动路由跑过测试,也都在活栈上端到端验证过。
 
+凡是本质上属于**agent loop 的行为**的厂商功能,这里都用插件实现而不是写进引擎:CMA 的 **outcome**(定义"做完"是什么、给这次 run 打分、不达标就打回重做)就是 `plugins/outcome`,只用普通钩子,方言层在上面接一层(`COMPAT_OUTCOME_PACKAGE`)。见 [DESIGN 第 21.3 节](DESIGN.md)。
+
 模型走 rethink 的 provider 表解析,所以厂商的模型 id 需要有同名 provider 行,或者在 `COMPAT_MODEL_MAP` 里映射。MCP 凭据放在 vault 里,按 URL 匹配到声明的 server(也可以用 `credential_id` 指定),不会存在可复用的 agent 上。`permission_policy` 是 `always_ask` 的 MCP 工具会被挂起,等调用方确认后才执行。
 
 ### 旧的 showcase 适配器(`/agents-api/v1`)

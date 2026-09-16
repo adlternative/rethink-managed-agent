@@ -1,3 +1,10 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** The repo root, so a bundled plugin has an absolute path wherever the process was started from. */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const bundledPlugin = (name: string) => path.join(REPO_ROOT, "plugins", name);
+
 export const env = {
   DATABASE_URL: process.env.DATABASE_URL ?? "postgres://pi:pi@localhost:5432/pi",
   REDIS_URL: process.env.REDIS_URL ?? "redis://localhost:6379",
@@ -105,4 +112,6 @@ export const env = {
   COMPAT_TEAM_PACKAGE: process.env.COMPAT_TEAM_PACKAGE ?? "",
   /** Package added when a {type:'web_search'} tool is declared (e.g. the web-search plugin path); empty = accepted-and-ignored. */
   COMPAT_WEBSEARCH_PACKAGE: process.env.COMPAT_WEBSEARCH_PACKAGE ?? "",
+  /** Package that implements outcomes (user.define_outcome); empty = the event is refused with a 400. */
+  COMPAT_OUTCOME_PACKAGE: process.env.COMPAT_OUTCOME_PACKAGE ?? bundledPlugin("outcome"),
 };

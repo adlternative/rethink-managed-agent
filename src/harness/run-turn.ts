@@ -638,7 +638,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       agentsStop: async (child) => { await ownChild(child); await deps.children.stop(child); },
       agentsList: async () => Promise.all((await deps.children.list(sessionId)).map((c) => childStatus(c.id))),
       agentsPatch: async (child) => { const c = await ownChild(child); const ws = await deps.getWorkspace(c.workspace_id); return ws?.ref.kind === "git" ? ws.ref.patch ?? null : null; },
-      sessionNote: async (plugin, text) => { await emit({ type: "plugin.message", plugin, content: [{ type: "text", text }] }); },
+      sessionNote: async (plugin, text, data) => { await emit({ type: "plugin.message", plugin, content: [{ type: "text", text }], ...(data ? { data } : {}) }); },
       // Mid-run runtime switches (applied on the next turn via prepareNextTurn).
       sessionSetModel: async (ref) => {
         const [provider, ...rest] = ref.split("/");

@@ -171,8 +171,11 @@ export interface FetchCapability {
 }
 
 export interface SessionCapability {
-  /** Persist a plugin-authored note on the session (event plugin.message; shown to the user, not sent to the model). */
-  note(text: string): Promise<void>;
+  /**
+   * Persist a plugin-authored note on the session (event plugin.message; shown to the user, not sent
+   * to the model). `data` rides along as a machine-readable payload for surfaces that project notes.
+   */
+  note(text: string, data?: Record<string, unknown>): Promise<void>;
   /** Queue a user-role message for the model: steers the current run or starts the next one. */
   send(text: string): Promise<void>;
   /** Interrupt the current run. */

@@ -33,7 +33,7 @@ export interface Capabilities {
   agentsStop(child: string): Promise<void>;
   agentsList(): Promise<unknown>;
   agentsPatch(child: string): Promise<string | null>;
-  sessionNote(plugin: string, text: string): Promise<void>;
+  sessionNote(plugin: string, text: string, data?: Record<string, unknown>): Promise<void>;
   sessionSend(text: string): Promise<void>;
   sessionInterrupt(): Promise<void>;
   sessionSetModel(model: string): Promise<{ model: string }>;
@@ -184,7 +184,7 @@ export class PluginHost {
       case "agents.stop": await caps.agentsStop((params as RunnerMethods["agents.stop"]["params"]).child); return null;
       case "agents.list": return caps.agentsList();
       case "agents.patch": return caps.agentsPatch((params as RunnerMethods["agents.patch"]["params"]).child);
-      case "session.note": { const p = params as RunnerMethods["session.note"]["params"]; await caps.sessionNote(p.plugin, p.text); return null; }
+      case "session.note": { const p = params as RunnerMethods["session.note"]["params"]; await caps.sessionNote(p.plugin, p.text, p.data); return null; }
       case "session.send": await caps.sessionSend((params as RunnerMethods["session.send"]["params"]).text); return null;
       case "session.interrupt": await caps.sessionInterrupt(); return null;
       case "session.setModel": return caps.sessionSetModel((params as RunnerMethods["session.setModel"]["params"]).model);

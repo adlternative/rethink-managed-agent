@@ -18,6 +18,7 @@ const st = vi.hoisted(() => ({
   creds: new Map<string, Map<string, any>>(),
   stores: new Map<string, any>(),
   files: new Map<string, any>(),
+  plugin: new Map<string, any>(),
   sent: [] as { session: string; inputs: any[] }[],
   n: 0,
 }));
@@ -78,6 +79,10 @@ vi.mock("../src/infra/db.ts", async (orig) => {
       byId: async (id: string, vaultIds: string[]) => { for (const v of vaultIds) for (const cr of st.creds.get(v)?.values() ?? []) if (cr.id === id) return cr; return null; },
       delete: async (vaultId: string, idOrName: string) => { for (const [name, cr] of st.creds.get(vaultId) ?? []) if (cr.id === idOrName || name === idOrName) return st.creds.get(vaultId)!.delete(name); return false; },
     },
+    pluginStore: {
+      get: async (scope: string, owner: string, key: string) => st.plugin.get(`${scope}/${owner}/${key}`) ?? null,
+      set: async (scope: string, owner: string, key: string, value: unknown) => { st.plugin.set(`${scope}/${owner}/${key}`, value); },
+    },
     files: {
       create: async (input: any) => { const f = { id: `file_${++st.n}`, owner_id: input.owner_id, type: "file", filename: input.filename, mime_type: input.mime_type, size_bytes: input.data.length, sha256: "x", downloadable: true, created_at: "2026-01-01T00:00:00.000Z" }; st.files.set(f.id, { ...f, data: input.data }); const { data: _d, ...pub } = st.files.get(f.id); return pub; },
       list: async (sc?: any) => [...st.files.values()].filter((f) => owned(f, sc)).map(({ data: _d, ...pub }) => pub),
@@ -132,6 +137,8 @@ const call = (method: string, p: string, body?: unknown, headers: Record<string,
   app.request(`/anthropic${p}${p.includes("?") ? "&" : "?"}beta=true`, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
 const json = async (method: string, p: string, body?: unknown, headers?: Record<string, string>) => (await call(method, p, body, headers)).json();
 
+const log = (sid: string, payloads: any[]) => st.events.set(sid, payloads.map((payload, i) => ({ id: `e${i}`, seq: i + 1, session_id: sid, type: payload.type, payload, created_at: "2026-01-01T00:00:00.000Z" })));
+
 const agentSpec = {
   name: "GitHub Assistant",
   model: "qoder/auto",
@@ -145,7 +152,7 @@ const agentSpec = {
 };
 
 beforeEach(() => {
-  for (const m of [st.agents, st.sessions, st.environments, st.workspaces, st.events, st.vaults, st.creds, st.stores, st.files]) m.clear();
+  for (const m of [st.agents, st.sessions, st.environments, st.workspaces, st.events, st.vaults, st.creds, st.stores, st.files, st.plugin]) m.clear();
   st.sent.length = 0;
   st.environments.set("env_1", { id: "env_1", owner_id: "prc_a", name: "e", provider: "docker", network: "bridge", workspace: { kind: "empty" }, created_at: "2026-01-01T00:00:00.000Z" });
 });
@@ -282,6 +289,58 @@ describe("sessions", () => {
     }
   });
 
+  it("an outcome is graded by the outcome plugin: defining one attaches it and records the goal", async () => {
+    const agent = await mkAgent();
+    const session = await json("POST", "/v1/sessions", {
+      agent: agent.id, environment_id: "env_1",
+      initial_events: [
+        { type: "user.message", content: [{ type: "text", text: "add a test" }] },
+        { type: "user.define_outcome", description: "the test suite passes", rubric: { type: "text", content: "npm test exits 0" }, max_iterations: 5 },
+      ],
+    });
+    // the plugin that grades outcomes is attached to this session's agent snapshot
+    expect(st.sessions.get(session.id).agent.packages.some((p: string) => p.endsWith("/plugins/outcome"))).toBe(true);
+    // and the record it grades against is in its store, at the session's workspace scope
+    const stored = st.plugin.get(`workspace/${st.sessions.get(session.id).workspace_id}/outcome`);
+    expect(stored).toMatchObject({ goal: "the test suite passes", rubric: "npm test exits 0", max: 5, status: "open", iteration: 0, evaluations: [] });
+    expect(st.sent.at(-1)!.inputs).toEqual([{ type: "user.message", content: [{ type: "text", text: "add a test" }] }]);
+
+    // the plugin's structured notes come back as this dialect's evaluation spans
+    st.plugin.set(`workspace/${st.sessions.get(session.id).workspace_id}/outcome`, {
+      ...stored, iteration: 2, status: "satisfied",
+      evaluations: [
+        { outcome_id: stored.outcome_id, iteration: 1, result: "needs_revision", explanation: "no test file", completed_at: "2026-01-01T00:01:00.000Z" },
+        { outcome_id: stored.outcome_id, iteration: 2, result: "satisfied", explanation: "", completed_at: "2026-01-01T00:02:00.000Z" },
+      ],
+    });
+    const read = await json("GET", `/v1/sessions/${session.id}`);
+    expect(read.outcome_evaluations.map((e: any) => [e.iteration, e.result])).toEqual([[1, "needs_revision"], [2, "satisfied"]]);
+    expect(read.outcome_evaluations[0]).toMatchObject({ type: "outcome_evaluation", description: "the test suite passes" });
+
+    log(session.id, [
+      { type: "session.updated", changes: { outcome: { outcome_id: stored.outcome_id, description: "the test suite passes", max_iterations: 5 } } },
+      { type: "plugin.message", plugin: "outcome", content: [{ type: "text", text: "outcome needs revision" }], data: { kind: "outcome_evaluation", outcome_id: stored.outcome_id, iteration: 1, result: "needs_revision", explanation: "no test file" } },
+    ]);
+    const events = (await json("GET", `/v1/sessions/${session.id}/events`)).data;
+    expect(events.map((e: any) => e.type)).toEqual(["user.define_outcome", "span.outcome_evaluation_start", "span.outcome_evaluation_end"]);
+    expect(events[2]).toMatchObject({ result: "needs_revision", explanation: "no test file", iteration: 1 });
+  });
+
+  it("an outcome definition is validated, and a file rubric is refused", async () => {
+    const agent = await mkAgent();
+    const bad: [any, RegExp][] = [
+      [{ type: "user.define_outcome", rubric: { type: "text", content: "x" } }, /description/],
+      [{ type: "user.define_outcome", description: "d" }, /rubric/],
+      [{ type: "user.define_outcome", description: "d", rubric: { type: "file", file_id: "file_1" } }, /file rubric/],
+      [{ type: "user.define_outcome", description: "d", rubric: { type: "text", content: "x" }, max_iterations: 99 }, /max_iterations/],
+    ];
+    for (const [event, re] of bad) {
+      const res = await call("POST", "/v1/sessions", { agent: agent.id, environment_id: "env_1", initial_events: [event] });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error.message).toMatch(re);
+    }
+  });
+
   it("update patches title and metadata; changing the agent or vaults mid-session is refused", async () => {
     const agent = await mkAgent();
     const session = await json("POST", "/v1/sessions", { agent: agent.id, environment_id: "env_1", title: "one" });
@@ -311,7 +370,6 @@ describe("session events", () => {
     const session = await json("POST", "/v1/sessions", { agent: agent.id, environment_id: "env_1" });
     return session;
   };
-  const log = (sid: string, payloads: any[]) => st.events.set(sid, payloads.map((payload, i) => ({ id: `e${i}`, seq: i + 1, session_id: sid, type: payload.type, payload, created_at: "2026-01-01T00:00:00.000Z" })));
 
   it("translates the engine's log into the dialect's event types", async () => {
     const session = await seed();

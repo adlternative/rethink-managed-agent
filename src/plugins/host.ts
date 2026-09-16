@@ -94,7 +94,7 @@ function makeContext(session: SessionInfo, plugin = "plugin"): PluginContext {
     workspaceId: session.workspaceId,
     plugin,
     session: {
-      note: (text) => call("session.note", { plugin, text }).then(() => undefined),
+      note: (text, data) => call("session.note", { plugin, text, data }).then(() => undefined),
       send: (text) => call("session.send", { text }).then(() => undefined),
       interrupt: () => call("session.interrupt", {}).then(() => undefined),
       setModel: (model) => call("session.setModel", { model }),

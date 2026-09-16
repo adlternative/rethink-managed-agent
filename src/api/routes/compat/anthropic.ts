@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { files, memoryStores, repos, sessionConfig, vaults, vaultCredentials } from "../../../infra/db.ts";
+import { files, memoryStores, pluginStore, repos, sessionConfig, vaults, vaultCredentials } from "../../../infra/db.ts";
+import { randomBytes } from "node:crypto";
+import { env } from "../../../shared/env.ts";
 import { appendEvents, listEvents } from "../../../infra/events.ts";
 import { subscribe } from "../../../infra/pubsub.ts";
 import { hasMcpCredentials, sealMcpServers } from "../../../infra/mcp-credentials.ts";
@@ -14,7 +16,7 @@ import { initialRef } from "../sessions.ts";
 import { validateMounts } from "../memories.ts";
 import { fileBody, readUpload } from "../files.ts";
 import { credentialInput, validateMcpCredentialIds, validateVaultIds, type CredentialBody } from "../vaults.ts";
-import { cmaAgentToRethink, cmaContent, toCmaAgent, toCmaEvents, toCmaSession, type CmaAgentSpec, type CmaCallKinds } from "./anthropic-translate.ts";
+import { cmaAgentToRethink, cmaContent, toCmaAgent, toCmaEvents, toCmaSession, type CmaAgentSpec, type CmaCallKinds, type StoredOutcome } from "./anthropic-translate.ts";
 
 /**
  * The Claude Managed Agents surface, mounted at /anthropic so `@anthropic-ai/sdk` works with
@@ -132,16 +134,20 @@ export const anthropicAgents = new Hono()
     await validateMcpCredentialIds(agent.mcp_servers, vault_ids);
     if (hasMcpCredentials(agent.mcp_servers) && !secretsConfigured()) throw invalid("MCP server credentials need PMA_SECRET_KEY to be stored encrypted");
     const memory_stores = await validateMounts(cmaResourceMounts(body.resources), sc);
-    const initial = body.initial_events !== undefined ? cmaInitialEvents(body.initial_events) : [];
+    const { events: initial, outcome } = cmaInitialEvents(body.initial_events);
+    if (outcome && !env.COMPAT_OUTCOME_PACKAGE) throw invalid("outcomes need COMPAT_OUTCOME_PACKAGE to be configured on the api and runner");
     const metadata = { ...(body.metadata ?? {}), ...(body.title ? { title: body.title } : {}) };
 
     const workspace = await repos.workspaces.create(environment.workspace, initialRef(environment.workspace) as WorkspaceRef, owner);
+    // An outcome is graded by a plugin, so declaring one attaches it to this session's agent snapshot.
+    const packages = outcome ? [...new Set([...(agent.packages ?? []), env.COMPAT_OUTCOME_PACKAGE])] : agent.packages;
     const session = await repos.sessions.create({
       owner_id: owner, agent_id: agentId, environment_id: environment.id, workspace_id: workspace.id,
-      agent: { ...agent, mcp_servers: sealMcpServers(agent.mcp_servers) }, vault_ids, memory_stores, metadata,
+      agent: { ...agent, packages, mcp_servers: sealMcpServers(agent.mcp_servers) }, vault_ids, memory_stores, metadata,
     });
+    if (outcome) await defineOutcome(session, outcome);
     if (initial.length) await sendUserEvents(session, initial);
-    return c.json(toCmaSession(session), 201);
+    return c.json(toCmaSession(session, { outcome: await outcomeOf(session) }), 201);
   })
   .get("/v1/sessions", async (c) => {
     const statuses = c.req.queries("statuses") ?? [];
@@ -154,7 +160,7 @@ export const anthropicAgents = new Hono()
     const data = page.data.filter((s) => !statuses.length || statuses.includes(s.status)).map((s) => toCmaSession(s));
     return c.json({ data, next_page: page.has_more ? (data[data.length - 1]?.id ?? null) : null, prev_page: null });
   })
-  .get("/v1/sessions/:id", async (c) => c.json(toCmaSession(await loadSession(c))))
+  .get("/v1/sessions/:id", async (c) => { const s = await loadSession(c); return c.json(toCmaSession(s, { outcome: await outcomeOf(s) })); })
   /** Update: title and metadata (a patch). Changing the agent mid-session is native-API territory. */
   .post("/v1/sessions/:id", async (c) => {
     const session = await loadSession(c);
@@ -165,7 +171,7 @@ export const anthropicAgents = new Hono()
     const patch: Record<string, string | null> = { ...(body.metadata ?? {}) };
     if (body.title !== undefined) patch.title = body.title;
     const metadata = Object.keys(patch).length ? await sessionConfig.patchMetadata(session.id, patch, scope(c)) : session.metadata;
-    return c.json(toCmaSession({ ...session, metadata: metadata ?? {} }));
+    return c.json(toCmaSession({ ...session, metadata: metadata ?? {} }, { outcome: await outcomeOf(session) }));
   })
   .post("/v1/sessions/:id/archive", async (c) => {
     const session = await loadSession(c);
@@ -185,7 +191,13 @@ export const anthropicAgents = new Hono()
     const session = await loadSession(c);
     const body = await readJson<{ events?: unknown }>(c);
     if (!Array.isArray(body.events) || body.events.length === 0) throw invalid("events must be a non-empty array");
-    const inputs = cmaEventsToUserEvents(body.events, session);
+    const outcome = body.events.find((e) => (e as { type?: string })?.type === "user.define_outcome");
+    if (outcome) {
+      if (!env.COMPAT_OUTCOME_PACKAGE) throw invalid("outcomes need COMPAT_OUTCOME_PACKAGE to be configured on the api and runner");
+      if (!(session.agent.packages ?? []).includes(env.COMPAT_OUTCOME_PACKAGE)) throw invalid("this session was not created with an outcome; define one in initial_events at create time");
+      await defineOutcome(session, cmaOutcome(outcome as Record<string, unknown>));
+    }
+    const inputs = cmaEventsToUserEvents(body.events.filter((e) => (e as { type?: string })?.type !== "user.define_outcome"), session);
     const appended = await sendUserEvents(session, inputs);
     const calls: CmaCallKinds = new Map();
     return c.json({ data: appended.flatMap((e) => toCmaEvents(e, session, calls)) });
@@ -379,6 +391,9 @@ async function allEvents(sessionId: string): Promise<SessionEvent[]> {
   }
 }
 
+/** The outcome record the outcome plugin keeps for this session's workspace, if any. */
+const outcomeOf = async (s: SessionResource) => (await pluginStore.get("workspace", s.workspace_id, "outcome")) as StoredOutcome | null;
+
 /** Metadata patch semantics: a string upserts its key, null deletes it, an absent map changes nothing. */
 function patchMetadata(current: Record<string, string>, patch: Record<string, string | null> | null | undefined): Record<string, string> {
   if (!patch) return current;
@@ -429,15 +444,56 @@ function cmaResourceMounts(resources: unknown): unknown[] {
   });
 }
 
-/** `initial_events` on session create: user messages only (outcomes are not modelled here). */
-function cmaInitialEvents(events: unknown): UserEventInput[] {
+/** `initial_events` on session create: user messages, plus at most one outcome definition. */
+function cmaInitialEvents(events: unknown): { events: UserEventInput[]; outcome: CmaOutcome | null } {
+  if (events === undefined || events === null) return { events: [], outcome: null };
   if (!Array.isArray(events)) throw invalid("initial_events must be an array");
   if (events.length > 50) throw invalid("at most 50 initial_events");
-  return events.map((e: { type?: string; content?: unknown }) => {
-    if (e?.type === "user.message") return { type: "user.message", content: cmaContent(e.content, "user.message") };
-    if (e?.type === "user.define_outcome") throw invalid("user.define_outcome is not supported: rethink does not run outcome evaluations");
-    throw invalid(`initial_events only accepts user.message (got ${JSON.stringify(e?.type)})`);
-  });
+  let outcome: CmaOutcome | null = null;
+  const out: UserEventInput[] = [];
+  for (const e of events as { type?: string; content?: unknown }[]) {
+    if (e?.type === "user.message") { out.push({ type: "user.message", content: cmaContent(e.content, "user.message") }); continue; }
+    if (e?.type === "user.define_outcome") {
+      if (outcome) throw invalid("at most one user.define_outcome per session");
+      outcome = cmaOutcome(e as Record<string, unknown>);
+      continue;
+    }
+    throw invalid(`initial_events only accepts user.message and user.define_outcome (got ${JSON.stringify(e?.type)})`);
+  }
+  return { events: out, outcome };
+}
+
+export interface CmaOutcome { description: string; rubric: string; max_iterations: number }
+
+/** Validate a `user.define_outcome` event. A file rubric is refused: the grader reads text, not file ids. */
+function cmaOutcome(e: Record<string, unknown>): CmaOutcome {
+  const description = e.description;
+  if (typeof description !== "string" || !description) throw invalid("user.define_outcome requires a description");
+  const rubric = e.rubric as { type?: string; content?: string; file_id?: string } | undefined;
+  if (rubric?.type === "file") throw invalid("a file rubric is not supported: pass {type:'text', content} (upload the file's text yourself)");
+  if (rubric?.type !== "text" || typeof rubric.content !== "string" || !rubric.content) throw invalid("user.define_outcome requires rubric {type:'text', content}");
+  const max = e.max_iterations === undefined ? 3 : Number(e.max_iterations);
+  if (!Number.isInteger(max) || max < 1 || max > 20) throw invalid("max_iterations must be an integer between 1 and 20");
+  return { description, rubric: rubric.content, max_iterations: max };
+}
+
+/**
+ * Define the session's outcome: the record the outcome plugin grades against, written to the plugin
+ * store at the session's workspace scope (where the plugin reads it), plus a session.updated event so
+ * the log shows it and the event list can project it back as user.define_outcome.
+ */
+async function defineOutcome(session: SessionResource, outcome: CmaOutcome): Promise<void> {
+  const record = {
+    outcome_id: `outc_${randomBytes(8).toString("hex")}`,
+    goal: outcome.description,
+    rubric: outcome.rubric,
+    iteration: 0,
+    max: outcome.max_iterations,
+    status: "open",
+    evaluations: [],
+  };
+  await pluginStore.set("workspace", session.workspace_id, "outcome", record);
+  await appendEvents(session.id, [{ type: "session.updated", changes: { outcome: { outcome_id: record.outcome_id, description: record.goal, max_iterations: record.max } } }]);
 }
 
 /**

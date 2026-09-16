@@ -237,8 +237,20 @@ function toCmaSessionAgent(session: SessionResource) {
   };
 }
 
+/** The outcome record the outcome plugin keeps, as this dialect's `outcome_evaluation` objects. */
+export interface StoredOutcome {
+  outcome_id: string; goal: string; rubric: string; iteration: number; max: number;
+  status: "open" | "satisfied" | "max_iterations_reached";
+  evaluations?: { outcome_id: string; iteration: number; result: string; explanation: string; completed_at: string }[];
+}
+export const toOutcomeEvaluations = (o: StoredOutcome | null | undefined) =>
+  (o?.evaluations ?? []).map((e) => ({
+    type: "outcome_evaluation" as const, outcome_id: e.outcome_id, description: o!.goal,
+    iteration: e.iteration, result: e.result, explanation: e.explanation, completed_at: e.completed_at,
+  }));
+
 /** A rethink session as CMA's `session` object. */
-export function toCmaSession(session: SessionResource, opts: { archived?: boolean } = {}) {
+export function toCmaSession(session: SessionResource, opts: { archived?: boolean; outcome?: StoredOutcome | null } = {}) {
   const u = session.usage;
   return {
     type: "session" as const,
@@ -251,7 +263,7 @@ export function toCmaSession(session: SessionResource, opts: { archived?: boolea
     vault_ids: session.vault_ids ?? [],
     budget: null,
     resources: (session.memory_stores ?? []).map((m) => ({ type: "memory_store" as const, memory_store_id: m.memory_store_id, mount_path: m.mount_path })),
-    outcome_evaluations: [],
+    outcome_evaluations: toOutcomeEvaluations(opts.outcome),
     stats: { active_seconds: 0, duration_seconds: 0 },
     usage: {
       input_tokens: u?.input ?? 0,
@@ -322,6 +334,20 @@ export function toCmaEvents(e: SessionEvent, session: SessionResource, calls: Cm
       { id: `sevt_${e.seq}_ask`, processed_at: iso(e.created_at as unknown as string), type: p.mcp_server ? "agent.mcp_tool_use" : "agent.tool_use", name: p.name, ...(p.mcp_server ? { mcp_server_name: p.mcp_server } : {}), input: {}, evaluated_permission: "ask", evaluation: { type: "always_ask" } },
       { id: `sevt_${e.seq}`, processed_at: iso(e.created_at as unknown as string), type: "session.status_idle", stop_reason: { type: "requires_action", event_ids: [`sevt_${p.tool_use_id}`] } },
     ];
+  }
+  // an outcome evaluation is a plugin note with structured data: this dialect spells it as a span pair
+  if (p.type === "plugin.message" && (p.data as { kind?: string } | undefined)?.kind === "outcome_evaluation") {
+    const d = p.data as { outcome_id: string; iteration: number; result: string; explanation: string };
+    const at = iso(e.created_at as unknown as string);
+    return [
+      { id: `sevt_${e.seq}_start`, processed_at: at, type: "span.outcome_evaluation_start", outcome_id: d.outcome_id, iteration: d.iteration },
+      { id: `sevt_${e.seq}`, processed_at: at, type: "span.outcome_evaluation_end", outcome_evaluation_start_id: `sevt_${e.seq}_start`, outcome_id: d.outcome_id, iteration: d.iteration, result: d.result, explanation: d.explanation, usage: null },
+    ];
+  }
+  // a defined outcome is recorded as a session update; this dialect calls that event user.define_outcome
+  if (p.type === "session.updated" && (p.changes as { outcome?: unknown } | undefined)?.outcome) {
+    const o = (p.changes as { outcome: { outcome_id: string; description: string; max_iterations: number } }).outcome;
+    return [{ id: `sevt_${e.seq}`, processed_at: iso(e.created_at as unknown as string), type: "user.define_outcome", outcome_id: o.outcome_id, description: o.description, max_iterations: o.max_iterations }];
   }
   // answering a held call resumes the session, which this dialect reports as a status change
   if (p.type === "user.tool_confirmation") {

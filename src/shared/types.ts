@@ -479,8 +479,12 @@ export type SessionEventPayload =
   | { type: "agent.thread_context_compacted"; summary: string; first_kept_seq: number; tokens_before: number; tokens_after: number }
   /** session configuration changed (mounts / skills); carries only the changed fields, applies from the next turn */
   | { type: "session.updated"; changes: Record<string, unknown> }
-  /** a note written by a plugin for the user (not part of the model context) */
-  | { type: "plugin.message"; plugin: string; content: ContentBlock[] }
+  /**
+   * A note written by a plugin for the user (not part of the model context). `data` is an optional
+   * machine-readable payload the plugin attaches so a surface can project the note into its own
+   * vocabulary (an outcome evaluation, a policy decision) instead of parsing the text.
+   */
+  | { type: "plugin.message"; plugin: string; content: ContentBlock[]; data?: Record<string, unknown> }
   /** a sub-agent session was created for this session */
   | { type: "session.thread_created"; child_session_id: SessionId; env: string; task: string; role?: string; name?: string }
   /**

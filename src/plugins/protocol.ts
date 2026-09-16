@@ -37,7 +37,7 @@ export interface RunnerMethods {
   "agents.list": { params: { session: SessionInfo }; result: unknown };
   "agents.patch": { params: { session: SessionInfo; child: string }; result: string | null };
   log: { params: { session: SessionInfo; args: unknown[] }; result: null };
-  "session.note": { params: { session: SessionInfo; plugin: string; text: string }; result: null };
+  "session.note": { params: { session: SessionInfo; plugin: string; text: string; data?: Record<string, unknown> }; result: null };
   "session.send": { params: { session: SessionInfo; text: string }; result: null };
   "session.interrupt": { params: { session: SessionInfo }; result: null };
   "session.setModel": { params: { session: SessionInfo; model: string }; result: { model: string } };

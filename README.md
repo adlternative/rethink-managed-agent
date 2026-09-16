@@ -335,6 +335,11 @@ list of what deliberately cannot be compatible: [DESIGN.md §21](DESIGN.md).
 Both vendor surfaces are tested against the vendors' own SDKs (`openai@7.15.0`,
 `@anthropic-ai/sdk@0.123.0`) driving the router, and verified live end to end.
 
+Where a vendor feature is really a *behavior of the agent loop*, it is a plugin rather than engine
+code: CMA's **outcomes** (define what "done" means, grade the run, send the agent back until the rubric
+is met) are `plugins/outcome` driven by ordinary hooks, with the dialect wired on top
+(`COMPAT_OUTCOME_PACKAGE`). See [DESIGN §21.3](DESIGN.md).
+
 A model resolves through rethink's provider table, so a vendor model id needs a provider row of that
 name or an entry in `COMPAT_MODEL_MAP`. MCP credentials live in a vault and are matched to a declared
 server by URL (or named with `credential_id`), never stored on a reusable agent. An MCP tool whose
