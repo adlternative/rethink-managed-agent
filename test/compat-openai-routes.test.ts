@@ -52,8 +52,9 @@ vi.mock("../src/infra/db.ts", async (orig) => {
       delete: async (id: string, scope?: any) => (owned(st.vaults.get(id), scope) ? st.vaults.delete(id) : false),
     },
     vaultCredentials: {
-      put: async (vaultId: string, name: string, value: string) => { st.calls.put.push({ vaultId, name, value }); (st.creds.get(vaultId) ?? st.creds.set(vaultId, new Map()).get(vaultId)!).set(name, value); return { id: `cred_${name}`, vault_id: vaultId, name, metadata: {}, created_at: "2026-01-01T00:00:00.000Z" }; },
+      put: async (vaultId: string, input: any) => { st.calls.put.push({ vaultId, ...input }); (st.creds.get(vaultId) ?? st.creds.set(vaultId, new Map()).get(vaultId)!).set(input.name, input); return { id: `cred_${input.name}`, vault_id: vaultId, name: input.name, kind: input.kind, mcp_server_url: input.mcp_server_url ?? null, metadata: {}, created_at: "2026-01-01T00:00:00.000Z" }; },
       list: async (vaultId: string) => [...(st.creds.get(vaultId)?.keys() ?? [])].map((name) => ({ id: `cred_${name}`, vault_id: vaultId, name, metadata: {}, created_at: "x" })),
+      byId: async (id: string, vaultIds: string[]) => { for (const v of vaultIds) for (const [name, input] of st.creds.get(v) ?? []) if (`cred_${name}` === id) return { id, vault_id: v, name, kind: input.kind, mcp_server_url: input.mcp_server_url ?? null, metadata: {}, created_at: "x" }; return null; },
       delete: async (vaultId: string, name: string) => st.creds.get(vaultId)?.delete(name) ?? false,
     },
   };
@@ -149,6 +150,39 @@ describe("POST /agents/sessions", () => {
     expect(body).toMatchObject({ object: "agent.session", status: "idle", environment: { environment_id: "env_1" }, vault_ids: ["vault_z"] });
     expect(st.calls.sendUserEvents).toEqual([{ session: body.id, inputs: [{ type: "user.message", content: [{ type: "text", text: "hello" }] }] }]);
     expect(st.sessions.get(body.id).agent.client_tools.map((t: any) => t.name)).toEqual(["lookup"]);
+  });
+
+  it("an mcp tool may name a vault credential; one outside the session's vaults, or an env var, is rejected", async () => {
+    st.vaults.set("vault_z", { id: "vault_z", owner_id: "prc_a", name: null, metadata: {}, created_at: "2026-01-01T00:00:00.000Z" });
+    st.vaults.set("vault_other", { id: "vault_other", owner_id: "prc_a", name: null, metadata: {}, created_at: "2026-01-01T00:00:00.000Z" });
+    const put = (vid: string, body: any) => call("POST", `/vaults/${vid}/credentials`, body);
+    await put("vault_z", { name: "docs", auth: { type: "static_bearer", mcp_server_url: "https://docs.example.com/mcp", token: "tok" } });
+    await put("vault_z", { name: "PLAIN_ENV", value: "v" });
+    await put("vault_other", { name: "elsewhere", auth: { type: "static_bearer", mcp_server_url: "https://x.example.com/mcp", token: "tok" } });
+    const withServer = (extra: Record<string, unknown>) => ({
+      ...good,
+      agent: { model: "x", tools: [{ type: "mcp", server_label: "docs", transport: { type: "http", server_url: "https://docs.example.com/mcp" }, ...extra }] },
+      vault_ids: ["vault_z"],
+    });
+
+    const ok = await call("POST", "/agents/sessions", withServer({ credential_id: "cred_docs" }));
+    expect(ok.status).toBe(201);
+    expect(st.sessions.get((await ok.json()).id).agent.mcp_servers).toEqual([{ label: "docs", url: "https://docs.example.com/mcp", credential_id: "cred_docs" }]);
+
+    for (const bad of [{ credential_id: "cred_elsewhere" }, { credential_id: "cred_nope" }, { credential_id: "cred_PLAIN_ENV" }]) {
+      const res = await call("POST", "/agents/sessions", withServer(bad));
+      expect(res.status).toBe(400);
+      expect((await res.json()).error.message).toMatch(/credential/);
+    }
+    // a server without credentials needs no secret key at all: the runner matches one by URL at run time
+    st.secrets = false;
+    expect((await call("POST", "/agents/sessions", withServer({}))).status).toBe(201);
+  });
+
+  it("rejects an mcp tool asking for the stdio transport instead of ignoring it", async () => {
+    const res = await call("POST", "/agents/sessions", { ...good, agent: { model: "x", tools: [{ type: "mcp", server_label: "local", transport: { type: "stdio", command: "npx", cwd: "/tmp" } }] } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toMatch(/stdio/);
   });
 
   it("requires agent, and 404s an environment the caller does not own", async () => {
@@ -494,7 +528,11 @@ describe("vault credentials", () => {
 
   it("(b) static_bearer token, mcp_oauth access_token and plain value are stored; (e) the secret is never echoed", async () => {
     const vid = await mkVault();
-    const bodies = [{ name: "A", auth: { type: "static_bearer", token: "tok-A" } }, { name: "B", auth: { type: "mcp_oauth", access_token: "tok-B" } }, { name: "C", value: "tok-C" }];
+    const bodies = [
+      { name: "A", auth: { type: "static_bearer", mcp_server_url: "https://a.example.com/mcp", token: "tok-A" } },
+      { name: "B", auth: { type: "mcp_oauth", mcp_server_url: "https://b.example.com/mcp", access_token: "tok-B" } },
+      { name: "C", value: "tok-C" },
+    ];
     for (const b of bodies) {
       const res = await call("POST", `/vaults/${vid}/credentials`, b);
       expect(res.status).toBe(201);
@@ -512,7 +550,11 @@ describe("vault credentials", () => {
     const vid = await mkVault();
     expect((await call("POST", `/vaults/${vid}/credentials`, { value: "x" })).status).toBe(400);
     expect((await call("POST", `/vaults/${vid}/credentials`, { name: "K", value: 123 })).status).toBe(400);
-    expect((await call("POST", `/vaults/${vid}/credentials`, { name: "K", auth: { type: "static_bearer" } })).status).toBe(400);
+    expect((await call("POST", `/vaults/${vid}/credentials`, { name: "K", auth: { type: "static_bearer" } })).status).toBe(400); // no mcp_server_url
+    expect((await call("POST", `/vaults/${vid}/credentials`, { name: "K", auth: { type: "static_bearer", mcp_server_url: "https://a.example.com/mcp" } })).status).toBe(400); // no token
+    expect((await call("POST", `/vaults/${vid}/credentials`, { name: "K", auth: { type: "static_bearer", mcp_server_url: "not-a-url", token: "t" } })).status).toBe(400);
+    expect((await call("POST", `/vaults/${vid}/credentials`, { name: "K", auth: { type: "environment_variable" } })).status).toBe(400);
+    expect((await call("POST", `/vaults/${vid}/credentials`, { name: "K", auth: { type: "wat", token: "t" } })).status).toBe(400);
     expect(st.calls.put).toEqual([]);
   });
 

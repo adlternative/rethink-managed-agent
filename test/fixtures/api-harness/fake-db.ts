@@ -222,13 +222,19 @@ export const vaults = {
 };
 
 export const vaultCredentials = {
-  async put(vaultId: string, name: string, value: string, metadata?: Row) {
+  async put(vaultId: string, input: Row) {
+    const { name, value, metadata, ...rest } = input as { name: string; value: string; metadata?: Row };
     store.ops.push(`vaultCredentials.put:${vaultId}/${name}`);
-    const r = { id: newId("cred"), vault_id: vaultId, name, secret: seal(value), metadata: metadata ?? {}, created_at: now() };
-    store.creds.set(`${vaultId}/${name}`, r); const { secret: _s, ...pub } = r; return clone(pub);
+    const r = { id: newId("cred"), vault_id: vaultId, name, kind: "environment_variable", mcp_server_url: null, ...rest, secret: seal(value), metadata: metadata ?? {}, created_at: now() };
+    store.creds.set(`${vaultId}/${name}`, r); const { secret: _s, refresh: _r, ...pub } = r as Row; return clone(pub);
   },
-  async list(vaultId: string) { return [...store.creds.values()].filter((c) => c.vault_id === vaultId).map(({ secret: _s, ...pub }) => clone(pub)); },
-  async get(vaultId: string, name: string) { const r = store.creds.get(`${vaultId}/${name}`); if (!r) return null; const { secret: _s, ...pub } = r; return clone(pub); },
-  async delete(vaultId: string, name: string) { return store.creds.delete(`${vaultId}/${name}`); },
+  async list(vaultId: string) { return [...store.creds.values()].filter((c) => c.vault_id === vaultId).map(({ secret: _s, refresh: _r, ...pub }) => clone(pub)); },
+  async get(vaultId: string, name: string) { const r = store.creds.get(`${vaultId}/${name}`); if (!r) return null; const { secret: _s, refresh: _r, ...pub } = r; return clone(pub); },
+  async byId(id: string, vaultIds: string[]) { const r = [...store.creds.values()].find((c) => c.id === id && vaultIds.includes(c.vault_id)); if (!r) return null; const { secret: _s, refresh: _r, ...pub } = r; return clone(pub); },
+  async delete(vaultId: string, nameOrId: string) {
+    if (store.creds.delete(`${vaultId}/${nameOrId}`)) return true;
+    for (const [k, c] of store.creds) if (c.vault_id === vaultId && c.id === nameOrId) return store.creds.delete(k);
+    return false;
+  },
 };
 export async function vaultSecrets() { return {}; }

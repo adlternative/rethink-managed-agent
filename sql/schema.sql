@@ -257,6 +257,15 @@ CREATE TABLE IF NOT EXISTS vault_credentials (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (vault_id, name)
 );
+-- Typed credentials: an env var injected into the sandbox (the original kind, hence the default), or an
+-- MCP credential the runner sends to the server at mcp_server_url. `refresh` holds the sealed mcp_oauth
+-- refresh block; the access token itself lives in `secret` like every other value.
+ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'environment_variable';
+ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS mcp_server_url TEXT;
+ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS refresh JSONB;
+ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+-- One credential per MCP server in a vault (the URL is the match key, so a second one would be ambiguous).
+CREATE UNIQUE INDEX IF NOT EXISTS vault_credentials_mcp_url ON vault_credentials(vault_id, mcp_server_url) WHERE mcp_server_url IS NOT NULL;
 
 -- Vaults whose secrets are injected into this session's sandboxes.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS vault_ids TEXT[] NOT NULL DEFAULT '{}';

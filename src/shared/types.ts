@@ -52,6 +52,8 @@ export interface McpServerDecl {
   has_authorization?: boolean;
   /** if set, only these tool names are exposed to the model */
   allowed_tools?: string[];
+  /** vault credential to authenticate this server with; otherwise a credential is matched by URL */
+  credential_id?: string | null;
 }
 export interface AgentResource {
   id: AgentId;
@@ -338,11 +340,23 @@ export interface VaultResource {
   metadata: Record<string, string>;
   created_at: string;
 }
+/**
+ * What a vault credential authenticates:
+ * - `environment_variable`: injected into the session's sandboxes as `name=value`
+ * - `static_bearer` / `mcp_oauth`: sent to the MCP server at `mcp_server_url` by the runner
+ */
+export type VaultCredentialKind = "environment_variable" | "static_bearer" | "mcp_oauth";
 /** One secret in a vault (the ciphertext lives only in the DB; the API returns metadata only). */
 export interface VaultCredentialResource {
   id: string;
   vault_id: string;
   name: string;
+  kind: VaultCredentialKind;
+  /** MCP credentials only: the server this credential belongs to (matched against a declared server URL) */
+  mcp_server_url?: string | null;
+  /** mcp_oauth only: when the stored access token expires, and whether a refresh block is stored */
+  expires_at?: string | null;
+  has_refresh?: boolean;
   metadata: Record<string, string>;
   created_at: string;
 }

@@ -100,6 +100,39 @@ describe.skipIf(!process.env.PMA_IT)("MCP credentials are sealed at rest and nev
     expect((await db.pool.query(`SELECT count(*)::int n FROM sessions WHERE owner_id=$1`, [OWNER])).rows[0].n).toBe(before + 1);
   });
 
+  it("a vault credential authenticates a server declared without credentials, and rotation reaches the next run", async () => {
+    const url = "https://vaulted.example.com/mcp";
+    const vault = await db.vaults.create({ owner_id: OWNER, name: "it-mcp-vault" });
+    const cred = await db.vaultCredentials.put(vault.id, { name: "vaulted", value: "IT-VAULT-TOKEN", kind: "static_bearer", mcp_server_url: url });
+    expect(cred).toMatchObject({ kind: "static_bearer", mcp_server_url: url });
+    expect(JSON.stringify(cred)).not.toContain("IT-VAULT-TOKEN");
+
+    const created = await req("POST", "/openai/v1/agents/sessions", {
+      environment: { type: "reference", environment_id: envId },
+      agent: { model: "qoder/auto", tools: [{ type: "mcp", server_label: "vaulted", transport: { type: "http", server_url: `HTTPS://Vaulted.example.com:443/mcp/` } }] },
+      vault_ids: [vault.id],
+    });
+    expect(created.status).toBe(201);
+    const session = (await db.repos.sessions.get(JSON.parse(created.text).id))!;
+
+    // what the runner does at the start of a run: read the session's MCP credentials, match by URL
+    const resolve = async () => creds.resolveMcpCredentials(session.agent.mcp_servers![0]!, await db.mcpVaultCredentials(OWNER, session.vault_ids ?? []));
+    expect(await resolve()).toEqual({ authorization: "Bearer IT-VAULT-TOKEN" });
+
+    await db.vaultCredentials.put(vault.id, { name: "vaulted", value: "IT-VAULT-ROTATED", kind: "static_bearer", mcp_server_url: url });
+    expect(await resolve()).toEqual({ authorization: "Bearer IT-VAULT-ROTATED" }); // no session change needed
+
+    // env-var credentials stay out of MCP, and MCP credentials stay out of the sandbox env
+    await db.vaultCredentials.put(vault.id, { name: "PLAIN_ENV", value: "env-only" });
+    expect(await db.vaultSecrets(OWNER, [vault.id])).toEqual({ PLAIN_ENV: "env-only" });
+    expect((await db.mcpVaultCredentials(OWNER, [vault.id])).map((r) => r.mcp_server_url)).toEqual([url]);
+
+    // a second credential for the same server in one vault is ambiguous, so the store refuses it
+    await expect(db.vaultCredentials.put(vault.id, { name: "duplicate", value: "x", kind: "static_bearer", mcp_server_url: url })).rejects.toThrow();
+
+    await db.pool.query(`DELETE FROM vaults WHERE id=$1`, [vault.id]);
+  });
+
   it("migrate reseals plaintext credentials left by older versions", async () => {
     const [created] = (await db.pool.query(`SELECT id, agent FROM sessions WHERE owner_id=$1 LIMIT 1`, [OWNER])).rows;
     const legacyAgent = { ...created.agent, mcp_servers: [{ label: "legacy", url: "https://legacy.example.com/mcp", authorization: "Bearer LEGACY-PLAINTEXT" }] };

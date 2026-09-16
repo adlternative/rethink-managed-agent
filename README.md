@@ -381,7 +381,7 @@ Bundled CLI commands (`npm run cli -- --help`, and `<command> --help` for the fl
 | `sessions` | `list [--status S] [--all]`, `get`, `create --agent A --env E [--model p/m] [--message T] [--memory-stores mem[:path],..] [--vaults vault_a,vault_b] [--environments main=env,k=env[:fork]] [--parent sess]`, `delete`, `archive`, `prompt`, `set-system`, `attach`, `mount`, `unmount`, `skill add\|remove` |
 | `send` | `send <session> <text...> [--file a.png,b.pdf] [--wait [--timeout SEC]]` |
 | `stream` / `events` / `interrupt` | `stream <session> [--since SEQ]`, `events <session> [--since SEQ] [--limit N]` (follows every page), `interrupt <session>` |
-| `vaults` | `list`, `get`, `create [name]`, `delete`, `credentials list <vault>`, `credentials put <vault> <name> --value-env VAR \| --value-stdin \| --value V`, `credentials delete <vault> <name>` |
+| `vaults` | `list`, `get`, `create [name]`, `delete`, `credentials list <vault>`, `credentials put <vault> <name> --value-env VAR \| --value-stdin \| --value V [--mcp-url URL]`, `credentials delete <vault> <name>` |
 | `memory-stores`, `files`, `skills`, `providers`, `sandboxes`, `models`, `me` | `list` / `get` / `create` / `delete` where the API has them; `files upload <path>` and `download <id> [--out F]`, `skills version`, `providers update`, `sandboxes pause` |
 | `worker` | `worker --env <id> --key <worker_key> [--workdir DIR]`: the BYOC worker loop (see [BYOC](#byoc-self-hosted-sandboxes)) |
 

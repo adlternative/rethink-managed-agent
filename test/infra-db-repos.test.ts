@@ -56,12 +56,12 @@ describe("vaultSecrets / vaultCredentials", () => {
 
   it("put seals the value (no plaintext in params) and RETURNING excludes the secret column", async () => {
     script = () => [{ id: "cred_1", vault_id: "v1", name: "API_KEY", metadata: {}, created_at: new Date(0) }];
-    const r = await vaultCredentials.put("v1", "API_KEY", "super-secret-plaintext");
+    const r = await vaultCredentials.put("v1", { name: "API_KEY", value: "super-secret-plaintext" });
     const c = calls[0]!;
     const sealed = JSON.parse(c.params[3] as string);
     expect(sealed).toMatchObject({ type: "encrypted", v: 1 });
     expect(JSON.stringify(c.params)).not.toContain("super-secret-plaintext");
-    expect(c.sql.slice(c.sql.indexOf("RETURNING"))).not.toContain("secret");
+    expect(c.sql.slice(c.sql.indexOf("RETURNING"))).not.toMatch(/\bsecret\b/);
     expect(r).not.toHaveProperty("secret");
     expect(r.created_at).toBe(new Date(0).toISOString());
   });

@@ -11,6 +11,7 @@ import { initialRef } from "../sessions.ts";
 import { openaiAgentToRethink, openaiEnvToEnvironmentId, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
 import { toOpenAiSession, clientToolNames } from "./required-actions.ts";
 import { streamOpenAiEvents } from "./sse.ts";
+import { validateMcpCredentialIds, validateVaultIds } from "../vaults.ts";
 
 /**
  * OpenAI Agents API-compatible surface, mounted at /agents-api/v1. A pure adapter over rethink's
@@ -27,7 +28,7 @@ const envIdOf = (s: SessionResource) => s.environment_id;
 
 export const agentsApi = new Hono()
   .post("/sessions", async (c) => {
-    const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; stream?: boolean }>(c);
+    const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; stream?: boolean; vault_ids?: unknown }>(c);
     if (!body.agent) throw invalid("agent is required");
     if (body.input !== undefined && typeof body.input !== "string") throw invalid("input must be a string");
     // the stream follows the turn the input triggers; without one it would never end
@@ -39,13 +40,15 @@ export const agentsApi = new Hono()
     if (!environment) throw notFound("environment", environmentId);
 
     // MCP credentials are sealed before anything is stored (they would otherwise live in plaintext in the snapshot)
+    const vaultIds = await validateVaultIds(body.vault_ids, scope(c));
     if (hasMcpCredentials(draft.mcp_servers) && !secretsConfigured()) throw invalid("MCP server credentials need PMA_SECRET_KEY to be stored encrypted; set it on the api and runner");
+    await validateMcpCredentialIds(draft.mcp_servers, vaultIds);
     const mcpServers = sealMcpServers(draft.mcp_servers);
     const spec = environment.workspace;
     const workspace = await repos.workspaces.create(spec, initialRef(spec) as WorkspaceRef, owner);
     const agentRow = await repos.agents.create({ owner_id: owner, name: draft.name, model: draft.model, system: draft.system, tools: draft.tools, packages: draft.packages, skills: [] });
     const { created_at: _c, ...snapshot } = { ...agentRow, client_tools: draft.client_tools, mcp_servers: mcpServers };
-    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot });
+    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot, vault_ids: vaultIds });
 
     const since = 0;
     if (typeof body.input === "string" && body.input.length > 0) {

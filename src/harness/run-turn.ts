@@ -45,6 +45,7 @@ import { compactMessages, contextTokens, needsCompaction, settingsFromEnv } from
 import { resolveModel } from "./models.ts";
 import { createTools, truncateOutput, type ToolContext } from "./tools.ts";
 import { McpHttpClient } from "./mcp.ts";
+import type { McpCredentials } from "../infra/mcp-credentials.ts";
 
 export type Unsubscribe = () => void | Promise<void>;
 
@@ -93,8 +94,12 @@ export interface RunDeps {
   principalFetchAllow?(ownerId: string): Promise<string | null>;
   /** Decrypt the session's vault secrets into an env map injected into its sandboxes. */
   vaultSecrets?(session: SessionResource): Promise<Record<string, string>>;
-  /** Credentials to call an MCP server with (stored sealed in the agent snapshot). Absent: the decl's plaintext fields. */
-  mcpCredentials?(server: McpServerDecl): { authorization?: string; headers?: Record<string, string> };
+  /**
+   * Credentials to call an MCP server with: the session's sealed inline credentials or a vault credential
+   * of one of its `vault_ids`. Null connects unauthenticated. Read per run, so a rotated vault credential
+   * reaches a session that is already running. Absent: the decl's plaintext fields.
+   */
+  mcpCredentials?(server: McpServerDecl, session: SessionResource): Promise<McpCredentials | null> | McpCredentials | null;
   /** Wait for a client/function tool result posted by the API caller; null on timeout. Honors the signal (interrupt). */
   awaitToolResult(sessionId: SessionId, callId: string, signal: AbortSignal, timeoutMs: number): Promise<{ content: ContentBlock[]; isError: boolean } | null>;
   /** Append events (seq assigned by the store). Must NOT publish; runSession publishes each appended event. */
@@ -256,13 +261,13 @@ function mcpTool(label: string, info: { name: string; description?: string; inpu
  * Connect to each declared MCP server (fetch-allowlist gated, fails soft) and return its tools. Servers are
  * connected concurrently (a slow one no longer delays the rest); tools and notes keep the declaration order.
  */
-async function mcpTools(servers: McpServerDecl[], fetchAllow: string[], allowUrl: (u: string, a: string[]) => boolean, emit: (p: SessionEventPayload) => Promise<void>, credentials: RunDeps["mcpCredentials"]): Promise<AgentTool[]> {
+async function mcpTools(servers: McpServerDecl[], session: SessionResource, fetchAllow: string[], allowUrl: (u: string, a: string[]) => boolean, emit: (p: SessionEventPayload) => Promise<void>, credentials: RunDeps["mcpCredentials"]): Promise<AgentTool[]> {
   const results = await Promise.all(servers.map(async (server): Promise<{ tools: AgentTool[]; note?: string }> => {
     if (!allowUrl(server.url, fetchAllow)) return { tools: [], note: `MCP server ${server.label} (${server.url}) blocked by the fetch allowlist` };
-    let cred: { authorization?: string; headers?: Record<string, string> };
-    try { cred = credentials ? credentials(server) : { authorization: server.authorization, headers: server.headers }; }
+    let cred: McpCredentials | null;
+    try { cred = credentials ? await credentials(server, session) : { authorization: server.authorization, headers: server.headers }; }
     catch { return { tools: [], note: `MCP server ${server.label} unavailable: its stored credentials could not be decrypted (PMA_SECRET_KEY changed or missing)` }; }
-    const client = new McpHttpClient(server.url, cred);
+    const client = new McpHttpClient(server.url, cred ?? {});
     try {
       await client.connect();
       const allow = server.allowed_tools ? new Set(server.allowed_tools) : null;
@@ -649,7 +654,7 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       addTool(clientTool(decl, (callId, sig) => deps.awaitToolResult(sessionId, callId, sig, env.CLIENT_TOOL_WAIT_MS)));
     }
     // Remote MCP servers: connect and register their tools (server-side; gated by the fetch allowlist).
-    if (session.agent.mcp_servers?.length) for (const t of await mcpTools(session.agent.mcp_servers, fetchAllow, isAllowedUrl, emit, deps.mcpCredentials?.bind(deps))) addTool(t);
+    if (session.agent.mcp_servers?.length) for (const t of await mcpTools(session.agent.mcp_servers, session, fetchAllow, isAllowedUrl, emit, deps.mcpCredentials?.bind(deps))) addTool(t);
     const allSkills = [...plugins.skills, ...dbSkills];
     const st = skillTool(allSkills, plugins.prompts);
     if (st) addTool(st);

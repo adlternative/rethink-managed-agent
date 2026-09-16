@@ -458,7 +458,9 @@ addition is **client/function tools**.
   the fetch allowlist, failing soft), which lists and calls its tools. Its `authorization` / `headers` are
   sealed with `PMA_SECRET_KEY` before the session is stored (refused with 400 when no key is set), only the
   runner opens them (`src/infra/mcp-credentials.ts`), API output shows `"[redacted]"` markers — never the
-  value or the ciphertext — and `migrate` reseals plaintext left by older versions; `web_search` maps to the existing
+  value or the ciphertext — and `migrate` reseals plaintext left by older versions. A server may instead be
+  declared **without** credentials and authenticated from the session's vaults (§19), the model Claude
+  Managed Agents uses. `transport.type:"stdio"` is refused (400) rather than silently ignored; `web_search` maps to the existing
   `plugins/web-search` pi plugin (`COMPAT_WEBSEARCH_PACKAGE`, needs `plugin_host=sandbox`+`network=bridge`);
   `multi_agent` maps to the team plugin (`COMPAT_TEAM_PACKAGE`, with `max_concurrent_subagents` advisory);
   `programmatic_tool_calling` stays accepted-and-ignored.
@@ -635,16 +637,45 @@ never its value.
   (`docker`/`e2b`); `local` now injects into each command's env too (via `addMount`). `run-turn`
   computes the session's vault secrets once and passes them on every `acquire`.
 - **API**: native `/v1/vaults` (+ `/:id/credentials`), and the official SDK surface
-  `client.beta.agents.vaults.*` at `/openai/v1/vaults` (+ `/:id/credentials`); the SDK's typed `auth`
-  union (`static_bearer` / `mcp_oauth`) is accepted by storing its token. `AgentSession.vault_ids` is
+  `client.beta.agents.vaults.*` at `/openai/v1/vaults` (+ `/:id/credentials`). `AgentSession.vault_ids` is
   populated and session create accepts `vault_ids`.
-- **Verified live** (rebuilt stack, real `openai@7.15.0`): created a vault + credential (value never
-  returned by create or list), created a session with `vault_ids` and a `bash` tool, and the model ran
-  `echo $MY_SECRET` in the sandbox — the injected secret appeared in the tool output.
 
-What this is NOT: a general vendor secret-manager or MCP-OAuth token-rotation service (the SDK models
-the latter). It is the core, broadly useful thing — encrypted secrets injected into the agent's
-environment — which is what Managed-Agents-style workloads actually need.
+### 19.1 Credential kinds
+
+A credential is one of two things, told apart by its `kind` (`src/api/routes/vaults.ts` normalizes every
+accepted body into one shape, so all three surfaces agree):
+
+- **`environment_variable`** — injected into the session's sandboxes as `name=value`. Written either as
+  the short `{name, value}` or as CMA's `{auth:{type:"environment_variable", secret_name, secret_value}}`.
+  Unlike CMA, the value really is in the sandbox environment (CMA substitutes a placeholder at egress, so
+  its agent never sees the secret); `networking.allowed_hosts` and `injection_location` are therefore not
+  honored and a declared host list does not restrict where the value can travel.
+- **`static_bearer` / `mcp_oauth`** — an MCP credential keyed by `mcp_server_url`, sent by the runner to
+  that server and never placed in the sandbox. Both CMA and the OpenAI SDK model these identically. The
+  `mcp_oauth` refresh block is stored sealed but **not yet refreshed**; the access token is used as given.
+
+**Which credential a server connects with** (`resolveMcpCredentials`): an explicit `credential_id` on the
+tool declaration, else the server's own sealed credentials (the OpenAI inline `transport.authorization`
+shape), else a credential whose `mcp_server_url` matches the server URL — normalized as CMA normalizes it
+(scheme and host lowercased, a default port and trailing slashes dropped; a different path, subdomain or
+real port does not match). Vault credentials arrive in `vault_ids` order, so the first vault with a match
+wins. Nothing matched means the server is called unauthenticated, which is what a public MCP server wants.
+Declared headers always travel along; only the identity is resolved. A `credential_id` is validated at
+session create, so a typo fails loudly instead of silently connecting as nobody.
+
+Credentials are read **per run**, not baked into the session, so rotating one reaches a session that
+already exists — the property the CMA credential lifecycle promises. One credential per server per vault
+is enforced by a partial unique index: a second one would make the match ambiguous.
+
+- **Verified live** (real `openai@7.15.0`, a token-checking MCP server): a session declaring the server
+  with no credentials of its own called its tool with the vault's bearer (4 authorized requests, 0
+  rejections) and the model returned the server-held secret; the token appeared in neither the credential
+  response nor the session. With a wrong token stored, the server 401s and the model does not get the
+  secret; **rotating the credential in place** then let the *same* session succeed on its next turn, with
+  no restart. Earlier: the `environment_variable` path, where the model read the value with `echo $MY_SECRET`.
+
+Still missing against CMA: OAuth refresh (plus `mcp_oauth_validate`), archival as distinct from delete,
+credential webhooks, and egress substitution for environment variables.
 
 ## 20. Environment lifecycle & BYOC reconnect
 

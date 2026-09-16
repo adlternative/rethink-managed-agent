@@ -46,8 +46,14 @@ export function splitTools(tools: OpenAiToolDecl[] | undefined): SplitTools {
       // tool names are namespaced by label, so every server needs a distinct one
       const label = typeof t.server_label === "string" ? t.server_label : unlabeled++ ? `mcp${unlabeled}` : "mcp";
       if (out.mcpServers.some((m) => m.label === label)) throw invalid(`mcp server_label ${JSON.stringify(label)} is used by more than one mcp tool`);
+      if (tr.type && tr.type !== "http") throw invalid(`mcp tool ${label}: only transport.type "http" is supported (stdio MCP servers are not)`);
       if (!tr.server_url || typeof tr.server_url !== "string") throw invalid(`mcp tool ${label} requires transport.server_url`);
-      out.mcpServers.push({ label, url: tr.server_url, authorization: tr.authorization, headers: tr.headers, allowed_tools: Array.isArray(t.allowed_tools) ? (t.allowed_tools as string[]) : undefined });
+      if (t.credential_id !== undefined && t.credential_id !== null && typeof t.credential_id !== "string") throw invalid(`mcp tool ${label}: credential_id must be a vault credential id`);
+      out.mcpServers.push({
+        label, url: tr.server_url, authorization: tr.authorization, headers: tr.headers,
+        allowed_tools: Array.isArray(t.allowed_tools) ? (t.allowed_tools as string[]) : undefined,
+        credential_id: (t.credential_id as string | undefined) ?? undefined,
+      });
     } else if (t.type === "web_search") {
       out.webSearch = true;
     } else if (t.type === "programmatic_tool_calling") {

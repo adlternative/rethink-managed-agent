@@ -106,7 +106,7 @@ describe.skipIf(!IT)("it: /openai/v1 against Postgres", () => {
 
   it("B cannot see or modify A's vault and credentials; secrets are never returned", async () => {
     const v = await (await call(A, "POST", "/vaults", { name: "a" })).json();
-    const cred = await call(A, "POST", `/vaults/${v.id}/credentials`, { name: "TOKEN", auth: { type: "static_bearer", token: "super-secret-value" } });
+    const cred = await call(A, "POST", `/vaults/${v.id}/credentials`, { name: "TOKEN", auth: { type: "static_bearer", mcp_server_url: "https://tenant-a.example.com/mcp", token: "super-secret-value" } });
     expect(cred.status).toBe(201);
     expect(await cred.text()).not.toContain("super-secret-value");
     expect((await call(B, "GET", `/vaults/${v.id}`)).status).toBe(404);

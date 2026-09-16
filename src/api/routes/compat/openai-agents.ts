@@ -13,7 +13,7 @@ import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
 import { openaiAgentToRethink, openaiEnvToEnvironmentId, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
 import { requiredActions, clientToolNames, environmentActions, STATE_EVENT_TYPES } from "./required-actions.ts";
-import { validateVaultIds } from "../vaults.ts";
+import { credentialInput, validateMcpCredentialIds, validateVaultIds, type CredentialBody } from "../vaults.ts";
 import { streamAgentSessionEvents } from "./openai-stream.ts";
 
 /**
@@ -255,6 +255,7 @@ export const openaiAgents = new Hono()
     const vaultIds = await validateVaultIds(body.vault_ids, scope(c));
     // MCP credentials are sealed before anything is stored (they would otherwise live in plaintext in the snapshot)
     if (hasMcpCredentials(draft.mcp_servers) && !secretsConfigured()) throw invalid("MCP server credentials need PMA_SECRET_KEY to be stored encrypted; set it on the api and runner");
+    await validateMcpCredentialIds(draft.mcp_servers, vaultIds);
     const mcpServers = sealMcpServers(draft.mcp_servers);
     const spec = environment.workspace;
     const workspace = await repos.workspaces.create(spec, initialRef(spec) as WorkspaceRef, owner);
@@ -409,16 +410,15 @@ export const openaiAgents = new Hono()
     if (!(await vaults.delete(c.req.param("vaultId"), scope(c)))) throw notFound("vault", c.req.param("vaultId"));
     return c.json({ id: c.req.param("vaultId"), object: "vault.deleted", deleted: true });
   })
-  /** Store a credential. The SDK sends a typed `auth` union (mcp_oauth | static_bearer); we store the token. */
+  /**
+   * Store a credential. The SDK sends a typed `auth` union (mcp_oauth | static_bearer), both keyed by
+   * `mcp_server_url`: the runner matches that URL against the MCP servers a session declares.
+   */
   .post("/vaults/:vaultId/credentials", async (c) => {
     if (!secretsConfigured()) throw invalid("PMA_SECRET_KEY is not set: cannot store vault secrets");
     const v = await vaults.get(c.req.param("vaultId"), scope(c));
     if (!v) throw notFound("vault", c.req.param("vaultId"));
-    const body = await readJson<{ name?: string; auth?: { type?: string; token?: string; access_token?: string }; value?: string }>(c);
-    if (!body.name) throw invalid("name is required");
-    const value = body.auth?.token ?? body.auth?.access_token ?? body.value; // static_bearer.token | mcp_oauth.access_token | plain value
-    if (typeof value !== "string") throw invalid("a credential secret is required (auth.token, auth.access_token, or value)");
-    const cred = await vaultCredentials.put(v.id, body.name, value);
+    const cred = await vaultCredentials.put(v.id, credentialInput(await readJson<CredentialBody>(c)));
     return c.json({ ...cred, object: "vault.credential" }, 201);
   })
   .get("/vaults/:vaultId/credentials", async (c) => {

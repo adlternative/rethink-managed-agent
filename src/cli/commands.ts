@@ -81,7 +81,8 @@ vaults get <id>
 vaults create [name] [--metadata k=v,k2=v2]
 vaults delete <id>
 vaults credentials list <vault>
-vaults credentials put <vault> <name> (--value-env VAR | --value-stdin | --value V) [--metadata k=v]
+vaults credentials put <vault> <name> (--value-env VAR | --value-stdin | --value V) [--mcp-url URL] [--metadata k=v]
+                                      (--mcp-url stores an MCP bearer token: the runner sends it to that server)
 vaults credentials delete <vault> <name>
 (secret values are write-only: the API never returns them; prefer --value-env or --value-stdin over --value, which lands in shell history)`,
   "memory-stores": `memory-stores list
@@ -311,10 +312,15 @@ async function vaults(c: Ctx, [sub = "list", a, b, d]: string[]): Promise<void> 
       const [op, vault, name] = [a, b, d];
       if (!vault) usage("vaults");
       switch (op) {
-        case "list": case "ls": return listOut(c, await api.json("GET", `/v1/vaults/${seg(vault)}/credentials`), ["ID", "NAME", "CREATED"], (x) => [x.id, x.name, x.created_at]);
+        case "list": case "ls": return listOut(c, await api.json("GET", `/v1/vaults/${seg(vault)}/credentials`), ["ID", "NAME", "KIND", "MCP SERVER", "CREATED"], (x) => [x.id, x.name, x.kind ?? "-", x.mcp_server_url ?? "-", x.created_at]);
         case "put": case "set": {
           if (!name) usage("vaults");
-          return c.print(await api.json("POST", `/v1/vaults/${seg(vault)}/credentials`, { name, value: await secretValue(c), metadata: kv(str(flags, "metadata")) }));
+          const mcpUrl = str(flags, "mcp-url");
+          const value = await secretValue(c);
+          const body = mcpUrl
+            ? { name, auth: { type: "static_bearer", mcp_server_url: mcpUrl, token: value }, metadata: kv(str(flags, "metadata")) }
+            : { name, value, metadata: kv(str(flags, "metadata")) };
+          return c.print(await api.json("POST", `/v1/vaults/${seg(vault)}/credentials`, body));
         }
         case "delete": case "rm": if (!name) usage("vaults"); return c.print(await api.json("DELETE", `/v1/vaults/${seg(vault)}/credentials/${seg(name)}`));
         default: usage("vaults");

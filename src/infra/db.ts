@@ -9,6 +9,7 @@ import type {
   MemoryStoreResource,
   VaultResource,
   VaultCredentialResource,
+  VaultCredentialKind,
   Principal,
   SkillRef,
   SkillResource,
@@ -498,24 +499,43 @@ export const vaults = {
 };
 
 /** Credentials in a vault. The plaintext is sealed with PMA_SECRET_KEY and never leaves the DB. */
+const CRED_COLS = `id, vault_id, name, kind, mcp_server_url, expires_at, (refresh IS NOT NULL) AS has_refresh, metadata, created_at`;
+export interface VaultCredentialInput {
+  name: string;
+  /** the plaintext secret: an env var value, a bearer token, or an OAuth access token */
+  value: string;
+  kind?: VaultCredentialKind;
+  mcp_server_url?: string | null;
+  /** mcp_oauth refresh block (sealed as a whole; never returned) */
+  refresh?: Record<string, unknown> | null;
+  expires_at?: string | null;
+  metadata?: Record<string, string>;
+}
 export const vaultCredentials = {
-  /** Store (or replace) a named secret. `value` is the plaintext, sealed before it is written. */
-  async put(vaultId: string, name: string, value: string, metadata?: Record<string, string>): Promise<VaultCredentialResource> {
+  /** Store (or replace) a named credential. Secret material is sealed before it is written. */
+  async put(vaultId: string, input: VaultCredentialInput): Promise<VaultCredentialResource> {
     const r = await one<VaultCredentialResource>(pool,
-      `INSERT INTO vault_credentials (id, vault_id, name, secret, metadata) VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (vault_id, name) DO UPDATE SET secret=EXCLUDED.secret, metadata=EXCLUDED.metadata
-       RETURNING id, vault_id, name, metadata, created_at`,
-      [newId("cred"), vaultId, name, JSON.stringify(seal(value)), JSON.stringify(metadata ?? {})]);
+      `INSERT INTO vault_credentials (id, vault_id, name, secret, metadata, kind, mcp_server_url, refresh, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (vault_id, name) DO UPDATE SET secret=EXCLUDED.secret, metadata=EXCLUDED.metadata, kind=EXCLUDED.kind,
+         mcp_server_url=EXCLUDED.mcp_server_url, refresh=EXCLUDED.refresh, expires_at=EXCLUDED.expires_at
+       RETURNING ${CRED_COLS}`,
+      [newId("cred"), vaultId, input.name, JSON.stringify(seal(input.value)), JSON.stringify(input.metadata ?? {}),
+        input.kind ?? "environment_variable", input.mcp_server_url ?? null, input.refresh ? JSON.stringify(seal(JSON.stringify(input.refresh))) : null, input.expires_at ?? null]);
     return iso(r)!;
   },
   async list(vaultId: string): Promise<VaultCredentialResource[]> {
-    return (await many<VaultCredentialResource>(pool, `SELECT id, vault_id, name, metadata, created_at FROM vault_credentials WHERE vault_id=$1 ORDER BY name`, [vaultId])).map((r) => iso(r)!);
+    return (await many<VaultCredentialResource>(pool, `SELECT ${CRED_COLS} FROM vault_credentials WHERE vault_id=$1 ORDER BY name`, [vaultId])).map((r) => iso(r)!);
   },
   async get(vaultId: string, name: string): Promise<VaultCredentialResource | null> {
-    return iso(await one<VaultCredentialResource>(pool, `SELECT id, vault_id, name, metadata, created_at FROM vault_credentials WHERE vault_id=$1 AND name=$2`, [vaultId, name]));
+    return iso(await one<VaultCredentialResource>(pool, `SELECT ${CRED_COLS} FROM vault_credentials WHERE vault_id=$1 AND name=$2`, [vaultId, name]));
   },
-  async delete(vaultId: string, name: string): Promise<boolean> {
-    return ((await pool.query(`DELETE FROM vault_credentials WHERE vault_id=$1 AND name=$2`, [vaultId, name])).rowCount ?? 0) > 0;
+  /** Look one up by id within the vaults a session attached (used to resolve an explicit `credential_id`). */
+  async byId(id: string, vaultIds: string[]): Promise<VaultCredentialResource | null> {
+    if (!vaultIds?.length) return null;
+    return iso(await one<VaultCredentialResource>(pool, `SELECT ${CRED_COLS} FROM vault_credentials WHERE id=$1 AND vault_id = ANY($2::text[])`, [id, vaultIds]));
+  },
+  async delete(vaultId: string, nameOrId: string): Promise<boolean> {
+    return ((await pool.query(`DELETE FROM vault_credentials WHERE vault_id=$1 AND (name=$2 OR id=$2)`, [vaultId, nameOrId])).rowCount ?? 0) > 0;
   },
 };
 
@@ -527,9 +547,32 @@ export async function vaultSecrets(ownerId: string, vaultIds: string[]): Promise
   if (!vaultIds?.length) return {};
   const rows = await many<{ name: string; secret: Sealed; vault_id: string }>(pool,
     `SELECT c.name, c.secret, c.vault_id FROM vault_credentials c JOIN vaults v ON v.id = c.vault_id
-     WHERE c.vault_id = ANY($1::text[]) AND v.owner_id = $2 ORDER BY array_position($1::text[], c.vault_id)`,
+     WHERE c.vault_id = ANY($1::text[]) AND v.owner_id = $2 AND c.kind = 'environment_variable'
+     ORDER BY array_position($1::text[], c.vault_id)`,
     [vaultIds, ownerId]);
   const out: Record<string, string> = {};
   for (const r of rows) { try { out[r.name] = open(r.secret); } catch { /* skip unreadable */ } }
   return out;
+}
+
+/** An MCP credential as the runner needs it: still sealed, so the caller decides when to open it. */
+export interface StoredMcpCredential {
+  id: string;
+  vault_id: string;
+  kind: VaultCredentialKind;
+  mcp_server_url: string;
+  secret: Sealed;
+  expires_at: string | null;
+}
+/**
+ * The session's MCP credentials, in `vaultIds` order (so the first vault with a match wins, as in
+ * Claude Managed Agents). Read per run, which is what makes a rotated credential reach a live session.
+ */
+export async function mcpVaultCredentials(ownerId: string, vaultIds: string[]): Promise<StoredMcpCredential[]> {
+  if (!vaultIds?.length) return [];
+  return (await many<StoredMcpCredential>(pool,
+    `SELECT c.id, c.vault_id, c.kind, c.mcp_server_url, c.secret, c.expires_at FROM vault_credentials c JOIN vaults v ON v.id = c.vault_id
+     WHERE c.vault_id = ANY($1::text[]) AND v.owner_id = $2 AND c.mcp_server_url IS NOT NULL
+     ORDER BY array_position($1::text[], c.vault_id), c.name`,
+    [vaultIds, ownerId])).map((r) => iso(r)!);
 }

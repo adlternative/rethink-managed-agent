@@ -140,6 +140,7 @@ describe("cli resource commands", () => {
     expect(put.code).toBe(0);
     const stdin = await cli(s.url, ["vaults", "credentials", "put", "vlt_1", "NPM", "--value-stdin"], {}, "npm_secret\n");
     const listed = await cli(s.url, ["vaults", "credentials", "list", "vlt_1"]);
+    await cli(s.url, ["vaults", "credentials", "put", "vlt_1", "docs", "--value", "lin_key", "--mcp-url", "https://docs.example.com/mcp"]);
     expect(listed.stdout).toMatch(/cred_1\s+GITHUB_TOKEN/);
     expect((await cli(s.url, ["vaults", "credentials", "delete", "vlt_1", "GITHUB_TOKEN"])).code).toBe(0);
     expect((await cli(s.url, ["vaults", "credentials", "put", "vlt_1", "X"])).code).toBe(2);
@@ -149,6 +150,7 @@ describe("cli resource commands", () => {
       ["POST", "/v1/vaults/vlt_1/credentials", { name: "GITHUB_TOKEN", value: "ghp_supersecret" }],
       ["POST", "/v1/vaults/vlt_1/credentials", { name: "NPM", value: "npm_secret" }],
       ["GET", "/v1/vaults/vlt_1/credentials", undefined],
+      ["POST", "/v1/vaults/vlt_1/credentials", { name: "docs", auth: { type: "static_bearer", mcp_server_url: "https://docs.example.com/mcp", token: "lin_key" } }],
       ["DELETE", "/v1/vaults/vlt_1/credentials/GITHUB_TOKEN", undefined],
     ]);
     for (const out of [put, stdin, listed]) expect(out.stdout + out.stderr).not.toMatch(/supersecret|npm_secret/);
