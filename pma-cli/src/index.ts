@@ -1,3 +1,15 @@
+/**
+ * Node prints MODULE_TYPELESS_PACKAGE_JSON when it imports a UI plugin written as .ts from a directory
+ * whose package.json does not say "type": "module". That is a hint about *our* loading of the user's
+ * plugin files, and nothing they can act on from inside the TUI, so it is dropped while every other
+ * warning still reaches stderr.
+ */
+process.removeAllListeners("warning");
+process.on("warning", (w: NodeJS.ErrnoException) => {
+  if (w.name === "MODULE_TYPELESS_PACKAGE_JSON" || (w as { code?: string }).code === "MODULE_TYPELESS_PACKAGE_JSON") return;
+  console.error(w.stack ?? `${w.name}: ${w.message}`);
+});
+
 import { loadConfig, saveConfig } from "./lib/config.ts";
 import { parseArgs, str, die } from "./lib/args.ts";
 
