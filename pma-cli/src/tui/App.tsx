@@ -72,7 +72,10 @@ const COMMANDS: { name: string; desc: string }[] = [
   { name: "/model", desc: "Model override for the next /new" },
   { name: "/status", desc: "Session info" },
   { name: "/prompt", desc: "Show the system prompt as sent (/prompt set <text> changes it)" },
-  { name: "/plugins", desc: "Plugins on this session (/plugins add|remove <source>) — live from the next turn" },
+  { name: "/plugins", desc: "Plugins on this session, and what this deployment offers" },
+  { name: "/plugins search", desc: "Search the available plugins (/plugins search outcome)" },
+  { name: "/plugins add", desc: "Attach one — no argument opens a picker; live from the next turn" },
+  { name: "/plugins remove", desc: "Detach one (/plugins remove <source>)" },
   { name: "/sandboxes", desc: "List sandboxes" },
   { name: "/export", desc: "Export conversation to a file (--json)" },
   { name: "/cancel", desc: "Interrupt the running turn" },
@@ -423,7 +426,7 @@ function App({ opts }: { opts: TuiOptions }) {
       switch (cmd) {
         case "/help": {
           const sc = [...(regRef.current?.shortcuts.values() ?? [])].map((x) => `${x.key.padEnd(12)} ${x.description} (${x.source})`);
-          sys(allCommands.map((c) => `${c.name.padEnd(12)} ${c.desc}`).join("\n") + "\n\nkeys: esc cancel · ctrl+o expand tools · ↑↓ history · tab complete · ctrl+c ×2 exit" + (sc.length ? "\n" + sc.join("\n") : ""));
+          sys(allCommands.map((c) => `${c.name.padEnd(16)} ${c.desc}`).join("\n") + "\n\nkeys: esc cancel · ctrl+o expand tools · ↑↓ history · tab complete · ctrl+c ×2 exit" + (sc.length ? "\n" + sc.join("\n") : ""));
           return;
         }
         case "/quit": case "/exit": case "/q": exit(); return;
@@ -452,8 +455,9 @@ function App({ opts }: { opts: TuiOptions }) {
         case "/plugins": case "/plugin": {
           const [op, ...srcParts] = arg.split(/\s+/).filter(Boolean);
           // Browsing the catalogue needs no session; only attaching does.
+          const isSearch = op === "search" || op === "available";
           if (!session) {
-            const q = op === "search" || op === "available" ? srcParts.join(" ") : "";
+            const q = isSearch ? srcParts.join(" ") : "";
             const { data } = (await apiGet(`/plugins${q ? `?q=${encodeURIComponent(q)}` : ""}`)) as { data: PluginInfo[] };
             const usable = data.filter((p) => p.allowed.runner || p.allowed.sandbox);
             return sys(usable.length
@@ -462,8 +466,8 @@ function App({ opts }: { opts: TuiOptions }) {
           }
           const source = srcParts.join(" ");
           // `/plugins add` with nothing to add opens the deployment's catalogue; `/plugins search q` filters it
-          if ((op === "add" && !source) || op === "search" || op === "available") {
-            const q = op === "add" ? "" : source;
+          if ((op === "add" && !source) || isSearch) {
+            const q = isSearch ? source : "";
             const { data } = (await apiGet(`/plugins${q ? `?q=${encodeURIComponent(q)}` : ""}`)) as { data: PluginInfo[] };
             const attached = new Set(session.agent.packages ?? []);
             const items = data.filter((p) => p.allowed.runner || p.allowed.sandbox).map((p) => ({
@@ -472,6 +476,7 @@ function App({ opts }: { opts: TuiOptions }) {
               hint: p.description.slice(0, 90),
             }));
             if (!items.length) return sys(q ? `no plugin matches "${q}"` : "this deployment ships no plugins you can attach");
+            if (q && items.length === 1) return sys(`${items[0]!.label}\n  ${items[0]!.hint}\n  attach with: /plugins add ${items[0]!.id}`);
             setSelector({ title: "Attach a plugin to this session", items, onSelect: (it) => {
               setSelector(null);
               if (attached.has(it.id)) { sys(`${it.id} is already attached`); return; }
@@ -489,14 +494,14 @@ function App({ opts }: { opts: TuiOptions }) {
             sys(`${op === "add" ? "attached" : "detached"} ${source} (live from the next turn)\nplugins: ${list.join(", ") || "(none)"}`);
             return;
           }
-          if (op) return sys("usage: /plugins [add|remove <source> | search <query>]");
+          if (op) return sys("usage: /plugins [query | add [source] | remove <source>]");
           const s = (await apiGet(`/sessions/${session.id}`)) as Session;
           const list = s.agent.packages ?? [];
           const { data } = (await apiGet("/plugins")) as { data: PluginInfo[] };
           const available = data.filter((p) => (p.allowed.runner || p.allowed.sandbox) && !list.includes(p.source));
           sys([
             list.length ? `plugins on this session:\n${list.map((p) => `  ${p}`).join("\n")}` : "no plugins on this session",
-            available.length ? `\navailable here (/plugins add to pick one):\n${available.map((p) => `  ${p.name.padEnd(12)} ${p.description.slice(0, 70)}`).join("\n")}` : "",
+            available.length ? `\navailable here (/plugins add to pick one, /plugins <query> to search):\n${available.map((p) => `  ${p.name.padEnd(12)} ${p.description.slice(0, 70)}`).join("\n")}` : "",
           ].filter(Boolean).join("\n"));
           return;
         }
@@ -616,7 +621,7 @@ function App({ opts }: { opts: TuiOptions }) {
             <Input value={value} cursor={cursor} onChange={(v, c) => { setValue(v); setCursor(c); setSugIdx(0); }} onSubmit={onSubmit} onKey={onKey} active={!selector} placeholder={session ? "message…  (/ for commands)" : "first message starts a session…"} />
             {suggestions.length > 0 && (
               <Box flexDirection="column" paddingLeft={2}>
-                {suggestions.slice(0, 8).map((s, i) => <Text key={s.name} color={i === sugIdx ? "cyan" : undefined}>{i === sugIdx ? "❯ " : "  "}{s.name.padEnd(12)}<Text dimColor>{s.desc}</Text></Text>)}
+                {suggestions.slice(0, 8).map((s, i) => <Text key={s.name} color={i === sugIdx ? "cyan" : undefined}>{i === sugIdx ? "❯ " : "  "}{s.name.padEnd(16)}<Text dimColor>{s.desc}</Text></Text>)}
               </Box>
             )}
           </>

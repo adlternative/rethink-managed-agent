@@ -53,7 +53,7 @@ Env overrides: `PMA_HOST`, `PMA_TOKEN`, `PMA_HEADERS` (JSON object), `PMA_CONFIG
 | `/model` | model override for the next `/new` (`agent_with_overrides`) |
 | `/status` `/sandboxes` | session info / live sandboxes |
 | `/plugins [add\|remove <source>]` | plugins on this session plus what this deployment offers; attaching one is live from the next turn and leaves the saved agent alone |
-| `/plugins add` (no source) `/plugins search <q>` | pick from the deployment's catalogue |
+| `/plugins search <q>` `/plugins add` (no source) | search, or pick from, the deployment's catalogue. Each subcommand is its own completion entry, so typing `/plug` shows them |
 | `/export [--json]` | write the conversation to `<session>.txt|json` |
 | `/cancel` | send `user.interrupt` |
 | `/clear` `/help` `/quit` | |
