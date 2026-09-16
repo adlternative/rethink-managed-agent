@@ -66,7 +66,7 @@ envs delete <id>            removed if unused; archived if sessions are attached
 (byoc: the response carries worker_key once; run "worker --env <id> --key <worker_key>" on the machine that executes tools)`,
   sessions: `sessions list [--status idle|running|terminated] [--limit N] [--all]
 sessions get <id>
-sessions create --agent A --env E [--workspace-id W] [--model provider/model] [--message TEXT]
+sessions create --agent A --env E [--workspace-id W] [--model provider/model] [--message TEXT] [--packages npm:x,/path]
        [--memory-stores mem_a[:path],mem_b] [--vaults vault_a,vault_b] [--environments main=env_a,<key>=env_b[:fork]] [--parent sess_p]
 sessions delete <id>
 sessions archive <id>
@@ -75,6 +75,8 @@ sessions set-system <id> --system S | --system-file F | --no-system
 sessions attach <id> <key>=<env_id>[:fork]
 sessions mount <id> <mem_id>[:mount_path]   /   sessions unmount <id> <mem_id>
 sessions skill <id> add|remove <skill_id>
+sessions packages list <id>   /   sessions packages add|remove <id> <source>
+       (attach a plugin to a running session; live from its next turn, the saved agent is untouched)
 sessions send|stream|events|interrupt <id> ...        same as the top-level commands`,
   vaults: `vaults list
 vaults get <id>
@@ -248,7 +250,11 @@ async function sessions(c: Ctx, args: string[]): Promise<void> {
     case "get": if (!a) usage("sessions"); return c.print(await api.json("GET", `/v1/sessions/${seg(a)}`));
     case "create": {
       const agentId = need(flags, "agent", USAGE.sessions);
-      const agent = str(flags, "model") ? { type: "agent_with_overrides", id: agentId, model: modelRef(str(flags, "model")!) } : agentId;
+      const overrides: Record<string, unknown> = {};
+      if (str(flags, "model")) overrides.model = modelRef(str(flags, "model")!);
+      // plugins for this session only; the saved agent keeps its own list
+      if (str(flags, "packages")) overrides.packages = list(str(flags, "packages"));
+      const agent = Object.keys(overrides).length ? { type: "agent_with_overrides", id: agentId, ...overrides } : agentId;
       const body: Record<string, unknown> = { agent };
       if (str(flags, "environments")) body.environments = parseEnvList(str(flags, "environments")!);
       else body.environment_id = need(flags, "env", USAGE.sessions);
@@ -258,6 +264,19 @@ async function sessions(c: Ctx, args: string[]): Promise<void> {
       if (str(flags, "memory-stores")) body.memory_stores = list(str(flags, "memory-stores"))!.map((x) => { const [id, mp] = x.split(":"); return mp ? { memory_store_id: id, mount_path: mp } : id; });
       if (str(flags, "message")) body.initial_events = [{ type: "user.message", content: [{ type: "text", text: str(flags, "message") }] }];
       return c.print(await api.json("POST", "/v1/sessions", body));
+    }
+    case "packages": case "plugins": {
+      const [op, id, source] = [a, b, d];
+      if (!id) usage("sessions");
+      if (op === "list" || op === "ls") {
+        const s = await api.json("GET", `/v1/sessions/${seg(id)}`);
+        return listOut(c, { data: (s.agent?.packages ?? []).map((p: string) => ({ source: p })) }, ["SOURCE"], (x) => [x.source]);
+      }
+      if (!source) usage("sessions");
+      if (op === "add") return c.print(await api.json("POST", `/v1/sessions/${seg(id)}/packages`, { source }));
+      if (op === "remove" || op === "rm") return c.print(await api.json("DELETE", `/v1/sessions/${seg(id)}/packages/${encodeURIComponent(source)}`));
+      usage("sessions");
+      return;
     }
     case "delete": case "rm": if (!a) usage("sessions"); return c.print(await api.json("DELETE", `/v1/sessions/${seg(a)}`));
     case "archive": if (!a) usage("sessions"); return c.print(await api.json("POST", `/v1/sessions/${seg(a)}/archive`, {}));

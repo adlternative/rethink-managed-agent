@@ -482,6 +482,27 @@ export const sessionConfig = {
       [id, skillId, JSON.stringify([{ skill_id: skillId }])]);
     return r.rows[0]?.v ?? null;
   },
+  /**
+   * Attach a plugin package to this session's agent snapshot. The runner keys its plugin host on
+   * (agent id, package list), so the next run loads a host that has it — the session gains the
+   * plugin's tools, commands and hooks without touching the saved agent. Returns the new list, or
+   * null when it was already attached.
+   */
+  async addPackage(id: string, source: string): Promise<string[] | null> {
+    const r = await pool.query<{ v: string[] }>(
+      `UPDATE sessions SET agent = jsonb_set(agent, '{packages}', COALESCE(agent->'packages', '[]'::jsonb) || $2::jsonb), updated_at=now()
+       WHERE id=$1 AND NOT COALESCE(agent->'packages', '[]'::jsonb) @> $2::jsonb RETURNING agent->'packages' AS v`,
+      [id, JSON.stringify([source])]);
+    return r.rows[0]?.v ?? null;
+  },
+  /** Detach a plugin package. Returns the new list, or null when it was not attached. */
+  async removePackage(id: string, source: string): Promise<string[] | null> {
+    const r = await pool.query<{ v: string[] }>(
+      `UPDATE sessions SET agent = jsonb_set(agent, '{packages}', (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(agent->'packages') e WHERE e <> $2::jsonb)), updated_at=now()
+       WHERE id=$1 AND COALESCE(agent->'packages', '[]'::jsonb) @> $3::jsonb RETURNING agent->'packages' AS v`,
+      [id, JSON.stringify(source), JSON.stringify([source])]);
+    return r.rows[0]?.v ?? null;
+  },
   /** Append a mount unless the same store or mount_path is mounted. Returns the new list, or null on a clash. */
   async addMemoryStore(id: string, mount: MemoryMount): Promise<MemoryMount[] | null> {
     const r = await pool.query<{ v: MemoryMount[] }>(

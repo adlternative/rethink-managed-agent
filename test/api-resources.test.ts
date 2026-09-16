@@ -116,6 +116,38 @@ describe("agents", () => {
     expect([400, 404]).toContain(r.status);
   });
 
+  it("a plugin can be attached to a running session and detached again; the saved agent is untouched", async () => {
+    const agent = seed.agent(A);
+    const env = seed.environment(A);
+    const session = await (await call("POST", "/v1/sessions", { agent: agent.id, environment_id: env.id })).json();
+    expect(session.agent.packages ?? []).toEqual([]);
+
+    const added = await call("POST", `/v1/sessions/${session.id}/packages`, { source: "npm:pma-plugin-outcome" });
+    expect(added.status).toBe(201);
+    expect((await added.json()).agent.packages).toEqual(["npm:pma-plugin-outcome"]);
+    expect(store.agents.get(agent.id)!.packages ?? []).toEqual([]); // the agent definition did not change
+
+    expect((await call("POST", `/v1/sessions/${session.id}/packages`, { source: "npm:pma-plugin-outcome" })).status).toBe(400); // already attached
+    expect((await call("POST", `/v1/sessions/${session.id}/packages`, { source: "./relative/path" })).status).toBe(400);
+    expect((await call("POST", `/v1/sessions/${session.id}/packages`, { source: "has space" })).status).toBe(400);
+
+    const removed = await call("DELETE", `/v1/sessions/${session.id}/packages/${encodeURIComponent("npm:pma-plugin-outcome")}`);
+    expect(removed.status).toBe(200);
+    expect((await removed.json()).agent.packages).toEqual([]);
+    expect((await call("DELETE", `/v1/sessions/${session.id}/packages/${encodeURIComponent("npm:gone")}`)).status).toBe(404);
+  });
+
+  it("a session may bring its own plugins at create without changing the agent", async () => {
+    const agent = seed.agent(A);
+    const env = seed.environment(A);
+    const session = await (await call("POST", "/v1/sessions", {
+      agent: { type: "agent_with_overrides", id: agent.id, packages: ["npm:pma-plugin-outcome"] },
+      environment_id: env.id,
+    })).json();
+    expect(session.agent.packages).toEqual(["npm:pma-plugin-outcome"]);
+    expect(store.agents.get(agent.id)!.packages ?? []).toEqual([]);
+  });
+
   it("POST /v1/sessions/:id/skills with another tenant's skill -> 400/404", async () => {
     const sk = seed.skill(A); const s = seed.session(B);
     const r = await call("POST", `/v1/sessions/${s.id}/skills`, { type: "custom", skill_id: sk.id }, B);

@@ -39,12 +39,18 @@ export async function checkSkillAccess(refs: SkillRef[], sc: Scope): Promise<Ski
   return refs;
 }
 
-/** Package sources pi understands: npm:<pkg>, git:<url>, or a local path on the runner. */
+/**
+ * Package sources the installer understands: npm:<pkg>, git:<url>, or an absolute path on the runner.
+ * The absolute-path rule is checked here rather than only at install time, so a relative path fails
+ * the request that declares it instead of the first run that tries to load it.
+ */
 export function validatePackages(packages: unknown): string[] {
   if (packages === undefined || packages === null) return [];
   if (!Array.isArray(packages) || !packages.every((p) => typeof p === "string" && p.trim() && !/\s/.test(p))) {
-    throw invalid("packages must be an array of package sources (npm:<pkg>, git:<url>, or a path)");
+    throw invalid("packages must be an array of package sources (npm:<pkg>, git:<url>, or an absolute path on the runner)");
   }
+  const relative = (packages as string[]).find((p) => !p.startsWith("npm:") && !p.startsWith("git:") && !p.startsWith("/"));
+  if (relative) throw invalid(`package source ${JSON.stringify(relative)} must be npm:<pkg>, git:<url>, or an absolute path on the runner`);
   const blocked = disallowedEverywhere(packages as string[]);
   if (blocked.length) throw invalid(`these plugin packages are not allowed in any placement (PLUGIN_ALLOW/PLUGIN_ALLOW_SANDBOX): ${blocked.join(", ")}`);
   return packages as string[];

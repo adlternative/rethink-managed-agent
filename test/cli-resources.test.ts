@@ -102,6 +102,26 @@ describe("cli resource commands", () => {
     expect((await cli(s.url, ["sessions", "create", "--agent", "agent_a"])).code).toBe(2);
   });
 
+  it("plugins can be brought to one session: --packages at create, add/remove/list while it runs", async () => {
+    const s = await serve((r, res) => {
+      if (r.method === "GET" && r.path.startsWith("/v1/sessions/sess_1")) return sendJson(res, 200, { id: "sess_1", agent: { packages: ["npm:pma-plugin-outcome"] } });
+      return sendJson(res, r.method === "POST" ? 201 : 200, { id: "sess_1", agent: { packages: [] } });
+    });
+    expect((await cli(s.url, ["sessions", "create", "--agent", "agent_a", "--env", "env_e", "--packages", "npm:pma-plugin-outcome,/app/plugins/verify"])).code).toBe(0);
+    expect(s.requests[0]!.json.agent).toEqual({ type: "agent_with_overrides", id: "agent_a", packages: ["npm:pma-plugin-outcome", "/app/plugins/verify"] });
+
+    expect((await cli(s.url, ["sessions", "packages", "add", "sess_1", "npm:pma-plugin-outcome"])).code).toBe(0);
+    expect((await cli(s.url, ["sessions", "packages", "remove", "sess_1", "/app/plugins/verify"])).code).toBe(0);
+    const listed = await cli(s.url, ["sessions", "packages", "list", "sess_1"]);
+    expect(listed.stdout).toContain("npm:pma-plugin-outcome");
+    expect(s.requests.slice(1).map((r) => [r.method, r.path])).toEqual([
+      ["POST", "/v1/sessions/sess_1/packages"],
+      ["DELETE", `/v1/sessions/sess_1/packages/${encodeURIComponent("/app/plugins/verify")}`],
+      ["GET", "/v1/sessions/sess_1"],
+    ]);
+    expect((await cli(s.url, ["sessions", "packages", "add", "sess_1"])).code).toBe(2); // no source
+  });
+
   it("sessions list prints a table, --all follows next_cursor, --json prints the data", async () => {
     const sess = (id: string) => ({ id, status: "idle", agent: { name: "dev", model: { provider: "qoder", id: "auto" } }, context: null, updated_at: "2026-01-01T00:00:00Z" });
     const s = await serve((r, res) => sendJson(res, 200, r.path.includes("cursor=c1") ? { data: [sess("sess_2")], has_more: false, next_cursor: null } : { data: [sess("sess_1")], has_more: true, next_cursor: "c1" }));

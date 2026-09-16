@@ -93,7 +93,7 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | GET | `/v1/agents`, `/v1/agents/:id` | | |
 | POST | `/v1/environments` | `{name, provider:"local"\|"docker"\|"e2b", image?, workspace?}` | `workspace` is the default `WorkspaceSpec`: `{kind:"empty"}` (default), `{kind:"git", remote, ref?}`, `{kind:"local", path}` |
 | GET | `/v1/environments`, `/v1/environments/:id` | | |
-| POST | `/v1/sessions` | `{agent: id \| {type:"agent_with_overrides", id, model?, system?, tools?}, environment_id, workspace? \| workspace_id?, initial_events?}` | Snapshots the agent config into the session. Omit `workspace*` to use the environment default; pass `workspace_id` to continue an existing workspace |
+| POST | `/v1/sessions` | `{agent: id \| {type:"agent_with_overrides", id, model?, system?, tools?, packages?}, environment_id, workspace? \| workspace_id?, initial_events?}` | Snapshots the agent config into the session. Omit `workspace*` to use the environment default; pass `workspace_id` to continue an existing workspace |
 | GET | `/v1/sessions`, `/v1/sessions/:id` | | `status` is `idle` / `running` / `terminated` |
 | DELETE | `/v1/sessions/:id` | | Cascades to events |
 | POST | `/v1/sessions/:id/archive` | | Appends `session.status_terminated` |
@@ -404,7 +404,7 @@ Bundled CLI commands (`npm run cli -- --help`, and `<command> --help` for the fl
 |---|---|
 | `agents` | `list`, `get <id>`, `create <name> <provider/model> [--system S \| --system-file F] [--tools a,b] [--packages p1,p2] [--skills s1,s2]`, `update <id> [...]`, `delete <id>` (removed if unused, archived if sessions reference it) |
 | `envs` | `list`, `get <id>`, `create <name> --provider local\|docker\|e2b\|byoc [--image I] [--network none\|bridge] [--plugin-host runner\|sandbox] [--git URL [--ref R]]`, `delete <id>` (removed if unused, archived if sessions are attached; byoc prints the `worker_key` once) |
-| `sessions` | `list [--status S] [--all]`, `get`, `create --agent A --env E [--model p/m] [--message T] [--memory-stores mem[:path],..] [--vaults vault_a,vault_b] [--environments main=env,k=env[:fork]] [--parent sess]`, `delete`, `archive`, `prompt`, `set-system`, `attach`, `mount`, `unmount`, `skill add\|remove` |
+| `sessions` | `list [--status S] [--all]`, `get`, `create --agent A --env E [--model p/m] [--message T] [--packages npm:x,/path] [--memory-stores mem[:path],..] [--vaults vault_a,vault_b] [--environments main=env,k=env[:fork]] [--parent sess]`, `delete`, `archive`, `prompt`, `set-system`, `attach`, `mount`, `unmount`, `skill add\|remove`, `packages list\|add\|remove` |
 | `send` | `send <session> <text...> [--file a.png,b.pdf] [--wait [--timeout SEC]]` |
 | `stream` / `events` / `interrupt` | `stream <session> [--since SEQ]`, `events <session> [--since SEQ] [--limit N]` (follows every page), `interrupt <session>` |
 | `vaults` | `list`, `get`, `create [name]`, `delete`, `credentials list <vault>`, `credentials put <vault> <name> --value-env VAR \| --value-stdin \| --value V [--mcp-url URL]`, `credentials delete <vault> <name>` |

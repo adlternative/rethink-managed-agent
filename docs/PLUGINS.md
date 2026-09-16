@@ -16,8 +16,29 @@ my-plugin/
   prompts/<name>.md
 ```
 
-Sources on an agent: `packages: ["npm:<pkg>", "git:<url>[@ref]", "/absolute/path"]` (`pma agents create x qoder/kmodel --packages ...`).
-They are installed once per agent into `PI_AGENT_ROOT/<agent_id>` and cached by the source list.
+## Attaching a plugin
+
+A package source is `npm:<pkg>`, `git:<url>[@ref]`, or an **absolute path on the runner** (a relative
+path is refused by the request that declares it, not by the run that would load it). Sources are
+installed once per agent into `PI_AGENT_ROOT/<agent_id>` and cached by the source list, so the plugin
+host is shared by every session of that agent.
+
+Three moments, because they answer different questions:
+
+| Where | Command | When you want it |
+|---|---|---|
+| on the agent | `pma agents create x qoder/kmodel --packages /app/plugins/outcome` (or `agents update`, which replaces the whole list) | the plugin is part of what this agent *is* — every session gets it |
+| on one session, at create | `pma sessions create --agent A --env E --packages npm:pma-plugin-outcome` | this run needs something extra; the saved agent is untouched |
+| on a running session | `pma sessions packages add <sess> /app/plugins/outcome` (`remove`, `list`) | the user decided mid-conversation. Live from the session's next turn — the runner keys its plugin host on (agent id, package list), so the next run loads a host that has it |
+
+The session is where a person actually works, so the last two exist: you should not have to redefine
+an agent to try a plugin. Detaching is the same call with `remove`, and both are recorded as
+`session.updated` events, so the log says when the session's capabilities changed.
+
+Whichever route, the package must pass the deployment's allowlist: `PLUGIN_ALLOW` for the shared
+runner (docker-compose ships `/app/plugins/`, i.e. bundled plugins only) and `PLUGIN_ALLOW_SANDBOX`
+(default `*`) for an environment with `plugin_host=sandbox`, where the code runs inside the user's own
+sandbox. A blocked package fails with a message naming the list that blocked it.
 
 ## API (`src/plugins/api.ts`)
 

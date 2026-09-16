@@ -161,6 +161,28 @@ export const sessions = new Hono()
     await appendEvents(s.id, [{ type: "session.updated", changes: { memory_stores: next } }]);
     return c.json(publicSession({ ...s, memory_stores: next }));
   })
+  /**
+   * Attach a plugin to this session from the next turn on. A session is where a user actually works,
+   * so a plugin can be brought in mid-conversation instead of only when the agent was defined; the
+   * saved agent is untouched. The package must still pass the deployment's allowlist.
+   */
+  .post("/:id/packages", async (c) => {
+    const s = await getLive(c.req.param("id"), scope(c));
+    const body = await readJson<{ source?: string }>(c);
+    const [source] = validatePackages([body.source]);
+    const next = await sessionConfig.addPackage(s.id, source!);
+    if (!next) throw invalid(`package ${source} is already attached to this session`);
+    await appendEvents(s.id, [{ type: "session.updated", changes: { packages: next } }]);
+    return c.json(publicSession({ ...s, agent: { ...s.agent, packages: next } }), 201);
+  })
+  .delete("/:id/packages/:source", async (c) => {
+    const s = await getLive(c.req.param("id"), scope(c));
+    const source = decodeURIComponent(c.req.param("source"));
+    const next = await sessionConfig.removePackage(s.id, source);
+    if (!next) throw notFound("package", source);
+    await appendEvents(s.id, [{ type: "session.updated", changes: { packages: next } }]);
+    return c.json(publicSession({ ...s, agent: { ...s.agent, packages: next } }));
+  })
   .post("/:id/skills", async (c) => {
     const s = await getLive(c.req.param("id"), scope(c));
     const [ref] = await checkSkillAccess(validateSkillRefs([await readJson(c)]), scope(c));
