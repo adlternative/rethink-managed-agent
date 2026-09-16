@@ -119,6 +119,12 @@ export function projectDelta(delta: StreamDelta, session: SessionResource, ctx: 
         { type: "agent.session.idle", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "idle" } },
       ];
     }
+    case "session.thread_created":
+      // a sub-agent session started: this dialect calls it a subagent
+      return [{
+        type: "agent.session.subagent.created", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null,
+        subagent: { id: p.child_session_id, object: "agent.session.subagent", session_id: sid, parent_agent_id: session.agent.id, name: p.name ?? p.role ?? null, instructions: null, status: "active", opened_at: nowSec(), closed_at: null },
+      }];
     case "sandbox.acquired":
       // The session's execution environment is up and connected (a sandbox lease was obtained).
       return [{ type: "agent.session.environment.ready", event_id: evId(), session_id: sid, environment: { id: session.environment_id, status: "ready", error: null } }];

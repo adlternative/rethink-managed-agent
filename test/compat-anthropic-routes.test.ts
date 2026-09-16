@@ -17,6 +17,7 @@ const st = vi.hoisted(() => ({
   vaults: new Map<string, any>(),
   creds: new Map<string, Map<string, any>>(),
   stores: new Map<string, any>(),
+  files: new Map<string, any>(),
   sent: [] as { session: string; inputs: any[] }[],
   n: 0,
 }));
@@ -76,6 +77,13 @@ vi.mock("../src/infra/db.ts", async (orig) => {
       get: async (vaultId: string, name: string) => st.creds.get(vaultId)?.get(name) ?? null,
       byId: async (id: string, vaultIds: string[]) => { for (const v of vaultIds) for (const cr of st.creds.get(v)?.values() ?? []) if (cr.id === id) return cr; return null; },
       delete: async (vaultId: string, idOrName: string) => { for (const [name, cr] of st.creds.get(vaultId) ?? []) if (cr.id === idOrName || name === idOrName) return st.creds.get(vaultId)!.delete(name); return false; },
+    },
+    files: {
+      create: async (input: any) => { const f = { id: `file_${++st.n}`, owner_id: input.owner_id, type: "file", filename: input.filename, mime_type: input.mime_type, size_bytes: input.data.length, sha256: "x", downloadable: true, created_at: "2026-01-01T00:00:00.000Z" }; st.files.set(f.id, { ...f, data: input.data }); const { data: _d, ...pub } = st.files.get(f.id); return pub; },
+      list: async (sc?: any) => [...st.files.values()].filter((f) => owned(f, sc)).map(({ data: _d, ...pub }) => pub),
+      get: async (id: string, sc?: any) => { const f = owned(st.files.get(id), sc); if (!f) return null; const { data: _d, ...pub } = f; return pub; },
+      content: async (id: string, sc?: any) => { const f = owned(st.files.get(id), sc); return f ? { meta: f, data: f.data } : null; },
+      delete: async (id: string, sc?: any) => (owned(st.files.get(id), sc) ? st.files.delete(id) : false),
     },
     memoryStores: {
       create: async (input: any) => { const m = { id: `mem_${++st.n}`, owner_id: input.owner_id, name: input.name, description: input.description ?? "", created_at: "2026-01-01T00:00:00.000Z" }; st.stores.set(m.id, m); return m; },
@@ -137,7 +145,7 @@ const agentSpec = {
 };
 
 beforeEach(() => {
-  for (const m of [st.agents, st.sessions, st.environments, st.workspaces, st.events, st.vaults, st.creds, st.stores]) m.clear();
+  for (const m of [st.agents, st.sessions, st.environments, st.workspaces, st.events, st.vaults, st.creds, st.stores, st.files]) m.clear();
   st.sent.length = 0;
   st.environments.set("env_1", { id: "env_1", owner_id: "prc_a", name: "e", provider: "docker", network: "bridge", workspace: { kind: "empty" }, created_at: "2026-01-01T00:00:00.000Z" });
 });
@@ -428,6 +436,21 @@ describe("vaults, environments and memory stores", () => {
     const agent = await json("POST", "/v1/agents", agentSpec);
     const session = await json("POST", "/v1/sessions", { agent: agent.id, environment_id: "env_1", resources: [{ type: "memory_store", memory_store_id: store.id }] });
     expect(session.resources).toEqual([{ type: "memory_store", memory_store_id: store.id, mount_path: "memories/prefs" }]);
+  });
+
+  it("files round-trip through the Claude Files API shape", async () => {
+    const form = new FormData();
+    form.set("file", new File([new Uint8Array([1, 2, 3])], "notes.txt", { type: "text/plain" }));
+    const created = await app.request("/anthropic/v1/files?beta=true", { method: "POST", headers: { "x-owner": "prc_a" }, body: form });
+    expect(created.status).toBe(201);
+    const file = await created.json();
+    expect(file).toMatchObject({ type: "file", filename: "notes.txt", mime_type: "text/plain", size_bytes: 3 });
+
+    const list = await json("GET", "/v1/files");
+    expect(list.data.map((f: any) => f.id)).toContain(file.id);
+    expect(list).toHaveProperty("next_page"); // this dialect's page envelope, not has_more
+    expect(await json("GET", `/v1/files/${file.id}`)).toMatchObject({ id: file.id });
+    expect(await json("DELETE", `/v1/files/${file.id}`)).toEqual({ id: file.id, type: "file_deleted" });
   });
 
   it("everything is owner-scoped", async () => {

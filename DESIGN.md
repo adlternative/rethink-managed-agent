@@ -762,6 +762,7 @@ deliberately is not. Each is refused at the edge (400 with the reason) or report
 | **`glob` / `grep`** (CMA toolset) | No rethink builtin; the agent does the same with `bash`. |
 | **`system.message` mid-conversation** (CMA) | rethink changes the system prompt with `PATCH /v1/sessions/:id`, which applies from the next turn. |
 | **Webhooks** (both) | Not implemented; subscribe to the event stream instead. |
+| **`input_image` by URL** (OpenAI) | Images are referenced as uploaded files (`{type:"image", source:{type:"file", file_id}}`) so the bytes are the deployment's, not a URL the runner must fetch. |
 | **Memories under a store** (CMA `memories`, `memory_versions`) | A rethink memory store is a mounted directory the agent edits, versioned as a workspace ref — not a path-addressed document API with preconditions and redaction. |
 | **`file` / `github_repository` session resources** (CMA) | A file is attached to a message (`{type:"document", source:{type:"file", file_id}}`), and a repository is the environment's workspace (`{kind:"git", remote}`). Both exist; they are declared elsewhere. |
 | **`always_ask` on sandbox tools** (CMA) | Confirmation is implemented for MCP tools, where the call leaves the deployment. A sandbox tool is already confined by the sandbox, and holding every `bash` would make the loop unusable. |

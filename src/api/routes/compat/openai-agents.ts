@@ -529,6 +529,16 @@ export const openaiAgents = new Hono()
     const items = toItems(child, await listEventsForState(child.id, ITEM_EVENT_TYPES)).filter((i) => i.turn_id === c.req.param("turnId"));
     return c.json(cursorPage(items, pageQuery(c)));
   })
+  // ---- Environments (client.beta.agents.environments.retrieve) ----
+  .get("/agents/environments/:envId", async (c) => {
+    const e = await repos.environments.get(c.req.param("envId"), scope(c));
+    if (!e) throw notFound("environment", c.req.param("envId"));
+    // a rethink environment is a sandbox provider + a workspace; there is no hosted template behind it
+    return c.json({
+      id: e.id, object: "agent.environment", type: e.provider === "byoc" ? "self_hosted" : "openai_hosted",
+      status: "connected", files: [], plugins: [], skills: [],
+    });
+  })
   // ---- Reusable agents (client.beta.agents.*) ----
   .post("/agents", async (c) => {
     const spec = await readJson<OpenAiAgentSpec>(c);

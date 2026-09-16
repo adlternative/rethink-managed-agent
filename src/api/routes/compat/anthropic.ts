@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { memoryStores, repos, sessionConfig, vaults, vaultCredentials } from "../../../infra/db.ts";
+import { files, memoryStores, repos, sessionConfig, vaults, vaultCredentials } from "../../../infra/db.ts";
 import { appendEvents, listEvents } from "../../../infra/events.ts";
 import { subscribe } from "../../../infra/pubsub.ts";
 import { hasMcpCredentials, sealMcpServers } from "../../../infra/mcp-credentials.ts";
@@ -12,6 +12,7 @@ import { ownerId, scope } from "../../auth.ts";
 import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
 import { validateMounts } from "../memories.ts";
+import { fileBody, readUpload } from "../files.ts";
 import { credentialInput, validateMcpCredentialIds, validateVaultIds, type CredentialBody } from "../vaults.ts";
 import { cmaAgentToRethink, cmaContent, toCmaAgent, toCmaEvents, toCmaSession, type CmaAgentSpec, type CmaCallKinds } from "./anthropic-translate.ts";
 
@@ -311,6 +312,29 @@ export const anthropicAgents = new Hono()
     return c.json({ ...toCmaEnvironment(row), archived_at: new Date().toISOString() });
   })
 
+  // ---------- Files ----------
+  // The rethink files API already follows the Claude Files API shape (`type:"file"`, the same fields
+  // and a `file` multipart part), so only the list envelope differs.
+  .post("/v1/files", async (c) => {
+    const { filename, mime, data } = await readUpload(c);
+    return c.json(await files.create({ owner_id: ownerId(c), filename, mime_type: mime, data }), 201);
+  })
+  .get("/v1/files", async (c) => {
+    const rows = await files.list(scope(c));
+    const scoped = c.req.query("scope_id") ? [] : rows; // session-scoped outputs are artifacts here, not files
+    return c.json(pageCursor(scoped, c));
+  })
+  .get("/v1/files/:fileId", async (c) => {
+    const f = await files.get(c.req.param("fileId"), scope(c));
+    if (!f) throw notFound("file", c.req.param("fileId"));
+    return c.json(f);
+  })
+  .get("/v1/files/:fileId/content", async (c) => fileBody(c, c.req.param("fileId")))
+  .delete("/v1/files/:fileId", async (c) => {
+    if (!(await files.delete(c.req.param("fileId"), scope(c)))) throw notFound("file", c.req.param("fileId"));
+    return c.json({ id: c.req.param("fileId"), type: "file_deleted" });
+  })
+
   // ---------- Memory stores ----------
   .post("/v1/memory_stores", async (c) => {
     const body = await readJson<{ name?: string; description?: string; metadata?: Record<string, string> }>(c);
@@ -327,6 +351,14 @@ export const anthropicAgents = new Hono()
   .delete("/v1/memory_stores/:storeId", async (c) => {
     if (!(await memoryStores.delete(c.req.param("storeId"), scope(c)))) throw notFound("memory_store", c.req.param("storeId"));
     return c.json({ id: c.req.param("storeId"), type: "memory_store_deleted" });
+  })
+  /** Update: only the description is mutable here (the name is the mount path a session already uses). */
+  .post("/v1/memory_stores/:storeId", async (c) => {
+    const store = await memoryStores.get(c.req.param("storeId"), scope(c));
+    if (!store) throw notFound("memory_store", c.req.param("storeId"));
+    const body = await readJson<{ name?: string; description?: string }>(c);
+    if (body.name !== undefined && body.name !== store.name) throw invalid("a memory store's name is its mount path and cannot change");
+    return c.json(toCmaMemoryStore({ ...store, description: body.description ?? store.description }));
   })
   .post("/v1/memory_stores/:storeId/archive", async (c) => {
     const store = await memoryStores.get(c.req.param("storeId"), scope(c));
