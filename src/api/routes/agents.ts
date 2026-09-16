@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { repos } from "../../infra/db.ts";
-import type { BuiltinToolName, ModelRef } from "../../shared/types.ts";
+import type { BuiltinToolName, McpServerDecl, ModelRef } from "../../shared/types.ts";
 import { invalid, notFound, readJson } from "../errors.ts";
 import { validateSkillRefs } from "./skills.ts";
 import { disallowedEverywhere } from "../../plugins/allow.ts";
@@ -50,6 +50,34 @@ export function validatePackages(packages: unknown): string[] {
   return packages as string[];
 }
 
+/**
+ * Remote MCP servers of a reusable agent. Credentials are deliberately NOT accepted here: a reusable
+ * definition stays secret-free and each session authenticates from its own vaults (`credential_id`, or a
+ * credential matched by URL) — the split both Claude Managed Agents and the OpenAI Agents API make.
+ */
+export function validateMcpServers(v: unknown): McpServerDecl[] {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v)) throw invalid("mcp_servers must be an array");
+  if (v.length > 20) throw invalid("at most 20 mcp_servers");
+  const out: McpServerDecl[] = [];
+  for (const raw of v) {
+    const s = raw as Partial<McpServerDecl> & { authorization?: unknown; headers?: unknown };
+    const label = s.label;
+    if (typeof label !== "string" || !label) throw invalid("each mcp_servers entry needs a label");
+    if (out.some((m) => m.label === label)) throw invalid(`mcp server label ${JSON.stringify(label)} is used more than once`);
+    if (typeof s.url !== "string" || !s.url) throw invalid(`mcp server ${label} needs a url`);
+    try { new URL(s.url); } catch { throw invalid(`mcp server ${label}: url ${JSON.stringify(s.url)} is not a valid URL`); }
+    if (s.authorization !== undefined) throw invalid(`mcp server ${label}: an agent stores no credentials; put the token in a vault and reference it with credential_id`);
+    if (s.headers !== undefined && (typeof s.headers !== "object" || Array.isArray(s.headers) || Object.values(s.headers as object).some((x) => typeof x !== "string"))) {
+      throw invalid(`mcp server ${label}: headers must be a string map (non-secret headers only)`);
+    }
+    if (s.allowed_tools !== undefined && (!Array.isArray(s.allowed_tools) || s.allowed_tools.some((t) => typeof t !== "string"))) throw invalid(`mcp server ${label}: allowed_tools must be an array of tool names`);
+    if (s.credential_id !== undefined && s.credential_id !== null && typeof s.credential_id !== "string") throw invalid(`mcp server ${label}: credential_id must be a vault credential id`);
+    out.push({ label, url: s.url, headers: s.headers as Record<string, string> | undefined, allowed_tools: s.allowed_tools, credential_id: s.credential_id ?? undefined });
+  }
+  return out;
+}
+
 export function validateIds(v: unknown, prefix: string): string[] {
   if (v === undefined || v === null) return [];
   if (!Array.isArray(v) || !v.every((x) => typeof x === "string" && x.startsWith(prefix + "_"))) throw invalid(`${prefix}s must be an array of ${prefix}_ ids`);
@@ -58,7 +86,7 @@ export function validateIds(v: unknown, prefix: string): string[] {
 
 export const agents = new Hono()
   .post("/", async (c) => {
-    const body = await readJson<{ name?: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown }>(c);
+    const body = await readJson<{ name?: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown; mcp_servers?: unknown }>(c);
     if (!body.name) throw invalid("name is required");
     const agent = await repos.agents.create({
       owner_id: ownerId(c),
@@ -68,12 +96,13 @@ export const agents = new Hono()
       tools: validateTools(body.tools),
       packages: validatePackages(body.packages),
       skills: await checkSkillAccess(validateSkillRefs(body.skills), scope(c)),
+      mcp_servers: validateMcpServers(body.mcp_servers),
     });
     return c.json(agent, 201);
   })
   /** Edit an agent; existing sessions keep their snapshot (change a live one with PATCH /v1/sessions/:id). */
   .patch("/:id", async (c) => {
-    const body = await readJson<{ name?: string; model?: unknown; system?: string | null; tools?: unknown; packages?: unknown; skills?: unknown }>(c);
+    const body = await readJson<{ name?: string; model?: unknown; system?: string | null; tools?: unknown; packages?: unknown; skills?: unknown; mcp_servers?: unknown }>(c);
     const patch: Record<string, unknown> = {};
     if (body.name !== undefined) patch.name = String(body.name);
     if (body.model !== undefined) patch.model = await checkModelAccess(validateModel(body.model), ownerId(c));
@@ -81,6 +110,7 @@ export const agents = new Hono()
     if (body.tools !== undefined) patch.tools = validateTools(body.tools);
     if (body.packages !== undefined) patch.packages = validatePackages(body.packages);
     if (body.skills !== undefined) patch.skills = await checkSkillAccess(validateSkillRefs(body.skills), scope(c));
+    if (body.mcp_servers !== undefined) patch.mcp_servers = validateMcpServers(body.mcp_servers);
     const a = await repos.agents.update(c.req.param("id"), patch, scope(c));
     if (!a) throw notFound("agent", c.req.param("id"));
     return c.json(a);

@@ -45,6 +45,37 @@ describe("agents", () => {
     expect(await ok.json()).toMatchObject({ owner_id: A, tools: ["bash", "read", "write", "edit"], packages: [], skills: [] });
   });
 
+  it("mcp_servers are stored on the agent, secret-free, and snapshotted into a session", async () => {
+    const m = { provider: "qoder", id: "auto" };
+    const server = { label: "docs", url: "https://docs.example.com/mcp", allowed_tools: ["search"], headers: { "x-tenant": "t1" } };
+    const bad = [
+      [{ url: "https://x.example.com/mcp" }, /label/],
+      [{ label: "docs", url: "not-a-url" }, /valid URL/],
+      [{ label: "docs", url: "https://x.example.com/mcp", authorization: "Bearer t" }, /credential_id/], // a reusable agent stores no secrets
+      [{ label: "docs", url: "https://x.example.com/mcp", headers: { n: 1 } }, /headers/],
+    ] as const;
+    for (const [s, re] of bad) {
+      const res = await call("POST", "/v1/agents", { name: "x", model: m, mcp_servers: [s] });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error.message).toMatch(re);
+    }
+    expect((await call("POST", "/v1/agents", { name: "x", model: m, mcp_servers: [server, server] })).status).toBe(400); // duplicate label
+
+    const agent = await (await call("POST", "/v1/agents", { name: "x", model: m, mcp_servers: [server] })).json();
+    expect(agent.mcp_servers).toEqual([server]);
+    const patched = await (await call("PATCH", `/v1/agents/${agent.id}`, { mcp_servers: [] })).json();
+    expect(patched.mcp_servers).toEqual([]);
+    await call("PATCH", `/v1/agents/${agent.id}`, { mcp_servers: [server] });
+
+    const env = seed.environment(A);
+    const session = await (await call("POST", "/v1/sessions", { agent: agent.id, environment_id: env.id })).json();
+    // header values are masked on the way out even here, where they are validated not to be credentials
+    expect(session.agent.mcp_servers).toEqual([{ ...server, headers: { "x-tenant": "[redacted]" } }]);
+    // an override may replace them for this session only
+    const overridden = await (await call("POST", "/v1/sessions", { agent: { type: "agent_with_overrides", id: agent.id, mcp_servers: [] }, environment_id: env.id })).json();
+    expect(overridden.agent.mcp_servers).toEqual([]);
+  });
+
   it("PATCH and GET are owner-scoped", async () => {
     const theirs = seed.agent(B);
     expect((await call("PATCH", `/v1/agents/${theirs.id}`, { name: "hijack" })).status).toBe(404);

@@ -77,7 +77,11 @@ export function resolveMcpCredentials(server: McpServerDecl, credentials: Sealed
   return { ...(authorization ? { authorization } : {}), ...(inline?.headers ? { headers: inline.headers } : {}) };
 }
 
-/** API-safe view: no plaintext and no ciphertext, only which credentials are set. */
+/**
+ * API-safe view: no plaintext and no ciphertext, only which credentials are set. Header *values* are
+ * always masked, even on the secret-free agent path where they are validated not to be credentials: the
+ * stored decl does not say where it came from, and a header is where the OpenAI inline path puts a token.
+ */
 export function redactMcpServers(servers: McpServerDecl[] | undefined): McpServerDecl[] | undefined {
   if (!servers) return servers;
   return servers.map(({ authorization, headers, secret, header_names, has_authorization, ...rest }) => {

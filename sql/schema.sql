@@ -264,6 +264,17 @@ ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAUL
 ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS mcp_server_url TEXT;
 ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS refresh JSONB;
 ALTER TABLE vault_credentials ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+-- Remote MCP servers an agent connects to. Credentials are NOT stored here: a session supplies them
+-- from its vaults (or, on the OpenAI inline path, sealed into the session's own agent snapshot).
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS mcp_servers JSONB NOT NULL DEFAULT '[]';
+
+-- Compat-dialect fields: caller labels, the caller's function-tool declarations, and whatever a dialect
+-- must echo back verbatim (its declared tool list, reasoning/verbosity knobs). The engine reads none of it.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS client_tools JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS compat JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
+
 -- One credential per MCP server in a vault (the URL is the match key, so a second one would be ambiguous).
 CREATE UNIQUE INDEX IF NOT EXISTS vault_credentials_mcp_url ON vault_credentials(vault_id, mcp_server_url) WHERE mcp_server_url IS NOT NULL;
 

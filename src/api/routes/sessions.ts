@@ -3,10 +3,10 @@ import { repos, toolOutputs } from "../../infra/db.ts";
 import { appendEvents } from "../../infra/events.ts";
 import type { AgentResource, SessionEnvironment, SessionResource, WorkspaceRef, WorkspaceResource, WorkspaceSpec } from "../../shared/types.ts";
 import { ApiError, invalid, notFound, queryInt, readJson } from "../errors.ts";
-import { checkModelAccess, checkSkillAccess, validateModel, validatePackages, validateTools } from "./agents.ts";
+import { checkModelAccess, checkSkillAccess, validateMcpServers, validateModel, validatePackages, validateTools } from "./agents.ts";
 import { validateSkillRefs } from "./skills.ts";
 import { validateMounts } from "./memories.ts";
-import { validateVaultIds } from "./vaults.ts";
+import { validateMcpCredentialIds, validateVaultIds } from "./vaults.ts";
 import { redactMcpServers } from "../../infra/mcp-credentials.ts";
 import { sessionConfig, skills as skillsRepo } from "../../infra/db.ts";
 import { parseSessionCursor } from "../../shared/cursor.ts";
@@ -16,7 +16,7 @@ import { events, sendUserEvents, validateUserEvents } from "./events.ts";
 import { scope, ownerId } from "../auth.ts";
 import type { Scope } from "../../infra/db.ts";
 
-type AgentInput = string | { type: "agent_with_overrides"; id: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown };
+type AgentInput = string | { type: "agent_with_overrides"; id: string; model?: unknown; system?: string; tools?: unknown; packages?: unknown; skills?: unknown; mcp_servers?: unknown };
 
 /** A session as the API returns it: MCP server credentials are never echoed, neither plaintext nor ciphertext. */
 export function publicSession<T extends SessionResource>(s: T): T {
@@ -43,6 +43,7 @@ async function resolveAgent(input: AgentInput | undefined, sc: Scope): Promise<S
     tools: input.tools !== undefined ? validateTools(input.tools) : snap.tools,
     packages: input.packages !== undefined ? validatePackages(input.packages) : (snap.packages ?? []),
     skills: input.skills !== undefined ? await checkSkillAccess(validateSkillRefs(input.skills), sc) : (snap.skills ?? []),
+    mcp_servers: input.mcp_servers !== undefined ? validateMcpServers(input.mcp_servers) : (snap.mcp_servers ?? []),
   };
 }
 
@@ -101,6 +102,7 @@ export const sessions = new Hono()
     if (body.parent_id && !(await repos.sessions.get(body.parent_id, sc))) throw notFound("session", body.parent_id);
     const memory_stores = await validateMounts(body.memory_stores, sc);
     const vault_ids = await validateVaultIds(body.vault_ids, sc);
+    await validateMcpCredentialIds(agent.mcp_servers, vault_ids);
     const initial = Array.isArray(body.initial_events) && body.initial_events.length > 0 ? validateUserEvents(body.initial_events) : null;
     const envs: SessionEnvironment[] = [];
     for (const input of inputs) envs.push(await resolveEnvironment(input, envs, owner, sc));

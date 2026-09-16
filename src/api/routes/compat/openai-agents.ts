@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { hasMcpCredentials, sealMcpServers } from "../../../infra/mcp-credentials.ts";
 import path from "node:path";
 import type { Context } from "hono";
-import { repos, vaults, vaultCredentials } from "../../../infra/db.ts";
+import { repos, sessionConfig, vaults, vaultCredentials } from "../../../infra/db.ts";
 import { lastSeq, listEvents, listEventsForState } from "../../../infra/events.ts";
 import { secretsConfigured } from "../../../infra/secrets.ts";
 import { listArtifacts, readArtifact, deleteArtifact } from "../../../infra/artifacts.ts";
@@ -11,7 +11,7 @@ import { invalid, notFound, queryInt, readJson } from "../../errors.ts";
 import { scope, ownerId } from "../../auth.ts";
 import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
-import { openaiAgentToRethink, openaiEnvToEnvironmentId, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
+import { COMPAT_AGENT_NAME, openaiAgentEcho, openaiAgentToRethink, openaiEnvToEnvironmentId, toOpenAiAgent, type OpenAiAgentSpec, type OpenAiEnvSpec } from "./translate.ts";
 import { requiredActions, clientToolNames, environmentActions, STATE_EVENT_TYPES } from "./required-actions.ts";
 import { credentialInput, validateMcpCredentialIds, validateVaultIds, type CredentialBody } from "../vaults.ts";
 import { streamAgentSessionEvents } from "./openai-stream.ts";
@@ -78,20 +78,29 @@ export function toAgentSession(session: SessionResource, events: SessionEvent[],
     last_active_at: created,
     environment: { type: "reference" as const, environment_id: environmentId },
     required_actions: actions,
-    metadata: {},
-    usage: null,
+    metadata: session.metadata ?? {},
+    usage: session.usage?.requests ? {
+      input_tokens: session.usage.input,
+      input_tokens_details: { cached_tokens: session.usage.cache_read },
+      output_tokens: session.usage.output,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: session.usage.total_tokens,
+    } : null,
     vault_ids: session.vault_ids ?? [],
-    agent: {
-      id: session.agent.id,
-      model: `${session.agent.model.provider}/${session.agent.model.id}`,
-      instructions: session.agent.system ?? null,
-      name: session.agent.name ?? null,
-      multi_agent: { max_concurrent_subagents: 0 },
-      reasoning: {},
-      service_tier: "auto" as const,
-      text: {},
-      tools: [] as unknown[],
-    },
+    agent: (() => {
+      const echo = (session.agent.compat?.openai ?? {}) as Partial<ReturnType<typeof openaiAgentEcho>>;
+      return {
+        id: session.agent.id,
+        model: `${session.agent.model.provider}/${session.agent.model.id}`,
+        instructions: session.agent.system ?? null,
+        name: session.agent.name === COMPAT_AGENT_NAME ? null : session.agent.name ?? null,
+        multi_agent: echo.multi_agent ?? { enabled: false, max_concurrent_subagents: null },
+        reasoning: echo.reasoning ?? { effort: null, summary: null },
+        service_tier: echo.service_tier ?? "auto",
+        text: echo.text ?? { format: { type: "text" }, verbosity: "medium" },
+        tools: echo.tools ?? [],
+      };
+    })(),
   };
 }
 
@@ -240,12 +249,57 @@ async function loadSession(c: Context): Promise<SessionResource> {
   return s;
 }
 
+/** Caller labels: a string map, as both dialects define it (values are never interpreted). */
+export function validateMetadata(v: unknown, { patch = false } = {}): Record<string, string> {
+  if (v === undefined || v === null) return {};
+  if (typeof v !== "object" || Array.isArray(v)) throw invalid("metadata must be an object of string values");
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (val === null && patch) { out[k] = null as unknown as string; continue; } // patch: null deletes the key
+    if (typeof val !== "string") throw invalid(`metadata.${k} must be a string`);
+    out[k] = val;
+  }
+  if (Object.keys(out).length > 16) throw invalid("at most 16 metadata keys");
+  return out;
+}
+
+/**
+ * Build a stored agent row from an SDK agent spec. `mcp_servers` on a reusable agent must stay
+ * credential-free (the SDK's PersistedMcpTransport has no `authorization`), so inline credentials are
+ * refused here and a session supplies them from its vaults instead.
+ */
+async function agentRowFromSpec(spec: OpenAiAgentSpec, owner: string, persisted: boolean) {
+  const draft = openaiAgentToRethink(spec);
+  if (persisted && hasMcpCredentials(draft.mcp_servers)) {
+    throw invalid("a saved agent stores no credentials: drop transport.authorization/headers and attach a vault credential to the session (credential_id, or matched by server URL)");
+  }
+  return {
+    owner_id: owner,
+    name: draft.name,
+    model: draft.model,
+    system: draft.system,
+    tools: draft.tools,
+    packages: draft.packages,
+    skills: [],
+    mcp_servers: draft.mcp_servers,
+    metadata: validateMetadata(spec.metadata),
+    client_tools: draft.client_tools,
+    compat: { openai: openaiAgentEcho(spec) },
+  };
+}
+
 export const openaiAgents = new Hono()
   .post("/agents/sessions", async (c) => {
-    const body = await readJson<{ agent?: OpenAiAgentSpec; environment?: OpenAiEnvSpec; input?: unknown; metadata?: unknown; vault_ids?: unknown; stream?: boolean }>(c);
-    if (!body.agent) throw invalid("agent (with a model) is required; agent_id references are not supported yet");
+    const body = await readJson<{ agent?: OpenAiAgentSpec; agent_id?: string; environment?: OpenAiEnvSpec; input?: unknown; metadata?: unknown; vault_ids?: unknown; stream?: boolean }>(c);
     const owner = ownerId(c);
-    const draft = openaiAgentToRethink(body.agent);
+    // Either a saved agent (optionally overridden field by field) or a complete inline definition.
+    const saved = body.agent_id ? await repos.agents.get(body.agent_id, scope(c)) : null;
+    if (body.agent_id && !saved) throw notFound("agent", body.agent_id);
+    if (!saved && !body.agent) throw invalid("agent (with a model) or agent_id is required");
+    const agentSpec: OpenAiAgentSpec = saved
+      ? { ...(saved.compat?.openai as object ?? {}), model: `${saved.model.provider}/${saved.model.id}`, instructions: saved.system ?? undefined, name: saved.name, ...(body.agent ?? {}) } as OpenAiAgentSpec
+      : body.agent!;
+    const draft = openaiAgentToRethink(agentSpec);
     const environmentId = openaiEnvToEnvironmentId(body.environment);
     // validate everything before any row is written
     const inputs = createInputToUserEvents(body.input);
@@ -257,11 +311,15 @@ export const openaiAgents = new Hono()
     if (hasMcpCredentials(draft.mcp_servers) && !secretsConfigured()) throw invalid("MCP server credentials need PMA_SECRET_KEY to be stored encrypted; set it on the api and runner");
     await validateMcpCredentialIds(draft.mcp_servers, vaultIds);
     const mcpServers = sealMcpServers(draft.mcp_servers);
-    const spec = environment.workspace;
-    const workspace = await repos.workspaces.create(spec, initialRef(spec) as WorkspaceRef, owner);
-    const agentRow = await repos.agents.create({ owner_id: owner, name: draft.name, model: draft.model, system: draft.system, tools: draft.tools, packages: draft.packages, skills: [] });
-    const { created_at: _c, ...snapshot } = { ...agentRow, client_tools: draft.client_tools, mcp_servers: mcpServers };
-    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot, vault_ids: vaultIds });
+    const wsSpec = environment.workspace;
+    const workspace = await repos.workspaces.create(wsSpec, initialRef(wsSpec) as WorkspaceRef, owner);
+    const agentRow = saved ?? await repos.agents.create({ owner_id: owner, name: draft.name, model: draft.model, system: draft.system, tools: draft.tools, packages: draft.packages, skills: [], compat: { openai: openaiAgentEcho(agentSpec) } });
+    // the snapshot is what this session runs with: the saved agent as overridden here, never the saved row alone
+    const { created_at: _c, ...snapshot } = {
+      ...agentRow, name: draft.name, model: draft.model, system: draft.system, tools: draft.tools, packages: draft.packages,
+      client_tools: draft.client_tools, mcp_servers: mcpServers, compat: { openai: openaiAgentEcho(agentSpec) },
+    };
+    const session = await repos.sessions.create({ owner_id: owner, agent_id: agentRow.id, environment_id: environmentId, workspace_id: workspace.id, agent: snapshot, vault_ids: vaultIds, metadata: validateMetadata(body.metadata) });
     const appended = inputs.length ? await sendUserEvents(session, inputs) : [];
     // stream:true -> SSE of AgentSessionEvents for the turn the input just triggered. Start at the
     // input's seq (the fresh session's first user.message) so the run's events that follow are all captured.
@@ -275,7 +333,7 @@ export const openaiAgents = new Hono()
     const limit = c.req.query("limit") ? queryInt(c, "limit", 20, 1) : undefined;
     // the SDK's CursorPage sends after=<last id of the previous page>
     const after = c.req.query("after") || undefined;
-    const page = await repos.sessions.listPage(scope(c), { limit, after });
+    const page = await repos.sessions.listPage(scope(c), { limit, after, agentId: c.req.query("agent_id") || undefined, order: c.req.query("order") === "asc" ? "asc" : "desc" });
     // List is a light projection: status from the row, required_actions resolved on retrieve.
     const data = page.data.map((s) => toAgentSession(s, [], s.environment_id));
     return c.json({ object: "list", data, has_more: page.has_more, first_id: data[0]?.id ?? null, last_id: data[data.length - 1]?.id ?? null });
@@ -284,10 +342,14 @@ export const openaiAgents = new Hono()
     const session = await loadSession(c);
     return c.json(toAgentSession(session, await stateEvents(session), session.environment_id));
   })
-  /** Update session metadata (best-effort: accepted, not persisted yet). */
+  /** Update session metadata (a patch: a string upserts its key, null deletes it). */
   .post("/agents/sessions/:id", async (c) => {
     const session = await loadSession(c);
-    await readJson<{ metadata?: unknown }>(c).catch(() => ({}));
+    const body = await readJson<{ metadata?: unknown }>(c).catch(() => ({ metadata: undefined }));
+    if (body.metadata !== undefined) {
+      const metadata = await sessionConfig.patchMetadata(session.id, validateMetadata(body.metadata, { patch: true }), scope(c));
+      if (metadata) session.metadata = metadata;
+    }
     return c.json(toAgentSession(session, await stateEvents(session), session.environment_id));
   })
   .delete("/agents/sessions/:id", async (c) => {
@@ -393,6 +455,56 @@ export const openaiAgents = new Hono()
     const child = (await repos.sessions.childrenOf(session.id, scope(c))).find((k) => k.id === c.req.param("subId"));
     if (!child) throw notFound("subagent", c.req.param("subId"));
     return c.json({ object: "list", data: toTurns(child, await listEventsForState(child.id, TURN_EVENT_TYPES)), has_more: false });
+  })
+  // ---- Reusable agents (client.beta.agents.*) ----
+  .post("/agents", async (c) => {
+    const spec = await readJson<OpenAiAgentSpec>(c);
+    const row = await repos.agents.create(await agentRowFromSpec(spec, ownerId(c), true));
+    return c.json(toOpenAiAgent(row), 201);
+  })
+  .get("/agents", async (c) => {
+    const limit = c.req.query("limit") ? queryInt(c, "limit", 20, 1) : 20;
+    const after = c.req.query("after") || undefined;
+    const all = await repos.agents.list(scope(c));
+    const ordered = c.req.query("order") === "asc" ? all : [...all].reverse();
+    const start = after ? ordered.findIndex((a) => a.id === after) + 1 : 0;
+    const page = ordered.slice(start, start + limit);
+    return c.json({ object: "list", data: page.map(toOpenAiAgent), has_more: start + limit < ordered.length });
+  })
+  .get("/agents/:agentId", async (c) => {
+    const row = await repos.agents.get(c.req.param("agentId"), scope(c));
+    if (!row) throw notFound("agent", c.req.param("agentId"));
+    return c.json(toOpenAiAgent(row));
+  })
+  /** Update is POST in this dialect. Provided fields replace; omitted ones are kept. */
+  .post("/agents/:agentId", async (c) => {
+    const id = c.req.param("agentId");
+    const current = await repos.agents.get(id, scope(c));
+    if (!current) throw notFound("agent", id);
+    const body = await readJson<Partial<OpenAiAgentSpec>>(c);
+    const echo = (current.compat?.openai ?? {}) as Partial<ReturnType<typeof openaiAgentEcho>>;
+    // merge onto the stored spec so an omitted field keeps its value, then re-translate the whole thing
+    const merged: OpenAiAgentSpec = {
+      model: body.model ?? `${current.model.provider}/${current.model.id}`,
+      name: body.name !== undefined ? body.name : (current.name === COMPAT_AGENT_NAME ? null : current.name),
+      instructions: body.instructions !== undefined ? (body.instructions ?? undefined) : (current.system ?? undefined),
+      tools: body.tools !== undefined ? body.tools : echo.tools,
+      reasoning: body.reasoning !== undefined ? body.reasoning : (echo.reasoning as OpenAiAgentSpec["reasoning"]),
+      service_tier: body.service_tier !== undefined ? body.service_tier : echo.service_tier,
+      text: body.text !== undefined ? body.text : (echo.text as Record<string, unknown>),
+      multi_agent: body.multi_agent !== undefined ? body.multi_agent : echo.multi_agent,
+      metadata: body.metadata !== undefined ? body.metadata : current.metadata,
+    };
+    const next = await agentRowFromSpec(merged, current.owner_id, true);
+    const { owner_id: _o, ...patch } = next;
+    const row = await repos.agents.update(id, { ...patch, system: merged.instructions ?? null }, scope(c));
+    if (!row) throw notFound("agent", id);
+    return c.json(toOpenAiAgent(row));
+  })
+  .delete("/agents/:agentId", async (c) => {
+    const r = await repos.agents.delete(c.req.param("agentId"), scope(c));
+    if (!r) throw notFound("agent", c.req.param("agentId"));
+    return c.json({ id: c.req.param("agentId"), object: "agent.deleted", deleted: true });
   })
   // ---- Vaults (client.beta.agents.vaults.*) ----
   .post("/vaults", async (c) => {

@@ -157,8 +157,10 @@ export const repos = {
     async create(input: Omit<AgentResource, "id" | "created_at">): Promise<AgentResource> {
       const row = await one<AgentResource>(
         pool,
-        `INSERT INTO agents (id, owner_id, name, model, system, tools, packages, skills) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-        [newId("agent"), input.owner_id, input.name, JSON.stringify(input.model), input.system, JSON.stringify(input.tools), JSON.stringify(input.packages ?? []), JSON.stringify(input.skills ?? [])],
+        `INSERT INTO agents (id, owner_id, name, model, system, tools, packages, skills, mcp_servers, metadata, client_tools, compat)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        [newId("agent"), input.owner_id, input.name, JSON.stringify(input.model), input.system, JSON.stringify(input.tools), JSON.stringify(input.packages ?? []), JSON.stringify(input.skills ?? []),
+          JSON.stringify(input.mcp_servers ?? []), JSON.stringify(input.metadata ?? {}), JSON.stringify(input.client_tools ?? []), JSON.stringify(input.compat ?? {})],
       );
       return iso(row)!;
     },
@@ -169,10 +171,14 @@ export const repos = {
       const row = await one<AgentResource>(
         pool,
         `UPDATE agents SET name=COALESCE($2,name), model=COALESCE($3::jsonb,model), system=CASE WHEN $8 THEN $4 ELSE system END,
-           tools=COALESCE($5::jsonb,tools), packages=COALESCE($6::jsonb,packages), skills=COALESCE($7::jsonb,skills) WHERE id=$1${scope ? " AND owner_id=$9 AND archived_at IS NULL" : ""} RETURNING *`,
-        scope
-          ? [id, patch.name ?? null, patch.model ? JSON.stringify(patch.model) : null, patch.system ?? null, patch.tools ? JSON.stringify(patch.tools) : null, patch.packages ? JSON.stringify(patch.packages) : null, patch.skills ? JSON.stringify(patch.skills) : null, "system" in patch, scope.owner]
-          : [id, patch.name ?? null, patch.model ? JSON.stringify(patch.model) : null, patch.system ?? null, patch.tools ? JSON.stringify(patch.tools) : null, patch.packages ? JSON.stringify(patch.packages) : null, patch.skills ? JSON.stringify(patch.skills) : null, "system" in patch],
+           tools=COALESCE($5::jsonb,tools), packages=COALESCE($6::jsonb,packages), skills=COALESCE($7::jsonb,skills),
+           mcp_servers=COALESCE($10::jsonb,mcp_servers), metadata=COALESCE($11::jsonb,metadata),
+           client_tools=COALESCE($12::jsonb,client_tools), compat=COALESCE($13::jsonb,compat)
+         WHERE id=$1${scope ? " AND owner_id=$9 AND archived_at IS NULL" : ""} RETURNING *`,
+        [id, patch.name ?? null, patch.model ? JSON.stringify(patch.model) : null, patch.system ?? null, patch.tools ? JSON.stringify(patch.tools) : null,
+          patch.packages ? JSON.stringify(patch.packages) : null, patch.skills ? JSON.stringify(patch.skills) : null, "system" in patch, scope ? scope.owner : null,
+          patch.mcp_servers ? JSON.stringify(patch.mcp_servers) : null, patch.metadata ? JSON.stringify(patch.metadata) : null,
+          patch.client_tools ? JSON.stringify(patch.client_tools) : null, patch.compat ? JSON.stringify(patch.compat) : null],
       );
       return iso(row);
     },
@@ -237,6 +243,7 @@ export const repos = {
       parent_id?: string | null;
       memory_stores?: MemoryMount[];
       vault_ids?: string[];
+      metadata?: Record<string, string>;
       /** container-sharing group; children inherit the parent's so a spawn tree shares a container */
       container_group?: string | null;
     }): Promise<SessionResource> {
@@ -248,9 +255,9 @@ export const repos = {
       return tx(async (c) => {
         const row = await one<SessionResource>(
           c,
-          `INSERT INTO sessions (id, owner_id, agent_id, environment_id, workspace_id, agent, parent_id, memory_stores, container_group, vault_ids)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, COALESCE($9, $1), $10) RETURNING *`,
-          [newId("sess"), input.owner_id, input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memory_stores ?? []), input.container_group ?? null, input.vault_ids ?? []],
+          `INSERT INTO sessions (id, owner_id, agent_id, environment_id, workspace_id, agent, parent_id, memory_stores, container_group, vault_ids, metadata)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, COALESCE($9, $1), $10, $11) RETURNING *`,
+          [newId("sess"), input.owner_id, input.agent_id, main.environment_id, main.workspace_id, JSON.stringify(input.agent), input.parent_id ?? null, JSON.stringify(input.memory_stores ?? []), input.container_group ?? null, input.vault_ids ?? [], JSON.stringify(input.metadata ?? {})],
         );
         for (const e of envs) {
           await c.query(`INSERT INTO session_environments (session_id, key, environment_id, workspace_id) VALUES ($1,$2,$3,$4)`, [row!.id, e.key, e.environment_id, e.workspace_id]);
@@ -285,7 +292,7 @@ export const repos = {
      * (a bare ISO timestamp is still accepted); `after` = a session id to continue after (the OpenAI-style cursor).
      * (created_at, id) is the sort key, so rows sharing a timestamp are neither skipped nor repeated.
      */
-    async listPage(scope: Scope, opts: { limit?: number; cursor?: string; after?: string } = {}): Promise<{ data: SessionResource[]; has_more: boolean; next_cursor: string | null }> {
+    async listPage(scope: Scope, opts: { limit?: number; cursor?: string; after?: string; agentId?: string; order?: "asc" | "desc" } = {}): Promise<{ data: SessionResource[]; has_more: boolean; next_cursor: string | null }> {
       const lim = Math.min(Math.max(opts.limit ?? 50, 1), 200);
       const params: unknown[] = []; const where: string[] = [];
       if (scope) { params.push(scope.owner); where.push(`owner_id=$${params.length}`); }
@@ -293,8 +300,11 @@ export const repos = {
         const [ts, id] = parseSessionCursor(opts.cursor);
         params.push(ts); where.push(id === undefined ? `created_at < $${params.length}::timestamptz` : `(created_at, id) < ($${params.length}::timestamptz, $${params.push(id)})`);
       }
-      if (opts.after) { params.push(opts.after); where.push(`(created_at, id) < (SELECT created_at, id FROM sessions WHERE id=$${params.length})`); }
-      const rows = isoAll(await many<SessionResource & { cursor_ts?: string }>(pool, `SELECT *, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts FROM sessions${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC, id DESC LIMIT ${lim + 1}`, params));
+      const asc = opts.order === "asc";
+      const cmp = asc ? ">" : "<";
+      if (opts.after) { params.push(opts.after); where.push(`(created_at, id) ${cmp} (SELECT created_at, id FROM sessions WHERE id=$${params.length})`); }
+      if (opts.agentId) { params.push(opts.agentId); where.push(`agent_id=$${params.length}`); }
+      const rows = isoAll(await many<SessionResource & { cursor_ts?: string }>(pool, `SELECT *, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts FROM sessions${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at ${asc ? "ASC" : "DESC"}, id ${asc ? "ASC" : "DESC"} LIMIT ${lim + 1}`, params));
       const has_more = rows.length > lim;
       const page = rows.slice(0, lim);
       const last = page[page.length - 1];
@@ -435,6 +445,15 @@ export const sessionConfig = {
   },
   async recordSystemPrompt(id: string, prompt: string): Promise<void> {
     await pool.query(`UPDATE sessions SET last_system_prompt=$2 WHERE id=$1`, [id, prompt]);
+  },
+  /** Patch caller metadata: a string value upserts its key, null deletes it (the semantics both dialects define). */
+  async patchMetadata(id: string, patch: Record<string, string | null>, scope?: Scope): Promise<Record<string, string> | null> {
+    const drop = Object.keys(patch).filter((k) => patch[k] === null);
+    const set = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== null));
+    const row = await one<{ metadata: Record<string, string> }>(pool,
+      `UPDATE sessions SET metadata = (metadata || $2::jsonb) - $3::text[], updated_at=now() WHERE id=$1${scope ? " AND owner_id=$4" : ""} RETURNING metadata`,
+      scope ? [id, JSON.stringify(set), drop, scope.owner] : [id, JSON.stringify(set), drop]);
+    return row?.metadata ?? null;
   },
   async lastSystemPrompt(id: string): Promise<string | null> {
     const r = await pool.query<{ last_system_prompt: string | null }>(`SELECT last_system_prompt FROM sessions WHERE id=$1`, [id]);

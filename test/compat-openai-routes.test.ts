@@ -16,6 +16,7 @@ const st = vi.hoisted(() => ({
   workspaces: new Map<string, any>(),
   events: new Map<string, any[]>(),
   vaults: new Map<string, any>(),
+  agents: new Map<string, any>(),
   creds: new Map<string, Map<string, string>>(),
   calls: { workspacesCreate: 0, agentsCreate: 0, sessionsCreate: 0, listPage: [] as any[], listEvents: [] as any[], sendUserEvents: [] as any[], put: [] as any[] },
   subs: [] as { sid: string; cb: (d: any) => void; unsubs: number }[],
@@ -36,13 +37,29 @@ vi.mock("../src/infra/db.ts", async (orig) => {
         create: async (spec: any, ref: any, owner_id: string) => { st.calls.workspacesCreate++; const w = { id: `ws_${++st.n}`, owner_id, spec, ref }; st.workspaces.set(w.id, w); return w; },
         get: async (id: string, scope?: any) => owned(st.workspaces.get(id), scope),
       },
-      agents: { create: async (input: any) => { st.calls.agentsCreate++; return { id: `agent_${++st.n}`, created_at: "2026-01-01T00:00:00.000Z", ...input }; } },
+      agents: {
+        create: async (input: any) => { st.calls.agentsCreate++; const a = { id: `agent_${++st.n}`, created_at: "2026-01-01T00:00:00.000Z", ...input }; st.agents.set(a.id, a); return a; },
+        get: async (id: string, sc?: any) => { const a = st.agents.get(id); return a && (!sc || a.owner_id === sc.owner) ? a : null; },
+        list: async (sc?: any) => [...st.agents.values()].filter((a) => !sc || a.owner_id === sc.owner),
+        update: async (id: string, patch: any, sc?: any) => { const a = st.agents.get(id); if (!a || (sc && a.owner_id !== sc.owner)) return null; Object.assign(a, patch); return a; },
+        delete: async (id: string, sc?: any) => { const a = st.agents.get(id); if (!a || (sc && a.owner_id !== sc.owner)) return null; st.agents.delete(id); return { archived: false }; },
+      },
       sessions: {
         create: async (input: any) => { st.calls.sessionsCreate++; const s = { id: `sess_${++st.n}`, status: "idle", created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z", parent_id: null, ...input }; st.sessions.set(s.id, s); return s; },
         get: async (id: string, scope?: any) => owned(st.sessions.get(id), scope),
         childrenOf: async (parentId: string, scope?: any) => [...st.sessions.values()].filter((s) => s.parent_id === parentId && owned(s, scope)),
         listPage: async (scope: any, opts: any) => { st.calls.listPage.push(opts); return { data: [...st.sessions.values()].filter((s) => owned(s, scope)), has_more: false, next_cursor: null }; },
         delete: async (id: string) => { st.sessions.delete(id); },
+      },
+    },
+    sessionConfig: {
+      ...real.sessionConfig,
+      patchMetadata: async (id: string, patch: Record<string, string | null>) => {
+        const s = st.sessions.get(id);
+        if (!s) return null;
+        s.metadata = { ...(s.metadata ?? {}) };
+        for (const [k, v] of Object.entries(patch)) { if (v === null) delete s.metadata[k]; else s.metadata[k] = v; }
+        return s.metadata;
       },
     },
     vaults: {
@@ -135,12 +152,91 @@ async function readSse(res: Response, ms: number, ctrl?: AbortController): Promi
 beforeEach(() => {
   st.sessions.clear(); st.environments.clear(); st.workspaces.clear(); st.events.clear(); st.vaults.clear(); st.creds.clear();
   st.calls = { workspacesCreate: 0, agentsCreate: 0, sessionsCreate: 0, listPage: [], listEvents: [], sendUserEvents: [], put: [] };
-  st.subs.length = 0; st.secrets = true; st.deferredSince = null;
+  st.subs.length = 0; st.secrets = true; st.deferredSince = null; st.agents.clear();
   st.environments.set("env_1", { id: "env_1", owner_id: "prc_a", workspace: { kind: "empty" } });
+});
+
+describe("reusable agents (client.beta.agents.*)", () => {
+  const spec = {
+    model: "qoder/auto", name: "Docs bot", instructions: "be brief",
+    tools: [{ type: "mcp", server_label: "docs", transport: { type: "http", server_url: "https://docs.example.com/mcp" } }, { type: "function", name: "lookup", parameters: {} }],
+    reasoning: { effort: "high" }, metadata: { team: "search" },
+  };
+
+  it("create/retrieve round-trips the SDK's Agent object, engine-ignored knobs included", async () => {
+    const created = await call("POST", "/agents", spec);
+    expect(created.status).toBe(201);
+    const agent = await created.json();
+    expect(agent).toMatchObject({
+      object: "agent", name: "Docs bot", model: "qoder/auto", instructions: "be brief", metadata: { team: "search" },
+      reasoning: { effort: "high", summary: null }, service_tier: "auto", text: { format: { type: "text" }, verbosity: "medium" },
+      tools: spec.tools, // echoed verbatim, in the dialect it was declared in
+    });
+    expect(typeof agent.created_at).toBe("number");
+    expect(await (await call("GET", `/agents/${agent.id}`)).json()).toEqual(agent);
+    // the engine's own view of the same row
+    expect(st.agents.get(agent.id)).toMatchObject({ system: "be brief", mcp_servers: [{ label: "docs", url: "https://docs.example.com/mcp" }] });
+  });
+
+  it("a saved agent stores no credentials (they belong in a vault)", async () => {
+    const res = await call("POST", "/agents", { model: "qoder/auto", tools: [{ type: "mcp", server_label: "docs", transport: { type: "http", server_url: "https://docs.example.com/mcp", authorization: "Bearer t" } }] });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toMatch(/credential_id/);
+  });
+
+  it("update is a POST that replaces what it names and keeps the rest", async () => {
+    const agent = await (await call("POST", "/agents", spec)).json();
+    const updated = await (await call("POST", `/agents/${agent.id}`, { instructions: "be terse", tools: [] })).json();
+    expect(updated).toMatchObject({ id: agent.id, instructions: "be terse", tools: [], name: "Docs bot", metadata: { team: "search" }, reasoning: { effort: "high", summary: null } });
+    expect(st.agents.get(agent.id).mcp_servers).toEqual([]);
+  });
+
+  it("list pages newest first and delete returns the SDK's deleted shape", async () => {
+    const a1 = await (await call("POST", "/agents", spec)).json();
+    const a2 = await (await call("POST", "/agents", spec)).json();
+    const page = await (await call("GET", "/agents?limit=1")).json();
+    expect(page).toMatchObject({ object: "list", has_more: true });
+    expect(page.data.map((a: any) => a.id)).toEqual([a2.id]);
+    expect((await (await call("GET", `/agents?limit=1&after=${a2.id}`)).json()).data.map((a: any) => a.id)).toEqual([a1.id]);
+    expect(await (await call("DELETE", `/agents/${a1.id}`)).json()).toEqual({ id: a1.id, object: "agent.deleted", deleted: true });
+    expect((await call("GET", `/agents/${a1.id}`)).status).toBe(404);
+  });
+
+  it("agents are owner-scoped", async () => {
+    const mine = await (await call("POST", "/agents", spec)).json();
+    expect((await call("GET", `/agents/${mine.id}`, undefined, { "x-owner": "prc_b" })).status).toBe(404);
+    expect((await call("POST", `/agents/${mine.id}`, { instructions: "x" }, { "x-owner": "prc_b" })).status).toBe(404);
+    expect((await call("DELETE", `/agents/${mine.id}`, undefined, { "x-owner": "prc_b" })).status).toBe(404);
+  });
+
+  it("a session may reference a saved agent, override fields for itself, and leave the agent untouched", async () => {
+    const agent = await (await call("POST", "/agents", spec)).json();
+    const res = await call("POST", "/agents/sessions", { agent_id: agent.id, environment: { environment_id: "env_1" } });
+    expect(res.status).toBe(201);
+    const session = await res.json();
+    expect(session.agent).toMatchObject({ id: agent.id, model: "qoder/auto", instructions: "be brief", tools: spec.tools });
+    expect(st.calls.agentsCreate).toBe(1); // reused the saved row instead of creating a throwaway one
+    expect(st.sessions.get(session.id).agent.mcp_servers).toEqual([{ label: "docs", url: "https://docs.example.com/mcp" }]);
+
+    const overridden = await (await call("POST", "/agents/sessions", { agent_id: agent.id, agent: { instructions: "be loud", tools: [] }, environment: { environment_id: "env_1" } })).json();
+    expect(overridden.agent).toMatchObject({ instructions: "be loud", tools: [] });
+    expect(st.agents.get(agent.id).system).toBe("be brief"); // the saved agent is unchanged
+
+    expect((await call("POST", "/agents/sessions", { agent_id: "agent_missing", environment: { environment_id: "env_1" } })).status).toBe(404);
+  });
 });
 
 describe("POST /agents/sessions", () => {
   const good = { agent: { model: "x", tools: [{ type: "function", name: "lookup", parameters: {} }] }, environment: { environment_id: "env_1" } };
+
+  it("metadata is stored on create and patched by update (null deletes a key)", async () => {
+    const created = await (await call("POST", "/agents/sessions", { ...good, metadata: { run: "1", keep: "yes" } })).json();
+    expect(created.metadata).toEqual({ run: "1", keep: "yes" });
+    expect(st.sessions.get(created.id).metadata).toEqual({ run: "1", keep: "yes" });
+    const updated = await (await call("POST", `/agents/sessions/${created.id}`, { metadata: { run: "2", keep: null } })).json();
+    expect(updated.metadata).toEqual({ run: "2" });
+    expect((await call("POST", "/agents/sessions", { ...good, metadata: { n: 1 } })).status).toBe(400);
+  });
 
   it("creates a session, forwards a string input, and returns an AgentSession (201)", async () => {
     st.vaults.set("vault_z", { id: "vault_z", owner_id: "prc_a", name: null, metadata: {}, created_at: "2026-01-01T00:00:00.000Z" }); // vault_ids must be the caller's own vaults
@@ -326,7 +422,7 @@ describe("GET /agents/sessions (list + pagination)", () => {
     const body = await (await call("GET", "/agents/sessions?limit=2")).json();
     expect(body.data.map((s: any) => s.id)).toEqual([a.id, b.id]);
     expect(body).toMatchObject({ object: "list", first_id: a.id, last_id: b.id, has_more: false });
-    expect(st.calls.listPage[0]).toEqual({ limit: 2, cursor: undefined });
+    expect(st.calls.listPage[0]).toMatchObject({ limit: 2, order: "desc" });
   });
 
   // Regression: the SDK's CursorPage sends after=<last session id>, but listPage casts the cursor with ::timestamptz.

@@ -74,6 +74,14 @@ export interface AgentResource {
   client_tools?: FunctionToolDecl[];
   /** remote MCP servers whose tools the agent can call (connected server-side by the runner) */
   mcp_servers?: McpServerDecl[];
+  /** caller-supplied key/value labels (both compat dialects expose these) */
+  metadata?: Record<string, string>;
+  /**
+   * Fields a compat dialect must echo back verbatim but the engine does not act on (the declared tool
+   * list, reasoning/verbosity knobs, service tier). Keyed by dialect so one agent can be read back
+   * through the surface that created it. Never interpreted by the harness.
+   */
+  compat?: Record<string, unknown>;
   created_at: string;
 }
 
@@ -325,6 +333,8 @@ export interface SessionResource {
   memory_stores: MemoryMount[];
   /** vaults whose secrets are injected into this session's sandboxes as env vars */
   vault_ids: string[];
+  /** caller-supplied key/value labels (both compat dialects expose these) */
+  metadata?: Record<string, string>;
   status: SessionStatus;
   /** snapshot of agent config at creation (Managed-Agent style) */
   agent: Omit<AgentResource, "created_at">;

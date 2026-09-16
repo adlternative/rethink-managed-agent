@@ -56,7 +56,8 @@ export function splitTools(tools: OpenAiToolDecl[] | undefined): SplitTools {
       });
     } else if (t.type === "web_search") {
       out.webSearch = true;
-    } else if (t.type === "programmatic_tool_calling") {
+    } else if (t.type === "programmatic_tool_calling" || t.type === "tool_search") {
+      // declared by the SDK, no rethink equivalent: accepted so an agent definition round-trips, never run
       out.ignored.push({ type: t.type });
     } else {
       throw invalid(`unsupported tool type ${JSON.stringify(t.type)}`);
@@ -67,11 +68,65 @@ export function splitTools(tools: OpenAiToolDecl[] | undefined): SplitTools {
 
 export interface OpenAiAgentSpec {
   model: string;
+  name?: string | null;
   instructions?: string;
   reasoning?: { effort?: string };
-  multi_agent?: { enabled?: boolean; max_concurrent_subagents?: number };
+  service_tier?: string | null;
+  text?: Record<string, unknown> | null;
+  metadata?: Record<string, string> | null;
+  multi_agent?: { enabled?: boolean; max_concurrent_subagents?: number | null };
   tools?: OpenAiToolDecl[];
 }
+
+/** Knobs the SDK's Agent object carries that the engine does not act on; stored so reads echo them back. */
+export interface OpenAiAgentEcho {
+  tools: OpenAiToolDecl[];
+  reasoning: { effort: string | null; summary: string | null };
+  service_tier: string;
+  text: { format: { type: string }; verbosity: string };
+  multi_agent: { enabled: boolean; max_concurrent_subagents: number | null };
+}
+
+/** The echo block for an agent spec: what create/retrieve/update must return verbatim. */
+export function openaiAgentEcho(spec: OpenAiAgentSpec): OpenAiAgentEcho {
+  const text = (spec.text ?? {}) as { format?: { type?: string }; verbosity?: string };
+  return {
+    tools: spec.tools ?? [],
+    reasoning: { effort: spec.reasoning?.effort ?? null, summary: (spec.reasoning as { summary?: string } | undefined)?.summary ?? null },
+    service_tier: spec.service_tier ?? "auto",
+    text: { format: { type: text.format?.type ?? "text" }, verbosity: text.verbosity ?? "medium" },
+    multi_agent: { enabled: !!spec.multi_agent?.enabled, max_concurrent_subagents: spec.multi_agent?.max_concurrent_subagents ?? null },
+  };
+}
+
+const unixOf = (t: string | undefined) => Math.floor(new Date(t ?? Date.now()).getTime() / 1000) || Math.floor(Date.now() / 1000);
+
+/** Render a stored agent row as the SDK's `Agent` object (the echo block fills what the engine ignores). */
+export function toOpenAiAgent(row: {
+  id: string; name: string; model: ModelRef; system: string | null; created_at?: string;
+  metadata?: Record<string, string>; compat?: Record<string, unknown>;
+}) {
+  const echo = ((row.compat?.openai ?? {}) as Partial<OpenAiAgentEcho>);
+  const created = unixOf(row.created_at);
+  return {
+    id: row.id,
+    object: "agent" as const,
+    created_at: created,
+    updated_at: created,
+    name: row.name === COMPAT_AGENT_NAME ? null : row.name,
+    model: `${row.model.provider}/${row.model.id}`,
+    instructions: row.system,
+    metadata: row.metadata ?? {},
+    reasoning: echo.reasoning ?? { effort: null, summary: null },
+    service_tier: echo.service_tier ?? "auto",
+    text: echo.text ?? { format: { type: "text" }, verbosity: "medium" },
+    multi_agent: echo.multi_agent ?? { enabled: false, max_concurrent_subagents: null },
+    tools: echo.tools ?? [],
+  };
+}
+
+/** Name given to the agent row a session creates for itself, shown back to the SDK as `name: null`. */
+export const COMPAT_AGENT_NAME = "openai-compat";
 
 export interface AgentSnapshotDraft {
   name: string;
@@ -93,7 +148,7 @@ export function openaiAgentToRethink(spec: OpenAiAgentSpec): AgentSnapshotDraft 
   const ignored = [...split.ignored];
   if (split.webSearch) { if (env.COMPAT_WEBSEARCH_PACKAGE) packages.push(env.COMPAT_WEBSEARCH_PACKAGE); else ignored.push({ type: "web_search" }); }
   return {
-    name: "openai-compat",
+    name: spec.name || COMPAT_AGENT_NAME,
     model: mapModel(spec.model),
     system: spec.instructions ?? null,
     tools: split.builtins,

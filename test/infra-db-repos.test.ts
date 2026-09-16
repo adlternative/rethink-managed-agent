@@ -160,7 +160,7 @@ describe("sessions.create / childrenOf / agents.update / providers.upsert", () =
     expect(calls[0]!.params[3]).toBeNull();
     await repos.agents.update("agent_1", {});
     expect(calls[1]!.params[7]).toBe(false);
-    expect(calls[1]!.params).toHaveLength(8);
+    expect(calls[1]!.params).toHaveLength(13); // one param slot per updatable column, scoped or not
     await repos.agents.update("agent_1", { name: "n" }, { owner: "prc_a" });
     expect(calls[2]!.sql).toContain("AND owner_id=$9");
     expect(calls[2]!.params[8]).toBe("prc_a");
