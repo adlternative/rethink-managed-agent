@@ -68,6 +68,7 @@ envs delete <id>            removed if unused; archived if sessions are attached
   sessions: `sessions list [--status idle|running|terminated] [--limit N] [--all]
 sessions get <id>
 sessions create --agent A --env E [--workspace-id W] [--model provider/model] [--message TEXT] [--packages npm:x,/path]
+       (--packages adds to the agent's own plugins for this session; the saved agent is unchanged)
        [--memory-stores mem_a[:path],mem_b] [--vaults vault_a,vault_b] [--environments main=env_a,<key>=env_b[:fork]] [--parent sess_p]
 sessions delete <id>
 sessions archive <id>
@@ -256,8 +257,12 @@ async function sessions(c: Ctx, args: string[]): Promise<void> {
       const agentId = need(flags, "agent", USAGE.sessions);
       const overrides: Record<string, unknown> = {};
       if (str(flags, "model")) overrides.model = modelRef(str(flags, "model")!);
-      // plugins for this session only; the saved agent keeps its own list
-      if (str(flags, "packages")) overrides.packages = list(str(flags, "packages"));
+      // plugins for this session only; the saved agent keeps its own list. An override replaces the
+      // field, so union with the agent's own packages — adding one must not drop the others.
+      if (str(flags, "packages")) {
+        const own = ((await api.json("GET", `/v1/agents/${seg(agentId)}`)) as { packages?: string[] }).packages ?? [];
+        overrides.packages = [...new Set([...own, ...list(str(flags, "packages"))!])];
+      }
       const agent = Object.keys(overrides).length ? { type: "agent_with_overrides", id: agentId, ...overrides } : agentId;
       const body: Record<string, unknown> = { agent };
       if (str(flags, "environments")) body.environments = parseEnvList(str(flags, "environments")!);

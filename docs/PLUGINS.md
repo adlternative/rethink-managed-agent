@@ -47,7 +47,7 @@ Three moments, because they answer different questions:
 | Where | Command | When you want it |
 |---|---|---|
 | on the agent | `pma agents create x qoder/kmodel --packages /app/plugins/outcome` (or `agents update`, which replaces the whole list) | the plugin is part of what this agent *is* — every session gets it |
-| on one session, at create | `pma sessions create --agent A --env E --packages npm:pma-plugin-outcome` | this run needs something extra; the saved agent is untouched |
+| on one session, at create | `pma sessions create --agent A --env E --packages npm:pma-plugin-outcome` (adds to the agent's own; in the TUI, `/plugins add` before a session is remembered for the one your next message starts) | this run needs something extra; the saved agent is untouched |
 | on a running session | `pma sessions packages add <sess> /app/plugins/outcome` (`remove`, `list`) | the user decided mid-conversation. Live from the session's next turn — the runner keys its plugin host on (agent id, package list), so the next run loads a host that has it |
 
 The session is where a person actually works, so the last two exist: you should not have to redefine

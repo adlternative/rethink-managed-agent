@@ -15,16 +15,21 @@ const USAGE = `sessions subcommand:
   archive <id>
   delete <id>`;
 
-export async function createSession(opts: { agent?: string; env?: string; workspaceId?: string; model?: string; message?: string; environments?: string; memoryStores?: string }): Promise<Session> {
+export async function createSession(opts: { agent?: string; env?: string; workspaceId?: string; model?: string; message?: string; environments?: string; memoryStores?: string; packages?: string[] }): Promise<Session> {
   const cfg = loadConfig();
   const agentId = opts.agent ?? cfg.default_agent_id;
   const envId = opts.env ?? cfg.default_env_id;
   if (!agentId || !envId) die("agent and environment are required: pass --agent/--env or set defaults with `pma --agent <id> --env <id>`");
-  let agent: unknown = agentId;
-  if (opts.model) {
-    const [provider, ...rest] = opts.model.split("/");
-    agent = { type: "agent_with_overrides", id: agentId, model: { provider, id: rest.join("/") } };
+  // model and plugins ride on the same per-session override: the saved agent is never changed
+  const overrides: Record<string, unknown> = {};
+  if (opts.model) { const [provider, ...rest] = opts.model.split("/"); overrides.model = { provider, id: rest.join("/") }; }
+  if (opts.packages?.length) {
+    // an override replaces the field, so adding a plugin to one session would otherwise drop the
+    // agent's own — union them, because "add" should only ever add
+    const agentRow = (await apiGet(`/agents/${agentId}`)) as { packages?: string[] };
+    overrides.packages = [...new Set([...(agentRow.packages ?? []), ...opts.packages])];
   }
+  const agent: unknown = Object.keys(overrides).length ? { type: "agent_with_overrides", id: agentId, ...overrides } : agentId;
   const body: Record<string, unknown> = { agent, environment_id: envId };
   if (opts.workspaceId) body.workspace_id = opts.workspaceId;
   if (opts.environments) body.environments = parseEnvList(opts.environments);

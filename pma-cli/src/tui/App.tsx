@@ -72,9 +72,9 @@ const COMMANDS: { name: string; desc: string }[] = [
   { name: "/model", desc: "Model override for the next /new" },
   { name: "/status", desc: "Session info" },
   { name: "/prompt", desc: "Show the system prompt as sent (/prompt set <text> changes it)" },
-  { name: "/plugins", desc: "Plugins on this session, and what this deployment offers" },
+  { name: "/plugins", desc: "Plugins on this session (or chosen for the next), and what this deployment offers" },
   { name: "/plugins search", desc: "Search the available plugins (/plugins search outcome)" },
-  { name: "/plugins add", desc: "Attach one — no argument opens a picker; live from the next turn" },
+  { name: "/plugins add", desc: "Attach one by name — no argument opens a picker; before a session, it is chosen for the next" },
   { name: "/plugins remove", desc: "Detach one (/plugins remove <source>)" },
   { name: "/sandboxes", desc: "List sandboxes" },
   { name: "/export", desc: "Export conversation to a file (--json)" },
@@ -147,6 +147,8 @@ function App({ opts }: { opts: TuiOptions }) {
   const [histIdx, setHistIdx] = useState(-1);
   const [ctrlC, setCtrlC] = useState(0);
   const [modelOverride, setModelOverride] = useState<string | undefined>(opts.model);
+  /** Plugins chosen before there is a session: attached to the one the next message starts. */
+  const [pendingPlugins, setPendingPlugins] = useState<string[]>([]);
   const [sandboxInfo, setSandboxInfo] = useState<string>("");
   const [ctx, setCtx] = useState<ContextSize | null>(null);
   const [reg, setReg] = useState<UiRegistry | null>(null);
@@ -366,7 +368,7 @@ function App({ opts }: { opts: TuiOptions }) {
   }, []);
 
   const newSession = useCallback(async (first?: string) => {
-    const s = await createSession({ agent: opts.agent, env: opts.env, workspaceId: opts.workspaceId, model: modelOverride, message: first });
+    const s = await createSession({ agent: opts.agent, env: opts.env, workspaceId: opts.workspaceId, model: modelOverride, packages: pendingPlugins, message: first });
     lastSeq.current = 0;
     streamingMsg.current = null;
     setMessages(first ? [msg({ role: "user", content: first, pending: true })] : []);
@@ -376,7 +378,7 @@ function App({ opts }: { opts: TuiOptions }) {
     setUsage(null);
     setSession(s);
     return s;
-  }, [opts, modelOverride]);
+  }, [opts, modelOverride, pendingPlugins]);
 
   // initial: resume, or create when a first message is given, else wait for input
   useEffect(() => {
@@ -456,18 +458,39 @@ function App({ opts }: { opts: TuiOptions }) {
           const [op, ...srcParts] = arg.split(/\s+/).filter(Boolean);
           // Browsing the catalogue needs no session; only attaching does.
           const isSearch = op === "search" || op === "available";
+          const source0 = srcParts.join(" ");
+          // Before there is a session, plugins are *chosen* for the one the next message will start —
+          // the same shape as /model. Nothing is attached to a saved agent either way.
           if (!session) {
-            const q = isSearch ? srcParts.join(" ") : "";
-            const { data } = (await apiGet(`/plugins${q ? `?q=${encodeURIComponent(q)}` : ""}`)) as { data: PluginInfo[] };
+            const { data } = (await apiGet(`/plugins${isSearch && source0 ? `?q=${encodeURIComponent(source0)}` : ""}`)) as { data: PluginInfo[] };
             const usable = data.filter((p) => p.allowed.runner || p.allowed.sandbox);
-            return sys(usable.length
-              ? `plugins this deployment offers:\n${usable.map((p) => `  ${p.name.padEnd(12)} ${p.description.slice(0, 70)}`).join("\n")}\n\nstart a session first, then /plugins add to attach one`
-              : "this deployment ships no plugins you can attach");
+            const chosen = (list: string[]) => list.length ? `\n\nchosen for the next session:\n${list.map((p) => `  ${p}`).join("\n")}` : "";
+            if (op === "remove" || op === "rm") {
+              if (!source0) return sys("usage: /plugins remove <source>");
+              const next = pendingPlugins.filter((p) => p !== source0 && !p.endsWith(`/${source0}`));
+              setPendingPlugins(next);
+              return sys(next.length === pendingPlugins.length ? `${source0} was not chosen` : `removed ${source0}${chosen(next)}`);
+            }
+            if (op === "add") {
+              const match = usable.find((p) => p.source === source0 || p.name === source0);
+              const pick = match?.source ?? source0;
+              if (!pick) {
+                if (!usable.length) return sys("this deployment ships no plugins you can attach");
+                setSelector({ title: "Attach to the next session", items: usable.map((p) => ({ id: p.source, label: `${p.name}${pendingPlugins.includes(p.source) ? "  (chosen)" : ""}`, hint: p.description.slice(0, 90) })), onSelect: (it) => { setSelector(null); void runCommand(`/plugins add ${it.id}`); } });
+                return;
+              }
+              if (pendingPlugins.includes(pick)) return sys(`${pick} is already chosen${chosen(pendingPlugins)}`);
+              const next = [...pendingPlugins, pick];
+              setPendingPlugins(next);
+              return sys(`will attach ${pick} when the session starts (type a message or /new)${chosen(next)}`);
+            }
+            return sys((usable.length
+              ? `plugins this deployment offers:\n${usable.map((p) => `  ${p.name.padEnd(12)} ${p.description.slice(0, 70)}`).join("\n")}`
+              : "this deployment ships no plugins you can attach") + chosen(pendingPlugins)
+              + (pendingPlugins.length ? "" : "\n\n/plugins add <name> chooses one for the session your next message starts"));
           }
-          const source = srcParts.join(" ");
-          // `/plugins add` with nothing to add opens the deployment's catalogue; `/plugins search q` filters it
-          if ((op === "add" && !source) || isSearch) {
-            const q = isSearch ? source : "";
+          if ((op === "add" && !source0) || isSearch) {
+            const q = isSearch ? source0 : "";
             const { data } = (await apiGet(`/plugins${q ? `?q=${encodeURIComponent(q)}` : ""}`)) as { data: PluginInfo[] };
             const attached = new Set(session.agent.packages ?? []);
             const items = data.filter((p) => p.allowed.runner || p.allowed.sandbox).map((p) => ({
@@ -485,7 +508,10 @@ function App({ opts }: { opts: TuiOptions }) {
             return;
           }
           if (op === "add" || op === "remove" || op === "rm") {
-            if (!source) return sys("usage: /plugins add|remove <npm:pkg | git:url | /absolute/path>");
+            if (!source0) return sys("usage: /plugins add|remove <name | npm:pkg | git:url | /absolute/path>");
+            // a bare catalogue name is accepted as well as a full source, since that is what the list shows
+            const known = ((await apiGet("/plugins")) as { data: PluginInfo[] }).data.find((p) => p.name === source0);
+            const source = known?.source ?? source0;
             const next = op === "add"
               ? await apiPost(`/sessions/${session.id}/packages`, { source })
               : await apiRequest("DELETE", `/sessions/${session.id}/packages/${encodeURIComponent(source)}`);
@@ -494,7 +520,7 @@ function App({ opts }: { opts: TuiOptions }) {
             sys(`${op === "add" ? "attached" : "detached"} ${source} (live from the next turn)\nplugins: ${list.join(", ") || "(none)"}`);
             return;
           }
-          if (op) return sys("usage: /plugins [query | add [source] | remove <source>]");
+          if (op) return sys("usage: /plugins [search <query> | add [name|source] | remove <name|source>]");
           const s = (await apiGet(`/sessions/${session.id}`)) as Session;
           const list = s.agent.packages ?? [];
           const { data } = (await apiGet("/plugins")) as { data: PluginInfo[] };
