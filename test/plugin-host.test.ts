@@ -184,7 +184,9 @@ describe("before_compact override hook (custom compaction)", () => {
       { seq: 1, type: "user.message", payload: { content: [{ type: "text", text: "build the thing" }] } },
       { seq: 2, type: "agent.message", payload: { content: [{ type: "text", text: "done, edited app.ts" }] } },
     ];
-    const capsC: Capabilities = { ...caps, eventsGet: async () => events, modelComplete: async (prompt) => `STRUCTURED[${prompt.length}]` };
+    // the plugin only accepts a reply shaped like a briefing (see fix-compactor-plugin), so the fake
+    // summarizer answers with one
+    const capsC: Capabilities = { ...caps, eventsGet: async () => events, modelComplete: async (prompt) => `## Decisions\n— STRUCTURED[${prompt.length}]` };
     // compactor is registered before pma-compact-two, so its summary must win.
     const h = await PluginHost.start(
       [pkg(path.join(ROOT, "plugins/compactor")), pkg(path.join(ROOT, "test/fixtures/pma-compact-two"))],
@@ -193,7 +195,7 @@ describe("before_compact override hook (custom compaction)", () => {
     h.attach(session, capsC);
     expect([...h.hooks]).toContain("before_compact");
     const r = await h.emit(session, { type: "before_compact", contextTokens: 9000, contextWindow: 10000, messageCount: 2 });
-    expect(r?.summary).toMatch(/^STRUCTURED\[/); // compactor's own model summary, not "SECOND-PLUGIN-SUMMARY"
+    expect(r?.summary).toMatch(/STRUCTURED\[/); // compactor's own model summary, not "SECOND-PLUGIN-SUMMARY"
     expect(r?.summary).not.toBe("SECOND-PLUGIN-SUMMARY");
     h.stop();
   }, 30_000);

@@ -359,6 +359,20 @@ describe("runSession compaction", () => {
     expect(out).toMatchObject({ stopReason: "end_turn" });
   });
 
+  it("skips a compaction that would not shrink the context (keep budget too close to the window)", async () => {
+    // keeping 25k of a 20k-window model: the summary is added and nothing is really dropped, so the
+    // next turn would be just as full — compacting every turn forever for one model call each time.
+    env.COMPACTION_ENABLED = true; env.COMPACTION_RESERVE_TOKENS = 1000; env.COMPACTION_KEEP_RECENT_TOKENS = 20_000;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    // a summary bigger than the history it replaces: the "compacted" context ends up larger
+    const h = fakeHost({ hooks: { before_compact: () => ({ summary: "summary ".repeat(20_000) }) } });
+    const f = fakeDeps({ events: history(6, 25_000), replies: [text("answer")], models: [model(20_000)], host: h.host });
+    await runSession("sess_1", f.deps);
+    expect(f.payloads("agent.thread_context_compacted")).toEqual([]); // nothing recorded, history intact
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/would not shrink the context/);
+  });
+
   it("honors a before_compact cancel on the resume-time compaction (regression: hooks not attached yet)", async () => {
     compactEnv();
     vi.spyOn(console, "log").mockImplementation(() => {});

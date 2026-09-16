@@ -467,6 +467,14 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
         return null;
       });
       if (!r) return msgs;
+      // Compaction that does not shrink the context is worse than none: it spends a model call, drops
+      // history, and leaves the next turn just as full — so a session in this state would compact on
+      // every turn forever. It happens when the keep budget is not comfortably smaller than the
+      // window minus the reserve (a small-context model, or misconfigured settings).
+      if (r.tokensAfter >= r.tokensBefore) {
+        console.warn(`[compaction ${sessionId}] skipped: ${r.tokensBefore} -> ${r.tokensAfter} tokens would not shrink the context (keepRecentTokens=${settings.keepRecentTokens} vs window ${model.contextWindow} - reserve ${compaction.reserveTokens})`);
+        return msgs;
+      }
       const firstKept = msgs[r.firstKeptIndex]!;
       const firstKeptSeq = seqOf.get(firstKept);
       if (firstKeptSeq === undefined) { console.warn(`[compaction ${sessionId}] first kept message has no seq; skipping`); return msgs; }

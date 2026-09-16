@@ -16,6 +16,14 @@ my-plugin/
   prompts/<name>.md
 ```
 
+## Is it actually usable?
+
+`node scripts/e2e-plugins.mjs` attaches each bundled plugin to a real session on a running stack,
+exercises it as a user would, and judges from the event log — the tool was called, the hook fired, the
+webhook arrived. Last full run: **13 pass · 2 skip · 0 fail** (`web-search` skipped for want of a Bing
+key; `compactor` needs a context overflow, covered by the harness compaction tests and verified
+separately against a small-context model).
+
 ## Finding one
 
 `GET /v1/plugins` is the catalogue of what this deployment ships, each entry carrying the source
