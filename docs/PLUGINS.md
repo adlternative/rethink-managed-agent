@@ -16,6 +16,17 @@ my-plugin/
   prompts/<name>.md
 ```
 
+## Finding one
+
+`GET /v1/plugins` is the catalogue of what this deployment ships, each entry carrying the source
+string to attach and whether the allowlist lets it run on the shared runner, in a sandbox host, or
+neither. `pma plugins [query]` prints it; in the TUI, `/plugins` lists what the session has plus what
+is available, and `/plugins add` (no argument) opens a picker.
+
+Only bundled plugins can be enumerated — an npm scope or a git host is not a list anyone can read, so
+those you attach by source. `PLUGIN_CATALOG_DIR` points at the directory (default: the repo's own
+`plugins/`, the same path on the api and the runner in the standard deployment).
+
 ## Attaching a plugin
 
 A package source is `npm:<pkg>`, `git:<url>[@ref]`, or an **absolute path on the runner** (a relative

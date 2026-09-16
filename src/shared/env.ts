@@ -112,6 +112,8 @@ export const env = {
   COMPAT_TEAM_PACKAGE: process.env.COMPAT_TEAM_PACKAGE ?? "",
   /** Package added when a {type:'web_search'} tool is declared (e.g. the web-search plugin path); empty = accepted-and-ignored. */
   COMPAT_WEBSEARCH_PACKAGE: process.env.COMPAT_WEBSEARCH_PACKAGE ?? "",
+  /** Directory of bundled plugins offered by GET /v1/plugins (the same path on api and runner). */
+  PLUGIN_CATALOG_DIR: process.env.PLUGIN_CATALOG_DIR ?? path.join(REPO_ROOT, "plugins"),
   /** Package that implements outcomes (user.define_outcome); empty = the event is refused with a 400. */
   COMPAT_OUTCOME_PACKAGE: process.env.COMPAT_OUTCOME_PACKAGE ?? bundledPlugin("outcome"),
 };

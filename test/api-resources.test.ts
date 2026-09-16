@@ -422,6 +422,32 @@ describe("vaults", () => {
   });
 });
 
+describe("plugin catalogue", () => {
+  it("lists the deployment's bundled plugins with the source to attach and where each may run", async () => {
+    const r = await call("GET", "/v1/plugins");
+    expect(r.status).toBe(200);
+    const { data } = await r.json();
+    const outcome = data.find((p: any) => p.name === "outcome");
+    expect(outcome).toMatchObject({ name: "outcome", allowed: { runner: true, sandbox: true } });
+    expect(outcome.source.endsWith("/plugins/outcome")).toBe(true);
+    expect(outcome.description).toMatch(/outcome/i);
+    expect(data.map((p: any) => p.name)).not.toContain("node_modules");
+
+    // the source is exactly what the attach endpoints accept
+    const agent = seed.agent(A); const env = seed.environment(A);
+    const session = await (await call("POST", "/v1/sessions", { agent: agent.id, environment_id: env.id })).json();
+    const attached = await call("POST", `/v1/sessions/${session.id}/packages`, { source: outcome.source });
+    expect(attached.status).toBe(201);
+    expect((await attached.json()).agent.packages).toEqual([outcome.source]);
+  });
+
+  it("?q filters by name and description", async () => {
+    const { data } = await (await call("GET", "/v1/plugins?q=outcome")).json();
+    expect(data.map((p: any) => p.name)).toEqual(["outcome"]);
+    expect((await (await call("GET", "/v1/plugins?q=zzzz")).json()).data).toEqual([]);
+  });
+});
+
 describe("sandboxes", () => {
   it("DELETE: busy -> 409, destroyed -> 200 idempotent, ready -> 202 destroying", async () => {
     const busy = seed.sandbox(A, "busy"); const gone = seed.sandbox(A, "destroyed"); const ready = seed.sandbox(A, "ready");

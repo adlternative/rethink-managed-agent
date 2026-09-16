@@ -2,6 +2,8 @@ import { resolveConfig, buildHeaders } from "./config.ts";
 
 // ---- API resource shapes (mirror src/shared/types.ts on the server) ----
 export type ContentBlock = { type: "text"; text: string } | { type: "image"; source: { type: "file"; file_id: string } } | { type: "document"; source: { type: "file"; file_id: string } };
+/** One entry of the deployment's plugin catalogue (GET /v1/plugins). */
+export interface PluginInfo { name: string; source: string; description: string; allowed: { runner: boolean; sandbox: boolean } }
 export interface Agent { id: string; name: string; model: { provider: string; id: string }; system: string | null; tools: string[]; packages?: string[]; created_at: string }
 export interface Environment { id: string; name: string; provider: string; image: string | null; worker_key?: string | null; worker_key_set?: boolean; network?: "none" | "bridge"; plugin_host?: "runner" | "sandbox"; workspace: unknown; created_at: string }
 export interface Usage { input: number; output: number; cache_read: number; cache_write: number; total_tokens: number; requests: number }

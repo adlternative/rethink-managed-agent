@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
-import { apiGet, apiPost, apiRequest, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, ApiError, type Agent, type ContextSize, type Environment, type ModelInfo, type Session, type SessionEvent, type Usage } from "../lib/client.ts";
+import { apiGet, apiPost, apiRequest, fmtCtx, fmtTokens, interrupt, sendMessage, streamEvents, textOf, ApiError, type Agent, type PluginInfo, type ContextSize, type Environment, type ModelInfo, type Session, type SessionEvent, type Usage } from "../lib/client.ts";
 import { loadConfig, saveConfig } from "../lib/config.ts";
 import { createSession } from "../cli/sessions.ts";
 import { Input } from "./Input.tsx";
@@ -453,6 +453,24 @@ function App({ opts }: { opts: TuiOptions }) {
           if (!session) return sys("no session");
           const [op, ...srcParts] = arg.split(/\s+/).filter(Boolean);
           const source = srcParts.join(" ");
+          // `/plugins add` with nothing to add opens the deployment's catalogue; `/plugins search q` filters it
+          if ((op === "add" && !source) || op === "search" || op === "available") {
+            const q = op === "add" ? "" : source;
+            const { data } = (await apiGet(`/plugins${q ? `?q=${encodeURIComponent(q)}` : ""}`)) as { data: PluginInfo[] };
+            const attached = new Set(session.agent.packages ?? []);
+            const items = data.filter((p) => p.allowed.runner || p.allowed.sandbox).map((p) => ({
+              id: p.source,
+              label: `${p.name}${attached.has(p.source) ? "  (attached)" : ""}`,
+              hint: p.description.slice(0, 90),
+            }));
+            if (!items.length) return sys(q ? `no plugin matches "${q}"` : "this deployment ships no plugins you can attach");
+            setSelector({ title: "Attach a plugin to this session", items, onSelect: (it) => {
+              setSelector(null);
+              if (attached.has(it.id)) { sys(`${it.id} is already attached`); return; }
+              void runCommand(`/plugins add ${it.id}`);
+            } });
+            return;
+          }
           if (op === "add" || op === "remove" || op === "rm") {
             if (!source) return sys("usage: /plugins add|remove <npm:pkg | git:url | /absolute/path>");
             const next = op === "add"
@@ -463,10 +481,15 @@ function App({ opts }: { opts: TuiOptions }) {
             sys(`${op === "add" ? "attached" : "detached"} ${source} (live from the next turn)\nplugins: ${list.join(", ") || "(none)"}`);
             return;
           }
-          if (op) return sys("usage: /plugins [add|remove <source>]");
+          if (op) return sys("usage: /plugins [add|remove <source> | search <query>]");
           const s = (await apiGet(`/sessions/${session.id}`)) as Session;
           const list = s.agent.packages ?? [];
-          sys(list.length ? `plugins on this session:\n${list.map((p) => `  ${p}`).join("\n")}` : "no plugins on this session (add one with /plugins add <source>)");
+          const { data } = (await apiGet("/plugins")) as { data: PluginInfo[] };
+          const available = data.filter((p) => (p.allowed.runner || p.allowed.sandbox) && !list.includes(p.source));
+          sys([
+            list.length ? `plugins on this session:\n${list.map((p) => `  ${p}`).join("\n")}` : "no plugins on this session",
+            available.length ? `\navailable here (/plugins add to pick one):\n${available.map((p) => `  ${p.name.padEnd(12)} ${p.description.slice(0, 70)}`).join("\n")}` : "",
+          ].filter(Boolean).join("\n"));
           return;
         }
         case "/sessions": {

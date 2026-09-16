@@ -28,6 +28,7 @@ resources:
   envs           list | get <id> | create <name> --provider local|docker|e2b|byoc [...] | delete <id>
   sessions       list | get <id> | create --agent A --env E [...] | delete <id> | archive <id> | prompt <id>
                  set-system <id> | attach <id> <key>=<env> | mount|unmount <id> <mem> | skill <id> add|remove <skill>
+  plugins        list [query]   plugins this deployment ships, with the source to attach
   vaults         list | get <id> | create [name] | delete <id> | credentials list|put|delete <vault> [name]
   memory-stores  list | get <id> | create <name> [--description D] | delete <id>
   files          list | get <id> | upload <path> | download <id> [--out F] | delete <id>
@@ -78,6 +79,9 @@ sessions skill <id> add|remove <skill_id>
 sessions packages list <id>   /   sessions packages add|remove <id> <source>
        (attach a plugin to a running session; live from its next turn, the saved agent is untouched)
 sessions send|stream|events|interrupt <id> ...        same as the top-level commands`,
+  plugins: `plugins list [query]                         what this deployment ships and where it may run
+(attach one with: agents create/update --packages <source>, sessions create --packages <source>,
+ or, on a session that is already running, sessions packages add <session> <source>)`,
   vaults: `vaults list
 vaults get <id>
 vaults create [name] [--metadata k=v,k2=v2]
@@ -532,6 +536,15 @@ async function worker(c: Ctx): Promise<void> {
 
 const GROUPS: Record<string, (c: Ctx, args: string[]) => Promise<void>> = {
   agents, envs, sessions, vaults, "memory-stores": memoryStores, files, skills, providers, sandboxes,
+  plugins: async (c, [sub = "list", q]) => {
+    if (sub !== "list" && sub !== "ls" && sub !== "search") { q = sub; sub = "list"; } // `plugins <query>` is a search
+    const r = await c.api.json("GET", `/v1/plugins${q ? `?q=${seg(q)}` : ""}`);
+    return listOut(c, r, ["NAME", "SOURCE", "RUNS ON", "DESCRIPTION"], (p) => [
+      p.name, p.source,
+      [p.allowed.runner && "runner", p.allowed.sandbox && "sandbox"].filter(Boolean).join("+") || "blocked",
+      (p.description ?? "").slice(0, 60),
+    ]);
+  },
   models: async (c, [sub = "list"]) => { if (sub !== "list" && sub !== "ls") usage("models"); return listOut(c, await c.api.json("GET", "/v1/models"), ["PROVIDER", "ID", "CONTEXT"], (m) => [m.provider, m.id, m.context_window]); },
   me: async (c) => c.print(await c.api.json("GET", "/v1/me")),
   send: (c, a) => send(c, a), stream: streamCmd, events: eventsCmd, interrupt, worker: (c) => worker(c),

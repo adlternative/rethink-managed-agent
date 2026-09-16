@@ -102,6 +102,22 @@ describe("cli resource commands", () => {
     expect((await cli(s.url, ["sessions", "create", "--agent", "agent_a"])).code).toBe(2);
   });
 
+  it("plugins list shows the catalogue and passes a search query", async () => {
+    const s = await serve((r, res) => sendJson(res, 200, { data: [
+      { name: "outcome", source: "/app/plugins/outcome", description: "grade the run against a rubric", allowed: { runner: true, sandbox: true } },
+      { name: "team", source: "/app/plugins/team", description: "agent teams", allowed: { runner: false, sandbox: true } },
+    ] }));
+    const all = await cli(s.url, ["plugins"]);
+    expect(all.code).toBe(0);
+    expect(all.stdout).toContain("/app/plugins/outcome");
+    expect(all.stdout).toContain("runner+sandbox");
+    expect(all.stdout).toContain("sandbox"); // team runs only there
+    expect((await cli(s.url, ["plugins", "outcome"])).code).toBe(0);
+    expect((await cli(s.url, ["plugins", "search", "outcome"])).code).toBe(0);
+    // a bare word is taken as the search query, the same as `plugins search <word>`
+    expect(s.requests.map((r) => r.path)).toEqual(["/v1/plugins", "/v1/plugins?q=outcome", "/v1/plugins?q=outcome"]);
+  });
+
   it("plugins can be brought to one session: --packages at create, add/remove/list while it runs", async () => {
     const s = await serve((r, res) => {
       if (r.method === "GET" && r.path.startsWith("/v1/sessions/sess_1")) return sendJson(res, 200, { id: "sess_1", agent: { packages: ["npm:pma-plugin-outcome"] } });
