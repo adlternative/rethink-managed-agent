@@ -16,6 +16,7 @@ import { memoryStoresRoute } from "./routes/memories.ts";
 import { principalsRoute } from "./routes/principals.ts";
 import { agentsApi } from "./routes/compat/agents-api.ts";
 import { openaiAgents } from "./routes/compat/openai-agents.ts";
+import { anthropicAgents } from "./routes/compat/anthropic.ts";
 import { vaultsRoute } from "./routes/vaults.ts";
 import { ui } from "./routes/ui.ts";
 import { auth } from "./auth.ts";
@@ -55,6 +56,7 @@ export const app = new Hono<{ Variables: { requestId: string } }>()
   .use("/openai/v1/*", auth())
   .route("/agents-api/v1", agentsApi)
   .route("/openai/v1", openaiAgents)
+  .route("/anthropic", anthropicAgents)
   .route("/v1", principalsRoute)
   .route("/v1/agents", agents)
   .route("/v1/environments", environments)

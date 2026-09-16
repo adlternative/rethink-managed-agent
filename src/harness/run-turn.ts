@@ -271,7 +271,9 @@ async function mcpTools(servers: McpServerDecl[], session: SessionResource, fetc
     try {
       await client.connect();
       const allow = server.allowed_tools ? new Set(server.allowed_tools) : null;
-      return { tools: (await client.listTools()).filter((t) => !allow || allow.has(t.name)).map((t) => mcpTool(server.label, t, client)) };
+      const deny = server.denied_tools ? new Set(server.denied_tools) : null;
+      const exposed = (await client.listTools()).filter((t) => (!allow || allow.has(t.name)) && !deny?.has(t.name));
+      return { tools: exposed.map((t) => mcpTool(server.label, t, client)) };
     } catch (e) {
       return { tools: [], note: `MCP server ${server.label} unavailable: ${(e as Error)?.message ?? e}` };
     }

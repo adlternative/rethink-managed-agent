@@ -52,9 +52,19 @@ export interface McpServerDecl {
   has_authorization?: boolean;
   /** if set, only these tool names are exposed to the model */
   allowed_tools?: string[];
+  /** tool names to hide even when allowed_tools is unset (Claude Managed Agents disables tools by name) */
+  denied_tools?: string[];
+  /**
+   * Per-tool approval policy. "always_ask" holds the call until the caller confirms it; "always_allow"
+   * runs it. Claude Managed Agents defaults MCP tools to always_ask, so the default is explicit here.
+   */
+  permissions?: { default?: ToolPermission; tools?: Record<string, ToolPermission> };
   /** vault credential to authenticate this server with; otherwise a credential is matched by URL */
   credential_id?: string | null;
 }
+/** What happens when the agent calls a tool: run it, or hold it until the caller confirms. */
+export type ToolPermission = "always_allow" | "always_ask";
+
 export interface AgentResource {
   id: AgentId;
   /** owning principal (user/org/service) */
