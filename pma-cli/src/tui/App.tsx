@@ -450,8 +450,16 @@ function App({ opts }: { opts: TuiOptions }) {
           return;
         }
         case "/plugins": case "/plugin": {
-          if (!session) return sys("no session");
           const [op, ...srcParts] = arg.split(/\s+/).filter(Boolean);
+          // Browsing the catalogue needs no session; only attaching does.
+          if (!session) {
+            const q = op === "search" || op === "available" ? srcParts.join(" ") : "";
+            const { data } = (await apiGet(`/plugins${q ? `?q=${encodeURIComponent(q)}` : ""}`)) as { data: PluginInfo[] };
+            const usable = data.filter((p) => p.allowed.runner || p.allowed.sandbox);
+            return sys(usable.length
+              ? `plugins this deployment offers:\n${usable.map((p) => `  ${p.name.padEnd(12)} ${p.description.slice(0, 70)}`).join("\n")}\n\nstart a session first, then /plugins add to attach one`
+              : "this deployment ships no plugins you can attach");
+          }
           const source = srcParts.join(" ");
           // `/plugins add` with nothing to add opens the deployment's catalogue; `/plugins search q` filters it
           if ((op === "add" && !source) || op === "search" || op === "available") {
