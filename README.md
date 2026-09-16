@@ -319,7 +319,28 @@ pma sessions create --agent "$AGENT" --environments "main=$LOCAL_ENV,dk=$DOCKER_
 pma sessions attach sess_x browser=$E2B_ENV:fork                         # later, on a fork of main's workspace
 ```
 
-## OpenAI Agents API compatibility (`/agents-api/v1`)
+## Vendor API compatibility
+
+rethink speaks its own API plus both vendor dialects, over one engine. No vendor SDK runs on the server
+and no request leaves the deployment — each surface is a translation at the edge. Full matrix and the
+list of what deliberately cannot be compatible: [DESIGN.md §21](DESIGN.md).
+
+| Surface | Point your SDK at | What it covers |
+|---|---|---|
+| **OpenAI Agents API** | `new OpenAI({ baseURL: "<host>/openai/v1" })` | `client.beta.agents.*`: agents, sessions (+stream), events, items, turns, subagents, artifacts, vaults + credentials |
+| **Claude Managed Agents** | `new Anthropic({ baseURL: "<host>/anthropic" })` | `client.beta.{agents,sessions,vaults}.*`: agents (toolsets, MCP servers), sessions (+SSE), threads, vaults + credentials, environments, memory stores |
+| **native** | `pma` CLI / your own code at `/v1` | everything, including what the dialects have no word for |
+| legacy showcase | `/agents-api/v1` | kept for existing callers; frozen |
+
+Both vendor surfaces are tested against the vendors' own SDKs (`openai@7.15.0`,
+`@anthropic-ai/sdk@0.123.0`) driving the router, and verified live end to end.
+
+A model resolves through rethink's provider table, so a vendor model id needs a provider row of that
+name or an entry in `COMPAT_MODEL_MAP`. MCP credentials live in a vault and are matched to a declared
+server by URL (or named with `credential_id`), never stored on a reusable agent. An MCP tool whose
+`permission_policy` is `always_ask` is held until the caller confirms it.
+
+### The legacy showcase adapter (`/agents-api/v1`)
 
 A thin adapter makes rethink speak the OpenAI Agents API session surface, so showcase-style code (e.g. the SRE "sev-bot") runs against a rethink base URL with no cloud vendor bound: the model resolves to a rethink provider row (BYOK), and the environment to a pluggable sandbox provider (local/docker/e2b/byoc). The adapter is pure translation over the native engine; the only engine addition is **client/function tools**.
 

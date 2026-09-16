@@ -701,3 +701,83 @@ appears in `sessions.stream()` before the first tool result).
 
 The pending action clears on `session.status_running` (run resumed past the pause), not on
 `sandbox.acquired`, because a toolless run completes without ever leasing a sandbox.
+
+## 21. Three dialects, one engine — and where they diverge
+
+rethink speaks its own API plus two vendor dialects, all over the same engine (events as truth,
+sandbox leases, principals, vaults). No vendor SDK is imported by the server and no request leaves the
+deployment; each surface is a translation at the edge.
+
+| Surface | Mount | Client |
+| --- | --- | --- |
+| native | `/v1` | `pma` CLI, your own code |
+| OpenAI Agents API | `/openai/v1` | `new OpenAI({ baseURL: "<host>/openai/v1" })`, `client.beta.agents.*` |
+| Claude Managed Agents | `/anthropic` | `new Anthropic({ baseURL: "<host>/anthropic" })`, `client.beta.{agents,sessions,vaults}.*` |
+| legacy showcase | `/agents-api/v1` | kept for existing callers; frozen |
+
+The two vendors model the same thing, which is why one engine can serve both: a reusable agent that
+names its MCP servers and holds no secrets, a session that attaches vaults and carries the run, an
+append-only event log, and tool calls the caller may have to answer. They disagree on spelling
+(`instructions` vs `system`, POST-vs-POST-only updates, `{data, has_more}` vs `{data, next_page}`,
+`function_call` vs `custom`), which is translation, not incompatibility.
+
+### 21.1 What each dialect covers
+
+**OpenAI (`/openai/v1`)** — agents (create/retrieve/update/list/delete), sessions (create incl.
+`agent_id` + inline overrides, stream, retrieve/update/list/delete), events (submit + list + SSE),
+items, turns, subagents (+ items/turns), artifacts, vaults + credentials (create/retrieve/rotate/
+list/delete). Item kinds are projected honestly: only a tool the caller declared is a `function_call`
+(the kind the SDK answers), MCP calls are `mcp_call`, `bash` is `command_execution`.
+
+**CMA (`/anthropic`)** — agents (create/retrieve/update/list/archive/versions, `agent_toolset_20260401`
+/ `mcp_toolset` / `custom`), sessions (create with `agent_with_overrides`, retrieve/update/list/
+archive/delete), session events (send/list/SSE, named in the `event:` line), threads over sub-agent
+sessions, vaults + credentials (create/retrieve/rotate/list/archive/delete), environments, memory
+stores. `mcp_toolset` allow lists become `allowed_tools`, deny lists become `denied_tools`, a `custom`
+tool is a client tool, and `permission_policy: always_ask` is enforced (§21.3).
+
+Both are verified against the vendors' real SDKs, driving the router: `openai@7.15.0` and
+`@anthropic-ai/sdk@0.123.0`.
+
+### 21.2 What cannot be made compatible
+
+These are not gaps to fill later; they are places where the vendor API describes something this engine
+deliberately is not. Each is refused at the edge (400 with the reason) or reported in the agent's
+`unsupported` list, never accepted and quietly dropped.
+
+| Vendor feature | Why not |
+| --- | --- |
+| **Vendor model ids** (`claude-opus-5`, `gpt-…`) | A model here resolves through rethink's provider table; a bare vendor id only works if a provider row is named that way, or via `COMPAT_MODEL_MAP`. Self-hosting means you bring the model. |
+| **`budget` / list cost** (CMA) | Billing in currency is an Anthropic-hosted concept. rethink meters tokens (`session.usage`) and has no price list. |
+| **Outcomes** (`user.define_outcome`, `span.outcome_evaluation_*`) | A second evaluator model grading the run. That is a product feature, not a protocol one — a plugin's job here. |
+| **`session.usage` in the CMA SSE allowlist** | The 0.123.0 SDK drops the frame; it is in `events.list` instead (a vendor SDK bug, not ours). |
+| **Anthropic skills / `skill_id`** (`xlsx`, …) | Anthropic-hosted skill artifacts. rethink has its own skills API with its own ids. |
+| **`model.speed` / `inference_geo`** | Knobs of Anthropic's inference fleet. |
+| **Agent versions as history** (CMA) | rethink keeps one agent row; `version` increments and `versions.list` returns the current one. A session snapshots its agent, so an old session is unaffected by an edit — the guarantee versions exist for. |
+| **Hosted environment templates, files, packages** (OpenAI `environments.templates`, CMA `packages`/`networking.allowed_hosts`) | An environment here is a sandbox provider (local/docker/e2b/byoc) plus a workspace. Package lists and per-host egress rules belong to the image and the network you run. |
+| **`environment_variable` credentials as egress substitution** (CMA) | Ours are injected into the sandbox as real env vars, so the agent can read them. CMA substitutes a placeholder at egress; without that, `networking.allowed_hosts` and `injection_location` cannot be honored and are not accepted as if they were. |
+| **`mcp_oauth` refresh** | The refresh block is stored sealed but never used; the access token is sent as given, and `mcp_oauth_validate` is not implemented. |
+| **stdio MCP servers** (OpenAI) | The MCP client is HTTP-only, and a stdio server would run beside the runner, outside the sandbox that is supposed to confine it. Refused, not ignored. |
+| **`tool_search`, `programmatic_tool_calling`** (OpenAI) | Accepted so an agent definition round-trips; never run. |
+| **`glob` / `grep`** (CMA toolset) | No rethink builtin; the agent does the same with `bash`. |
+| **`system.message` mid-conversation** (CMA) | rethink changes the system prompt with `PATCH /v1/sessions/:id`, which applies from the next turn. |
+| **Webhooks** (both) | Not implemented; subscribe to the event stream instead. |
+| **Memories under a store** (CMA `memories`, `memory_versions`) | A rethink memory store is a mounted directory the agent edits, versioned as a workspace ref — not a path-addressed document API with preconditions and redaction. |
+| **`file` / `github_repository` session resources** (CMA) | A file is attached to a message (`{type:"document", source:{type:"file", file_id}}`), and a repository is the environment's workspace (`{kind:"git", remote}`). Both exist; they are declared elsewhere. |
+| **`always_ask` on sandbox tools** (CMA) | Confirmation is implemented for MCP tools, where the call leaves the deployment. A sandbox tool is already confined by the sandbox, and holding every `bash` would make the loop unusable. |
+
+### 21.3 Tool confirmation
+
+CMA defaults MCP tools to `always_ask`, so honoring it is a correctness matter: a compat layer that
+runs a tool the caller meant to gate has silently escalated privilege.
+
+The engine holds the call (`agent.tool_confirmation_required`) and waits on the same durable per-call
+channel a client tool's result uses (`confirm:<tool_use_id>`), so it works on every messaging backend
+and unwinds like any other tool: an allow runs it, a deny returns a tool error carrying the caller's
+message, and no answer inside `CLIENT_TOOL_WAIT_MS` fails that call rather than hanging the run. In
+the CMA projection the call is announced with `evaluated_permission: "ask"`, the session reads as
+`session.status_idle` with `stop_reason.requires_action`, and `user.tool_confirmation` resumes it.
+
+One honest difference: the rethink session row stays `running` while it waits, because the run is
+parked inside the loop rather than torn down. The dialect's clients see the idle/requires_action pair
+they wait for; `GET /v1/sessions/:id` on the native API shows `running`.

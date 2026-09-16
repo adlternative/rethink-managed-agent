@@ -49,7 +49,22 @@ npm run cli -- --help                                    # 全部命令;<命令>
 
 每个顶层资源都归属一个 **principal**(多态主体:用户/组织/服务账号)。请求的主体从 `Authorization: Bearer <token>` 经 `api_keys` 解析,读写都按它 scope,一个主体看不到也改不了另一个主体的资源。`AUTH_REQUIRED=false`(默认)时无 token 回落到 `prc_local`,单机零改动。**身份来源是可插拔的**:把 `PRINCIPAL_RESOLVER` 指向一个模块即可接入自己的 JWT/OIDC、可信网关头、mTLS、每租户 key——平台只守隔离边界,"用户/组织"的语义交给业务侧。详见 DESIGN 第 15 节。
 
-## OpenAI Agents API 兼容层(`/agents-api/v1`)
+## 厂商 API 兼容层
+
+rethink 在同一个引擎上讲三种方言:自己的原生 API,加上两家厂商的。服务端不引入任何厂商 SDK,请求也不会离开你的部署——每一层都只是边缘上的翻译。完整对照表,以及哪些地方**刻意做不到兼容**,见 [DESIGN 第 21 节](DESIGN.md)。
+
+| 接口 | SDK 指向 | 覆盖 |
+|---|---|---|
+| **OpenAI Agents API** | `new OpenAI({ baseURL: "<host>/openai/v1" })` | `client.beta.agents.*`:agent、session(含流式)、事件、items、turns、子 agent、artifacts、vault 及凭据 |
+| **Claude Managed Agents** | `new Anthropic({ baseURL: "<host>/anthropic" })` | `client.beta.{agents,sessions,vaults}.*`:agent(工具集、MCP server)、session(含 SSE)、thread、vault 及凭据、environment、memory store |
+| **原生** | `pma` CLI 或你自己的代码,`/v1` | 全部能力,包括两种方言里没有对应说法的那些 |
+| 旧的 showcase 适配器 | `/agents-api/v1` | 为已有调用方保留,不再演进 |
+
+两个厂商接口都用厂商自己的 SDK(`openai@7.15.0`、`@anthropic-ai/sdk@0.123.0`)驱动路由跑过测试,也都在活栈上端到端验证过。
+
+模型走 rethink 的 provider 表解析,所以厂商的模型 id 需要有同名 provider 行,或者在 `COMPAT_MODEL_MAP` 里映射。MCP 凭据放在 vault 里,按 URL 匹配到声明的 server(也可以用 `credential_id` 指定),不会存在可复用的 agent 上。`permission_policy` 是 `always_ask` 的 MCP 工具会被挂起,等调用方确认后才执行。
+
+### 旧的 showcase 适配器(`/agents-api/v1`)
 
 一个薄适配器让 rethink 讲 OpenAI Agents API 的 session 方言,showcase 级代码指到本地 base URL 就能跑,且**不绑任何云厂商**(模型走 provider+BYOK,环境走可插拔沙箱)。核心新增是**客户端/函数工具**(结果由调用方提供);`{type:'mcp'}` 由 runner 端真实 MCP-over-HTTP 客户端连接;`web_search` 复用现成的 web-search 插件;`multi_agent` 映射到团队插件。零依赖 SDK 在 `src/api/routes/compat/sdk/`。详见 DESIGN 第 16 节。
 
