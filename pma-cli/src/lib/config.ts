@@ -33,7 +33,8 @@ export function saveConfig(cfg: Config): void {
 /** File config overlaid with env vars: PMA_HOST, PMA_TOKEN, PMA_HEADERS (JSON object). */
 export function resolveConfig(): Config {
   const cfg = loadConfig();
-  if (process.env.PMA_HOST) cfg.host = process.env.PMA_HOST;
+  // PMA_API is what the repo's own CLI reads; accept both so one export drives either client
+  if (process.env.PMA_HOST || process.env.PMA_API) cfg.host = (process.env.PMA_HOST || process.env.PMA_API)!;
   if (process.env.PMA_TOKEN) cfg.token = process.env.PMA_TOKEN;
   if (process.env.PMA_HEADERS) {
     try { cfg.headers = { ...cfg.headers, ...JSON.parse(process.env.PMA_HEADERS) }; } catch { /* ignore */ }

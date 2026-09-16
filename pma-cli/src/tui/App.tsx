@@ -72,6 +72,7 @@ const COMMANDS: { name: string; desc: string }[] = [
   { name: "/model", desc: "Model override for the next /new" },
   { name: "/status", desc: "Session info" },
   { name: "/prompt", desc: "Show the system prompt as sent (/prompt set <text> changes it)" },
+  { name: "/plugins", desc: "Plugins on this session (/plugins add|remove <source>) — live from the next turn" },
   { name: "/sandboxes", desc: "List sandboxes" },
   { name: "/export", desc: "Export conversation to a file (--json)" },
   { name: "/cancel", desc: "Interrupt the running turn" },
@@ -446,6 +447,26 @@ function App({ opts }: { opts: TuiOptions }) {
           if (arg === "reset") { await apiRequest("PATCH", `/sessions/${session.id}`, { system: null }); sys("system prompt reset to default (next turn)"); return; }
           const r = (await apiGet(`/sessions/${session.id}/system_prompt`)) as { rendered: string; source: string };
           sys(`system prompt (${r.source}):\n${r.rendered}`);
+          return;
+        }
+        case "/plugins": case "/plugin": {
+          if (!session) return sys("no session");
+          const [op, ...srcParts] = arg.split(/\s+/).filter(Boolean);
+          const source = srcParts.join(" ");
+          if (op === "add" || op === "remove" || op === "rm") {
+            if (!source) return sys("usage: /plugins add|remove <npm:pkg | git:url | /absolute/path>");
+            const next = op === "add"
+              ? await apiPost(`/sessions/${session.id}/packages`, { source })
+              : await apiRequest("DELETE", `/sessions/${session.id}/packages/${encodeURIComponent(source)}`);
+            const list = (next as Session).agent.packages ?? [];
+            // the runner loads a host with the new list on the next run, so it is live from the next message
+            sys(`${op === "add" ? "attached" : "detached"} ${source} (live from the next turn)\nplugins: ${list.join(", ") || "(none)"}`);
+            return;
+          }
+          if (op) return sys("usage: /plugins [add|remove <source>]");
+          const s = (await apiGet(`/sessions/${session.id}`)) as Session;
+          const list = s.agent.packages ?? [];
+          sys(list.length ? `plugins on this session:\n${list.map((p) => `  ${p}`).join("\n")}` : "no plugins on this session (add one with /plugins add <source>)");
           return;
         }
         case "/sessions": {
