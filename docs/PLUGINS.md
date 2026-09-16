@@ -18,11 +18,16 @@ my-plugin/
 
 ## Is it actually usable?
 
-`node scripts/e2e-plugins.mjs` attaches each bundled plugin to a real session on a running stack,
-exercises it as a user would, and judges from the event log — the tool was called, the hook fired, the
-webhook arrived. Last full run: **13 pass · 2 skip · 0 fail** (`web-search` skipped for want of a Bing
-key; `compactor` needs a context overflow, covered by the harness compaction tests and verified
-separately against a small-context model).
+Two runs, both against a live stack, judging from the event log — the tool was called, the hook fired,
+the webhook arrived:
+
+- `node scripts/e2e-plugins.mjs` — through the API. **13 pass · 2 skip · 0 fail**
+- `node scripts/e2e-plugins-cli.mjs` — every step through the `pma` CLI (`agents create --packages`,
+  `sessions create --packages`, `sessions packages add`, `session send --wait`, `session events`),
+  so a client that builds the wrong request fails even when the server is fine. **14 pass · 2 skip · 0 fail**
+
+`web-search` is skipped for want of a Bing key; `compactor` needs a context overflow, covered by the
+harness compaction tests and verified separately against a small-context model.
 
 ## Finding one
 

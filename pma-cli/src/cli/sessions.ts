@@ -6,10 +6,12 @@ const USAGE = `sessions subcommand:
   list [--status idle|running|terminated]
   get <id>
   create [--agent <id>] [--env <id>] [--workspace-id <id>] [--model provider/id] [--message <text>] [--memory-stores mem_a[:mount],mem_b]
+         [--packages npm:x,/abs/path]   plugins for this session only (added to the agent's own)
          [--environments main=<env_id>,<key>=<env_id>[:fork],...]   (attach several sandboxes; ":fork" forks main's workspace)
   attach <id> <key>=<env_id>[:fork]
   mount <id> <mem_id>[:mount_path]      /  unmount <id> <mem_id>        (memory stores; next turn)
   skill <id> add <skill_id>             /  skill <id> remove <skill_id>
+  packages list <id>                    /  packages add|remove <id> <name|source>   plugins; live from the next turn
   set-system <id> (--system <text> | --system-file F | --no-system)      change this session's system prompt (next turn)
   prompt <id>                           show the system prompt as actually sent
   archive <id>
@@ -55,6 +57,7 @@ export async function cmdSessions(args: string[]): Promise<void> {
     case "list": case "ls": {
       let { data } = (await apiGet("/sessions")) as { data: Session[] };
       if (str(flags, "status")) data = data.filter((s) => s.status === str(flags, "status"));
+      if (flags.json) return printJson(data);
       table([["ID", "STATUS", "AGENT", "MODEL", "CTX", "TOKENS", "UPDATED"], ...data.map((s) => [s.id, s.status, s.agent.name, `${s.agent.model.provider}/${s.agent.model.id}`, fmtCtx(s.context), s.usage ? fmtTokens(s.usage.total_tokens) : "-", fmtTime(s.updated_at)])]);
       return;
     }
@@ -62,7 +65,11 @@ export async function cmdSessions(args: string[]): Promise<void> {
       if (!a) die("usage: pma sessions get <id>");
       return printJson(await apiGet(`/sessions/${a}`));
     case "create":
-      return printJson(await createSession({ agent: str(flags, "agent"), env: str(flags, "env"), workspaceId: str(flags, "workspace-id"), model: str(flags, "model"), message: str(flags, "message"), environments: str(flags, "environments"), memoryStores: str(flags, "memory-stores") }));
+      return printJson(await createSession({
+        agent: str(flags, "agent"), env: str(flags, "env"), workspaceId: str(flags, "workspace-id"), model: str(flags, "model"),
+        message: str(flags, "message"), environments: str(flags, "environments"), memoryStores: str(flags, "memory-stores"),
+        packages: str(flags, "packages")?.split(",").map((x) => x.trim()).filter(Boolean),
+      }));
     case "attach": {
       const spec = positional[2];
       if (!a || !spec) die("usage: pma sessions attach <id> <key>=<env_id>[:fork]");
@@ -80,6 +87,24 @@ export async function cmdSessions(args: string[]): Promise<void> {
       const [, , op, sid] = positional;
       if (!a || !sid || (op !== "add" && op !== "remove")) die("usage: pma sessions skill <session> add|remove <skill_id>");
       return printJson(op === "add" ? await apiPost(`/sessions/${a}/skills`, { type: "custom", skill_id: sid }) : await apiDelete(`/sessions/${a}/skills/${sid}`));
+    }
+    // Plugins for one session: `packages list <id>` / `packages add|remove <id> <name|source>`. A bare
+    // catalogue name is accepted, since that is what `pma plugins` prints.
+    case "packages": case "plugins": {
+      const [, op, sid, src] = positional;
+      if (op === "list" || op === "ls") {
+        if (!sid) die("usage: pma sessions packages list <session>");
+        const s = (await apiGet(`/sessions/${sid}`)) as Session;
+        const list = s.agent.packages ?? [];
+        if (flags.json) return printJson(list);
+        return list.length ? table([["SOURCE"], ...list.map((p) => [p])]) : console.log("(none)");
+      }
+      if ((op !== "add" && op !== "remove" && op !== "rm") || !sid || !src) die("usage: pma sessions packages list <session> | packages add|remove <session> <name|source>");
+      const known = ((await apiGet("/plugins")) as { data: { name: string; source: string }[] }).data.find((p) => p.name === src);
+      const source = known?.source ?? src;
+      return printJson(op === "add"
+        ? await apiPost(`/sessions/${sid}/packages`, { source })
+        : await apiDelete(`/sessions/${sid}/packages/${encodeURIComponent(source)}`));
     }
     case "set-system": {
       if (!a) die(USAGE);

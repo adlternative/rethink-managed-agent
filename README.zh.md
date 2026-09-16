@@ -49,6 +49,22 @@ npm run cli -- --help                                    # 全部命令;<命令>
 
 每个顶层资源都归属一个 **principal**(多态主体:用户/组织/服务账号)。请求的主体从 `Authorization: Bearer <token>` 经 `api_keys` 解析,读写都按它 scope,一个主体看不到也改不了另一个主体的资源。`AUTH_REQUIRED=false`(默认)时无 token 回落到 `prc_local`,单机零改动。**身份来源是可插拔的**:把 `PRINCIPAL_RESOLVER` 指向一个模块即可接入自己的 JWT/OIDC、可信网关头、mTLS、每租户 key——平台只守隔离边界,"用户/组织"的语义交给业务侧。详见 DESIGN 第 15 节。
 
+## 模型来自 provider 行,跟本仓库无关
+
+**provider** 就是一行数据:`{id, api, base_url, auth, models[]}`。`api` 是 pi-ai 认识的三种形状之一——
+`openai-completions`、`openai-responses`、`anthropic-messages`——所以只要对方讲其中一种就能接:OpenAI、
+Anthropic、自建的 vLLM / Ollama、公司网关、任何 OpenAI 兼容代理。agent 用 `{provider, id}` 指模型,
+provider 行一变 runner 就重建模型注册表。
+
+```bash
+pma providers create my-vllm --api openai-completions --base-url http://gpu-box:8000/v1 --no-auth --models qwen3:128000
+pma agents create coder my-vllm/qwen3
+```
+
+`.env.example` 里的 `QODER_*` 只是**本地开发的种子**:首次启动时如果 providers 表是空的,就插一行指向本地
+的 OpenAI 兼容代理,好让刚 clone 的仓库不配任何 key 也能跑。`pma providers delete qoder` 删掉即可,引擎里
+没有任何地方认这个 id。
+
 ## 厂商 API 兼容层
 
 rethink 在同一个引擎上讲三种方言:自己的原生 API,加上两家厂商的。服务端不引入任何厂商 SDK,请求也不会离开你的部署——每一层都只是边缘上的翻译。完整对照表,以及哪些地方**刻意做不到兼容**,见 [DESIGN 第 21 节](DESIGN.md)。

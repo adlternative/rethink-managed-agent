@@ -16,6 +16,7 @@ export async function cmdAgents(args: string[]): Promise<void> {
   switch (sub) {
     case "list": case "ls": {
       const { data } = (await apiGet("/agents")) as { data: Agent[] };
+      if (flags.json) return printJson(data);
       table([["ID", "NAME", "MODEL", "TOOLS", "PACKAGES"], ...data.map((x) => [x.id, x.name, `${x.model.provider}/${x.model.id}`, x.tools.join(","), (x.packages ?? []).join(",")])]);
       return;
     }

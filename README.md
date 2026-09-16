@@ -165,7 +165,7 @@ Requires Node 22+, a Postgres, and a Redis (for example `brew services start pos
 
 ```sh
 npm install
-cp .env.example .env          # edit DATABASE_URL / REDIS_URL / QODER_BASE_URL as needed
+cp .env.example .env          # edit DATABASE_URL / REDIS_URL; the model provider is a DB row (below)
 npm run migrate               # idempotent; api and runner also migrate on boot
 npm run api                   # http://localhost:8080
 npm run runner                # in another terminal; consumes the run queue and reaps sandboxes
@@ -186,9 +186,8 @@ Other useful scripts: `npm run typecheck`, `npm test` (vitest: fold + local sand
 | `PRINCIPAL_RESOLVER` | | Module that default-exports a `PrincipalResolver` (credential → principal); empty uses the built-in Bearer/`api_keys` resolver |
 | `TRUSTED_PRINCIPAL_HEADER` | `x-principal-id` | Header the `trusted-header` example resolver reads (only safe behind a trusted gateway) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue, pub/sub, steering lists |
-| `QODER_BASE_URL` | `http://127.0.0.1:4141/v1` | OpenAI-compatible proxy for the `qoder` provider |
-| `QODER_API_KEY` | `qoder` | Bearer token sent to the proxy; the proxy ignores it but pi-ai refuses to send requests without one |
-| `ANTHROPIC_API_KEY` | | Enables the `anthropic` provider |
+| `QODER_BASE_URL` / `QODER_API_KEY` | `http://127.0.0.1:4141/v1` / `qoder` | Only the **dev seed** provider (see "Models come from provider rows"); delete the row and these do nothing |
+| `ANTHROPIC_API_KEY` | | Seeds an `anthropic` provider row too, when set |
 | `SANDBOX_DEFAULT_PROVIDER` | `local` | Fallback when an environment has no provider |
 | `SANDBOX_LOCAL_ROOT` | `./data/sandboxes` | Directory (as seen by the runner) for ephemeral sandbox dirs |
 | `WORKSPACE_ROOT` | `./data/workspaces` | Persistent captured `dir` workspaces (never reaped) |
@@ -297,6 +296,24 @@ under one directory per sandbox (file access confined to it, commands with an al
 results back; the runner relays over Redis. A sandbox whose worker stops heartbeating (60s) is retired, and a
 run on an environment with no worker connected fails immediately with instructions instead of hanging.
 Runner-side plugins work unchanged; `plugin_host: "sandbox"` is not available for byoc yet.
+
+## Models come from provider rows, not from this repo
+
+A **provider** is a row: `{id, api, base_url, auth, models[]}`. `api` is one of the three shapes pi-ai
+speaks — `openai-completions`, `openai-responses`, `anthropic-messages` — so anything that speaks one
+of them works: OpenAI, Anthropic, a vLLM or Ollama endpoint, a company gateway, an OpenAI-compatible
+proxy. Agents name a model as `{provider, id}`; the runner rebuilds its registry when a row changes.
+
+```bash
+pma providers create my-openai  --api openai-responses     --base-url https://api.openai.com/v1 --key sk-…            --models gpt-5:400000
+pma providers create my-claude  --api anthropic-messages   --base-url https://api.anthropic.com  --auth-env ANTHROPIC_API_KEY --models claude-sonnet-4-6:200000
+pma providers create my-vllm    --api openai-completions   --base-url http://gpu-box:8000/v1     --no-auth            --models qwen3:128000
+pma agents create coder my-vllm/qwen3
+```
+
+`QODER_*` in `.env.example` is nothing more than the **dev seed**: on first start, if the providers
+table is empty, one row is inserted pointing at a local OpenAI-compatible proxy so a fresh clone can
+run without any key. `pma providers delete qoder` and it is gone; nothing in the engine refers to it.
 
 ## BYOK (bring your own model key)
 

@@ -35,6 +35,7 @@ subcommands:
   sessions   list | get <id> | create [--environments ...] [--memory-stores mem[:path]] | attach | mount | unmount | skill add|remove | archive | delete
   session    events <id> | send <id> <text> [--wait] [--file path]... | stream <id> | interrupt <id> | export <id>
   sandboxes  list [--all] | get <id> | pause <id> | delete <id>
+  plugins    list [query]        what this deployment ships, and the source to attach
   files      upload <path> | list | get <id> | delete <id>
   skills     list | get <id> | create --file SKILL.md | version <id> --file SKILL.md | delete <id>
   memory-stores  list | get <id> | create <name> [--description D] | delete <id>
@@ -45,7 +46,7 @@ env: PMA_HOST, PMA_TOKEN, PMA_HEADERS (JSON), PMA_CONFIG (config path; default ~
 process.on("unhandledRejection", (e: any) => die(`Error: ${e?.message ?? e}`));
 
 const argv = process.argv.slice(2);
-const SUBCOMMANDS = new Set(["files", "skills", "memory-stores", "worker", "providers", "config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "help"]);
+const SUBCOMMANDS = new Set(["files", "skills", "memory-stores", "worker", "providers", "config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "plugins", "help"]);
 
 if (argv[0] && SUBCOMMANDS.has(argv[0])) {
   const sub = argv.slice(1);
@@ -65,6 +66,7 @@ if (argv[0] && SUBCOMMANDS.has(argv[0])) {
       case "sessions": await (await import("./cli/sessions.ts")).cmdSessions(sub); break;
       case "session": await (await import("./cli/session.ts")).cmdSession(sub); break;
       case "sandboxes": await (await import("./cli/sandboxes.ts")).cmdSandboxes(sub); break;
+      case "plugins": await (await import("./cli/plugins.ts")).cmdPlugins(sub); break;
       default: console.log(HELP);
     }
   } catch (e: any) {
@@ -83,6 +85,12 @@ if (argv[0] && SUBCOMMANDS.has(argv[0])) {
   const resumeFlag = flags.resume ?? flags.r;
   const resume = resumeFlag === true ? (positional[0] ?? "latest") : typeof resumeFlag === "string" ? resumeFlag : undefined;
   const message = resume ? undefined : positional.join(" ") || undefined;
+  // Anything that is not a subcommand opens the chat UI, which needs a terminal. Without one (a pipe,
+  // a script, CI) Ink dies with a raw-mode stack trace that reads like a crash — usually it is a
+  // mistyped subcommand, so say that instead.
+  if (!process.stdin.isTTY) {
+    die(`pma: no terminal on stdin, so the chat UI cannot start.${message ? ` "${message.split(" ")[0]}" is not a subcommand — see \`pma help\`.` : " Run a subcommand (pma help) instead."}`);
+  }
   const { startTUI } = await import("./tui/App.tsx");
   await startTUI({ resume, agent: cfg.default_agent_id, env: cfg.default_env_id, message, workspaceId: str(flags, "workspace-id"), model: str(flags, "model") });
   process.exit(0);
