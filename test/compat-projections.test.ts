@@ -138,10 +138,17 @@ describe("toItems turn attribution (engine order: user.message precedes status_r
     expect(items[2]!.turn_id).toBe("turn_6");
   });
 
-  it("function_call_output carries error text only when is_error", () => {
+  it("a command carries its own result; only a tool the caller answers gets a separate output item", () => {
     const items = toItems(session(), [running(1), toolUse(2, "bash", "c1"), toolResult(3, "c1", true), toolUse(4, "bash", "c2"), toolResult(5, "c2", false)]);
-    expect(items[1]).toMatchObject({ type: "function_call_output", call_id: "c1", output: "r", error: "r" });
-    expect(items[3]).toMatchObject({ type: "function_call_output", call_id: "c2", error: null });
+    expect(items.map((i: any) => i.type)).toEqual(["command_execution", "command_execution"]);
+    expect(items[0]).toMatchObject({ type: "command_execution", output: "r", status: "failed", exit_code: 1 });
+    expect(items[1]).toMatchObject({ type: "command_execution", output: "r", status: "completed", exit_code: 0 });
+
+    // a declared client tool stays a function_call, answered by a function_call_output
+    const withClient = session({ agent: { ...session().agent, client_tools: [{ type: "function", name: "lookup", parameters: {} }] } });
+    const client = toItems(withClient, [running(1), toolUse(2, "lookup", "c1"), toolResult(3, "c1", true), toolUse(4, "lookup", "c2"), toolResult(5, "c2", false)]);
+    expect(client[1]).toMatchObject({ type: "function_call_output", call_id: "c1", output: "r", error: "r" });
+    expect(client[3]).toMatchObject({ type: "function_call_output", call_id: "c2", error: null });
   });
 
   it("skips non-item events (usage, sandbox, status)", () => {
@@ -184,9 +191,9 @@ describe("toSubagent", () => {
     const s = toSubagent(session({ status: "running", agent: { ...session().agent, name: "worker", system: "do it" } }));
     expect(s).toMatchObject({ status: "active", closed_at: null, name: "worker", instructions: [{ type: "output_text", text: "do it" }] });
   });
-  it("idle -> idle, system null -> instructions null", () => {
+  it("idle -> still active (the SDK's union is active | closed), system null -> instructions null", () => {
     const s = toSubagent(session({ status: "idle" }));
-    expect(s).toMatchObject({ status: "idle", closed_at: null, instructions: null, name: null });
+    expect(s).toMatchObject({ status: "active", closed_at: null, instructions: null, name: null });
   });
   it("terminated -> closed with closed_at from updated_at", () => {
     const s = toSubagent(session({ status: "terminated" }));
@@ -201,8 +208,10 @@ describe("projectDelta: full mapping", () => {
 
   it("message and thinking deltas carry the current turn id and stream id", () => {
     const out = run([deltaOf(running(4)), { type: "agent.message_delta", session_id: "sess_p", stream_id: "st_1", text: "he" }, { type: "agent.thinking_delta", session_id: "sess_p", stream_id: "st_2", text: "hm" }]);
-    expect(out[1]).toMatchObject({ type: "agent.session.turn.output_text.delta", turn_id: "turn_4", item_id: "st_1", delta: "he" });
-    expect(out[2]).toMatchObject({ type: "agent.session.turn.reasoning_summary_text.delta", turn_id: "turn_4", item_id: "st_2", delta: "hm", summary_index: 0 });
+    const byType = (t: string) => out.find((e) => e.type === t);
+    expect(byType("agent.session.turn.content_part.added")).toMatchObject({ turn_id: "turn_4", item_id: "st_1" });
+    expect(byType("agent.session.turn.output_text.delta")).toMatchObject({ turn_id: "turn_4", item_id: "st_1", delta: "he" });
+    expect(byType("agent.session.turn.reasoning_summary_text.delta")).toMatchObject({ turn_id: "turn_4", item_id: "st_2", delta: "hm", summary_index: 0 });
   });
 
   it("deltas before any turn carry turn_id null", () => {
@@ -215,28 +224,32 @@ describe("projectDelta: full mapping", () => {
   });
 
   it("status_running -> turn.created with an in_progress root turn", () => {
-    const [e] = run([deltaOf(running(7))]);
-    expect(e).toMatchObject({ type: "agent.session.turn.created", turn_id: "turn_7", turn: { id: "turn_7", status: "in_progress", subagent_id: null, session_id: "sess_p" } });
+    const out = run([deltaOf(running(7))]);
+    expect(out.map((e) => e.type)).toEqual(["agent.session.in_progress", "agent.session.turn.created", "agent.session.turn.in_progress"]);
+    expect(out[1]).toMatchObject({ type: "agent.session.turn.created", turn_id: "turn_7", turn: { id: "turn_7", status: "in_progress", subagent_id: null, session_id: "sess_p" } });
   });
 
   it("agent.message: empty text -> nothing; stream_id -> item_id; else item_<seq>", () => {
     expect(run([deltaOf(agentMsg(2, ""))])).toEqual([]);
-    expect(run([deltaOf(agentMsg(2, "hello", { stream_id: "st_9" }))])[0]).toMatchObject({ type: "agent.session.turn.output_text.done", item_id: "st_9", text: "hello" });
+    const withStream = run([deltaOf(agentMsg(2, "hello", { stream_id: "st_9" }))]);
+    expect(withStream.map((e) => e.type)).toEqual(["agent.session.turn.output_text.done", "agent.session.turn.item.done"]);
+    expect(withStream[0]).toMatchObject({ type: "agent.session.turn.output_text.done", item_id: "st_9", text: "hello" });
+    expect(withStream[1]).toMatchObject({ item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "hello" }] } });
     expect(run([deltaOf(agentMsg(3, "hello"))])[0]).toMatchObject({ item_id: "item_3" });
   });
 
   it("status_idle end_turn -> [turn.completed, session.idle]", () => {
     const out = run([deltaOf(running(1)), deltaOf(idle(2))]);
-    expect(out.slice(1).map((e) => e.type)).toEqual(["agent.session.turn.completed", "agent.session.idle"]);
-    expect(out[1]).toMatchObject({ turn_id: "turn_1", turn: { status: "completed" } });
+    expect(out.slice(3).map((e) => e.type)).toEqual(["agent.session.turn.completed", "agent.session.idle"]);
+    expect(out[3]).toMatchObject({ turn_id: "turn_1", turn: { status: "completed" } });
   });
 
   it("status_idle interrupted -> [turn.cancelled, session.idle]", () => {
-    expect(run([deltaOf(running(1)), deltaOf(idle(2, "interrupted"))]).slice(1).map((e) => e.type)).toEqual(["agent.session.turn.cancelled", "agent.session.idle"]);
+    expect(run([deltaOf(running(1)), deltaOf(idle(2, "interrupted"))]).slice(3).map((e) => e.type)).toEqual(["agent.session.turn.cancelled", "agent.session.idle"]);
   });
 
   it("status_idle error -> [turn.failed, session.failed]", () => {
-    expect(run([deltaOf(running(1)), deltaOf(idle(2, "error"))]).slice(1).map((e) => e.type)).toEqual(["agent.session.turn.failed", "agent.session.failed"]);
+    expect(run([deltaOf(running(1)), deltaOf(idle(2, "error"))]).slice(3).map((e) => e.type)).toEqual(["agent.session.turn.failed", "agent.session.failed"]);
   });
 
   it("status_idle without a turn falls back to turn_<seq>", () => {

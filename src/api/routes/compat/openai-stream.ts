@@ -16,20 +16,45 @@ import type { ContentBlock, SessionId, SessionResource, StreamDelta } from "../.
  * the result is submitted back through POST .../events, which unblocks the waiting turn.
  */
 
+import { clientToolSet, itemKindOf, toolUseItem } from "./items.ts";
+
 const text = (content: ContentBlock[]) => content.map((b) => (b.type === "text" ? b.text : "")).join("");
 const nowSec = () => Math.floor(Date.now() / 1000);
 
-export interface TurnCtx { turnId?: string; n: number }
-export const newTurnCtx = (): TurnCtx => ({ n: 0 });
+export interface TurnCtx {
+  turnId?: string;
+  n: number;
+  /** open tool calls by tool_use_id, so the result event can close the item it belongs to */
+  calls?: Map<string, { seq: number; name: string; input?: unknown; kind: ReturnType<typeof itemKindOf> }>;
+  /** whether an output_text content part is currently open (the SDK brackets text with part events) */
+  partOpen?: boolean;
+  /** item id of the assistant message being streamed */
+  messageItem?: string;
+}
+export const newTurnCtx = (): TurnCtx => ({ n: 0, calls: new Map() });
 
 type Ev = Record<string, unknown>;
+
+/** The SDK's Turn object as the stream carries it. */
+const turnOf = (id: string, session: SessionResource, status: string) => ({
+  id, object: "agent.session.turn", subagent_id: null, agent_id: session.agent.id, session_id: session.id,
+  status, created_at: nowSec(), started_at: nowSec(), completed_at: status === "in_progress" ? null : nowSec(), error: null, usage: null,
+});
 
 /** Project one native delta into zero or more official AgentSessionEvents (in order). */
 export function projectDelta(delta: StreamDelta, session: SessionResource, ctx: TurnCtx): Ev[] {
   const sid = session.id;
   const evId = () => `evt_${sid}_${++ctx.n}`;
   if (delta.type === "agent.message_delta") {
-    return [{ type: "agent.session.turn.output_text.delta", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: delta.stream_id, output_index: 0, content_index: 0, delta: delta.text }];
+    const out: Ev[] = [];
+    // the SDK brackets streamed text with content_part events; open one on the first delta of a message
+    if (!ctx.partOpen) {
+      ctx.partOpen = true;
+      ctx.messageItem = delta.stream_id;
+      out.push({ type: "agent.session.turn.content_part.added", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: delta.stream_id, output_index: 0, content_index: 0, part: { type: "output_text", text: "" } });
+    }
+    out.push({ type: "agent.session.turn.output_text.delta", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: delta.stream_id, output_index: 0, content_index: 0, delta: delta.text });
+    return out;
   }
   if (delta.type === "agent.thinking_delta") {
     return [{ type: "agent.session.turn.reasoning_summary_text.delta", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: delta.stream_id, output_index: 0, summary_index: 0, delta: delta.text }];
@@ -40,22 +65,53 @@ export function projectDelta(delta: StreamDelta, session: SessionResource, ctx: 
   switch (p.type) {
     case "session.status_running": {
       ctx.turnId = `turn_${seq}`;
-      const turn = { id: ctx.turnId, object: "agent.session.turn", subagent_id: null, agent_id: session.agent.id, session_id: sid, status: "in_progress", created_at: nowSec(), completed_at: null };
-      return [{ type: "agent.session.turn.created", event_id: evId(), session_id: sid, turn_id: ctx.turnId, turn }];
+      ctx.calls = new Map();
+      const turn = turnOf(ctx.turnId, session, "in_progress");
+      return [
+        { type: "agent.session.in_progress", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "in_progress" } },
+        { type: "agent.session.turn.created", event_id: evId(), session_id: sid, turn_id: ctx.turnId, turn },
+        { type: "agent.session.turn.in_progress", event_id: evId(), session_id: sid, turn_id: ctx.turnId, turn },
+      ];
     }
-    case "agent.tool_use":
-      return [{
-        type: "agent.session.turn.item.added", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, output_index: 0,
-        item: { id: `item_${seq}`, type: "function_call", call_id: p.tool_use_id, name: p.name, arguments: p.input, status: "in_progress", turn_id: ctx.turnId ?? "" },
-      }];
+    case "agent.tool_use": {
+      const kind = itemKindOf(p.name, clientToolSet(session));
+      if (kind === "none") return []; // a sandbox file tool: no item type in this dialect, so nothing is claimed
+      ctx.calls?.set(p.tool_use_id, { seq, name: p.name, input: p.input, kind });
+      const item = toolUseItem(p, kind as Exclude<typeof kind, "none">);
+      return [{ type: "agent.session.turn.item.added", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, output_index: 0, item: { id: `item_${seq}`, ...item, turn_id: ctx.turnId ?? "" } }];
+    }
+    case "agent.tool_result": {
+      const call = ctx.calls?.get(p.tool_use_id);
+      if (!call) return [];
+      ctx.calls?.delete(p.tool_use_id);
+      // a call the caller answers is closed by the caller's own tool_result, not by this one
+      if (call.kind === "function_call") return [];
+      const item = toolUseItem({ name: call.name, tool_use_id: p.tool_use_id, input: call.input }, call.kind as "mcp_call" | "command_execution", { content: p.content as never, is_error: p.is_error });
+      return [{ type: "agent.session.turn.item.done", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, output_index: 0, item: { id: `item_${call.seq}`, ...item, turn_id: ctx.turnId ?? "" } }];
+    }
     case "agent.message": {
       const t = text(p.content);
       if (!t) return [];
-      return [{ type: "agent.session.turn.output_text.done", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: p.stream_id ?? `item_${seq}`, output_index: 0, content_index: 0, text: t }];
+      const itemId = p.stream_id ?? ctx.messageItem ?? `item_${seq}`;
+      const out: Ev[] = [];
+      // the model's reasoning is persisted on the message it produced, so its summary closes here
+      if (p.thinking) out.push({ type: "agent.session.turn.reasoning_summary_text.done", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: `item_${seq}_reasoning`, output_index: 0, summary_index: 0, text: p.thinking });
+      if (ctx.partOpen) {
+        out.push({ type: "agent.session.turn.content_part.done", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: itemId, output_index: 0, content_index: 0, part: { type: "output_text", text: t } });
+        ctx.partOpen = false;
+        ctx.messageItem = undefined;
+      }
+      out.push({ type: "agent.session.turn.output_text.done", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, item_id: itemId, output_index: 0, content_index: 0, text: t });
+      out.push({
+        type: "agent.session.turn.item.done", event_id: evId(), session_id: sid, turn_id: ctx.turnId ?? null, output_index: 0,
+        item: { id: `item_${seq}`, type: "message", role: "assistant", content: [{ type: "output_text", text: t }], status: "completed", turn_id: ctx.turnId ?? "" },
+      });
+      return out;
     }
+
     case "session.status_idle": {
       const turnId = ctx.turnId ?? `turn_${seq}`;
-      const turn = { id: turnId, object: "agent.session.turn", subagent_id: null, agent_id: session.agent.id, session_id: sid, status: "completed", created_at: nowSec(), completed_at: nowSec() };
+      const turn = turnOf(turnId, session, "completed");
       if (p.stop_reason === "interrupted") return [{ type: "agent.session.turn.cancelled", event_id: evId(), session_id: sid, turn_id: turnId, turn }, { type: "agent.session.idle", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "idle" } }];
       if (p.stop_reason === "error") return [{ type: "agent.session.turn.failed", event_id: evId(), session_id: sid, turn_id: turnId, turn }, { type: "agent.session.failed", event_id: evId(), session_id: sid, session: { id: sid, object: "agent.session", status: "failed" } }];
       return [

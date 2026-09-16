@@ -1,6 +1,7 @@
 import { env } from "../../../shared/env.ts";
 import { invalid } from "../../errors.ts";
 import type { BuiltinToolName, FunctionToolDecl, McpServerDecl, ModelRef } from "../../../shared/types.ts";
+import { REDACTED } from "../../../infra/mcp-credentials.ts";
 
 /**
  * Translate an OpenAI Agents API agent/environment spec into rethink's shapes. This is the ONLY
@@ -87,11 +88,28 @@ export interface OpenAiAgentEcho {
   multi_agent: { enabled: boolean; max_concurrent_subagents: number | null };
 }
 
-/** The echo block for an agent spec: what create/retrieve/update must return verbatim. */
+/**
+ * The echo block for an agent spec: what create/retrieve/update must return verbatim — minus the
+ * credentials. An inline `transport.authorization` is a secret; the real value is sealed into
+ * `mcp_servers`, so the echoed declaration only shows that one was set.
+ */
 export function openaiAgentEcho(spec: OpenAiAgentSpec): OpenAiAgentEcho {
   const text = (spec.text ?? {}) as { format?: { type?: string }; verbosity?: string };
+  const tools = (spec.tools ?? []).map((t) => {
+    if (t.type !== "mcp" || !t.transport) return t;
+    const tr = t.transport as { authorization?: string; headers?: Record<string, string> };
+    if (!tr.authorization && !tr.headers) return t;
+    return {
+      ...t,
+      transport: {
+        ...tr,
+        ...(tr.authorization ? { authorization: REDACTED } : {}),
+        ...(tr.headers ? { headers: Object.fromEntries(Object.keys(tr.headers).map((k) => [k, REDACTED])) } : {}),
+      },
+    };
+  });
   return {
-    tools: spec.tools ?? [],
+    tools,
     reasoning: { effort: spec.reasoning?.effort ?? null, summary: (spec.reasoning as { summary?: string } | undefined)?.summary ?? null },
     service_tier: spec.service_tier ?? "auto",
     text: { format: { type: text.format?.type ?? "text" }, verbosity: text.verbosity ?? "medium" },

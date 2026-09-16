@@ -71,6 +71,7 @@ vi.mock("../src/infra/db.ts", async (orig) => {
     vaultCredentials: {
       put: async (vaultId: string, input: any) => { st.calls.put.push({ vaultId, ...input }); (st.creds.get(vaultId) ?? st.creds.set(vaultId, new Map()).get(vaultId)!).set(input.name, input); return { id: `cred_${input.name}`, vault_id: vaultId, name: input.name, kind: input.kind, mcp_server_url: input.mcp_server_url ?? null, metadata: {}, created_at: "2026-01-01T00:00:00.000Z" }; },
       list: async (vaultId: string) => [...(st.creds.get(vaultId)?.keys() ?? [])].map((name) => ({ id: `cred_${name}`, vault_id: vaultId, name, metadata: {}, created_at: "x" })),
+      get: async (vaultId: string, name: string) => { const input = st.creds.get(vaultId)?.get(name); return input ? { id: `cred_${name}`, vault_id: vaultId, name, kind: input.kind, mcp_server_url: input.mcp_server_url ?? null, metadata: {}, created_at: "x" } : null; },
       byId: async (id: string, vaultIds: string[]) => { for (const v of vaultIds) for (const [name, input] of st.creds.get(v) ?? []) if (`cred_${name}` === id) return { id, vault_id: v, name, kind: input.kind, mcp_server_url: input.mcp_server_url ?? null, metadata: {}, created_at: "x" }; return null; },
       delete: async (vaultId: string, name: string) => st.creds.get(vaultId)?.delete(name) ?? false,
     },
@@ -333,7 +334,7 @@ describe("POST /agents/sessions", () => {
     st.subs[0]!.cb({ type: "event", event: ev(sid, 3, { type: "session.status_idle", stop_reason: "end_turn" }) });
     const { frames, ended } = await readSse(res, 3000, ctrl);
     expect(ended).toBe(true);
-    expect(frames.map((f) => f.type)).toEqual(["agent.session.turn.created", "agent.session.turn.completed", "agent.session.idle"]);
+    expect(frames.map((f) => f.type)).toEqual(["agent.session.in_progress", "agent.session.turn.created", "agent.session.turn.in_progress", "agent.session.turn.completed", "agent.session.idle"]);
   });
 });
 
@@ -554,7 +555,7 @@ describe("artifacts routes (dir workspace over a temp directory)", () => {
     expect(list.data.map((a: any) => a.path)).toEqual(["note.txt", "page.html", "sub dir/héllo wörld.json"]);
     for (const a of list.data) {
       const meta = await (await call("GET", `/agents/sessions/${sid}/artifacts/${a.id}`)).json();
-      expect(meta).toMatchObject({ id: a.id, object: "agent.session.artifact", path: a.path, size: a.size, environment_id: "env_1" });
+      expect(meta).toMatchObject({ id: a.id, object: "agent.session.artifact", path: a.path, size_bytes: a.size_bytes, environment_id: "env_1", turn_id: null });
     }
     const uni = list.data.find((a: any) => a.path.endsWith(".json"));
     const res = await call("GET", `/agents/sessions/${sid}/artifacts/${uni.id}/content`);
@@ -654,6 +655,26 @@ describe("vault credentials", () => {
     expect(st.calls.put).toEqual([]);
   });
 
+  it("retrieve and rotate a credential; the secret never comes back and the server URL is fixed", async () => {
+    const vid = await mkVault();
+    const created = await (await call("POST", `/vaults/${vid}/credentials`, { name: "docs", auth: { type: "static_bearer", mcp_server_url: "https://docs.example.com/mcp", token: "tok-1" } })).json();
+    expect(created).toMatchObject({ object: "vault.credential", auth: { type: "static_bearer", mcp_server_url: "https://docs.example.com/mcp" } });
+    expect(JSON.stringify(created)).not.toContain("tok-1");
+
+    const got = await (await call("GET", `/vaults/${vid}/credentials/${created.id}`)).json();
+    expect(got).toMatchObject({ id: created.id, auth: { type: "static_bearer" } });
+
+    const rotated = await call("POST", `/vaults/${vid}/credentials/${created.id}`, { auth: { type: "static_bearer", token: "tok-2" } });
+    expect(rotated.status).toBe(200);
+    expect(await rotated.text()).not.toContain("tok-2");
+    expect(st.calls.put.at(-1)).toMatchObject({ name: "docs", value: "tok-2", kind: "static_bearer", mcp_server_url: "https://docs.example.com/mcp" });
+
+    expect((await call("POST", `/vaults/${vid}/credentials/${created.id}`, { auth: { type: "static_bearer" } })).status).toBe(400); // no new secret
+    expect((await call("POST", `/vaults/${vid}/credentials/${created.id}`, { auth: { type: "mcp_oauth", access_token: "x" } })).status).toBe(400); // kind is fixed
+    expect((await call("POST", `/vaults/${vid}/credentials/${created.id}`, { auth: { type: "static_bearer", mcp_server_url: "https://other.example.com/mcp", token: "t" } })).status).toBe(400);
+    expect((await call("GET", `/vaults/${vid}/credentials/cred_missing`)).status).toBe(404);
+  });
+
   it("(f) DELETE of an unknown credential -> 404; a known one deletes", async () => {
     const vid = await mkVault();
     await call("POST", `/vaults/${vid}/credentials`, { name: "K", value: "v" });
@@ -682,8 +703,13 @@ describe("GET /agents/sessions/:id/events as SSE (streamAgentSessionEvents)", ()
     emit(s.id, 6, { type: "session.status_running" }); // after terminal: dropped
     const { frames, ended } = await readSse(res, 3000, ctrl);
     expect(ended).toBe(true);
-    expect(frames.map((f) => f.type)).toEqual(["agent.session.turn.created", "agent.session.turn.output_text.delta", "agent.session.turn.item.added", "agent.session.turn.completed", "agent.session.idle"]);
-    expect(frames[2]).toMatchObject({ turn_id: "turn_3", item: { call_id: "c1", name: "lookup", arguments: { a: 1 } } });
+    expect(frames.map((f) => f.type)).toEqual([
+      "agent.session.in_progress", "agent.session.turn.created", "agent.session.turn.in_progress",
+      "agent.session.turn.content_part.added", "agent.session.turn.output_text.delta",
+      "agent.session.turn.item.added", "agent.session.turn.completed", "agent.session.idle",
+    ]);
+    // `lookup` is a tool the caller declared, so it stays a function_call the SDK is expected to answer
+    expect(frames[5]).toMatchObject({ turn_id: "turn_3", item: { type: "function_call", call_id: "c1", name: "lookup", arguments: { a: 1 } } });
     expect(sub.unsubs).toBeGreaterThanOrEqual(1);
   });
 
@@ -724,7 +750,7 @@ describe("GET /agents/sessions/:id/events as SSE (streamAgentSessionEvents)", ()
   it("client abort stops the stream and unsubscribes", async () => {
     const { ended, frames, sub } = await abortAfterFirstFrame();
     expect(ended).toBe(false);
-    expect(frames.map((f) => f.type)).toEqual(["agent.session.turn.created"]);
+    expect(frames.map((f) => f.type)).toEqual(["agent.session.in_progress", "agent.session.turn.created", "agent.session.turn.in_progress"]);
     expect(sub.unsubs).toBeGreaterThanOrEqual(1);
   });
 
@@ -752,5 +778,27 @@ describe("GET /agents/sessions/:id/events as SSE (streamAgentSessionEvents)", ()
     const types = frames.map((f) => f.type);
     expect(types).toContain("agent.session.turn.created");
     expect(types.indexOf("agent.session.turn.created")).toBeLessThan(types.indexOf("agent.session.turn.item.added"));
+  });
+
+  it("server-side tools stream as their own item kinds, never as a call the SDK is asked to answer", async () => {
+    const s = addSession();
+    const ctrl = new AbortController();
+    const res = await sseGet(s.id, ctrl);
+    const sub = await waitSub();
+    emit(s.id, 3, { type: "session.status_running" });
+    emit(s.id, 4, { type: "agent.tool_use", tool_use_id: "m1", name: "docs__search", input: { q: "x" } });
+    emit(s.id, 5, { type: "agent.tool_result", tool_use_id: "m1", content: [{ type: "text", text: "found it" }] });
+    emit(s.id, 6, { type: "agent.tool_use", tool_use_id: "b1", name: "bash", input: { command: "ls" } });
+    emit(s.id, 7, { type: "agent.tool_result", tool_use_id: "b1", content: [{ type: "text", text: "a.txt" }] });
+    emit(s.id, 8, { type: "agent.tool_use", tool_use_id: "r1", name: "read", input: { file_path: "a.txt" } });
+    emit(s.id, 9, { type: "agent.tool_result", tool_use_id: "r1", content: [{ type: "text", text: "hello" }] });
+    emit(s.id, 10, { type: "session.status_idle", stop_reason: "end_turn" });
+    const { frames } = await readSse(res, 2000, ctrl);
+    const items = frames.filter((f) => f.type.endsWith(".item.added") || f.type.endsWith(".item.done")).map((f) => f.item);
+    expect(items.map((i: any) => i.type)).toEqual(["mcp_call", "mcp_call", "command_execution", "command_execution"]);
+    expect(items.some((i: any) => i.type === "function_call")).toBe(false); // nothing here is the caller's to run
+    expect(items[1]).toMatchObject({ type: "mcp_call", server_label: "docs", name: "search", output: "found it", status: "completed" });
+    expect(items[3]).toMatchObject({ type: "command_execution", command: "ls", output: "a.txt", exit_code: 0, status: "completed" });
+    expect(sub.unsubs).toBeGreaterThanOrEqual(1);
   });
 });

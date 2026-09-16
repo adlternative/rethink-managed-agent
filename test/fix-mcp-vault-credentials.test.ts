@@ -104,3 +104,19 @@ describe("the runner connects with the vault credential", () => {
     expect(seen.some((h) => h.authorization !== undefined)).toBe(false);
   });
 });
+
+describe("the OpenAI agent echo never carries a credential", () => {
+  it("an inline transport token is stored redacted, while the sealed copy still opens", async () => {
+    const { openaiAgentEcho } = await import("../src/api/routes/compat/translate.ts");
+    const { sealMcpServers, openMcpCredentials, REDACTED } = await import("../src/infra/mcp-credentials.ts");
+    const spec = { model: "qoder/auto", tools: [{ type: "mcp", server_label: "docs", transport: { type: "http", server_url: "https://docs.example.com/mcp", authorization: "Bearer ECHO-SECRET", headers: { "x-api-key": "HEADER-SECRET" } } }] };
+    const echo = openaiAgentEcho(spec);
+    const raw = JSON.stringify(echo);
+    expect(raw).not.toContain("ECHO-SECRET");
+    expect(raw).not.toContain("HEADER-SECRET");
+    expect((echo.tools[0] as any).transport).toEqual({ type: "http", server_url: "https://docs.example.com/mcp", authorization: REDACTED, headers: { "x-api-key": REDACTED } });
+    // the credential itself survives where the runner reads it
+    const [sealed] = sealMcpServers([{ label: "docs", url: "https://docs.example.com/mcp", authorization: "Bearer ECHO-SECRET" }]);
+    expect(openMcpCredentials(sealed!).authorization).toBe("Bearer ECHO-SECRET");
+  });
+});

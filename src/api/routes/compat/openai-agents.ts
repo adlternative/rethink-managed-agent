@@ -1,12 +1,12 @@
 import { Hono } from "hono";
-import { hasMcpCredentials, sealMcpServers } from "../../../infra/mcp-credentials.ts";
+import { hasMcpCredentials, normalizeMcpUrl, sealMcpServers } from "../../../infra/mcp-credentials.ts";
 import path from "node:path";
 import type { Context } from "hono";
 import { repos, sessionConfig, vaults, vaultCredentials } from "../../../infra/db.ts";
 import { lastSeq, listEvents, listEventsForState } from "../../../infra/events.ts";
 import { secretsConfigured } from "../../../infra/secrets.ts";
 import { listArtifacts, readArtifact, deleteArtifact } from "../../../infra/artifacts.ts";
-import type { SessionEvent, SessionResource, UserEventInput, WorkspaceRef } from "../../../shared/types.ts";
+import type { SessionEvent, SessionResource, UserEventInput, VaultCredentialResource, WorkspaceRef } from "../../../shared/types.ts";
 import { invalid, notFound, queryInt, readJson } from "../../errors.ts";
 import { scope, ownerId } from "../../auth.ts";
 import { sendUserEvents } from "../events.ts";
@@ -62,6 +62,19 @@ function currentError(events: SessionEvent[]): string | null {
   return error;
 }
 
+/**
+ * One page of a projected list, in the SDK's CursorPage shape: `after` is the id of the last item of
+ * the previous page and `order` flips the direction (the projections are built oldest-first).
+ */
+export function cursorPage<T extends Record<string, unknown>>(items: T[], q: { after?: string; limit?: number; order?: string }) {
+  const ordered = q.order === "desc" ? [...items].reverse() : items;
+  const start = q.after ? ordered.findIndex((i) => i.id === q.after) + 1 : 0;
+  const limit = q.limit ?? 100;
+  const page = ordered.slice(start, start + limit);
+  return { object: "list" as const, data: page, has_more: start + limit < ordered.length };
+}
+const pageQuery = (c: Context) => ({ after: c.req.query("after") || undefined, limit: c.req.query("limit") ? queryInt(c, "limit", 100, 1) : undefined, order: c.req.query("order") });
+
 /** Build the SDK's AgentSession object from a rethink session + its event log. */
 export function toAgentSession(session: SessionResource, events: SessionEvent[], environmentId: string) {
   const error = currentError(events);
@@ -104,7 +117,7 @@ export function toAgentSession(session: SessionResource, events: SessionEvent[],
   };
 }
 
-const textOf = (content: { type: string; text?: string }[]) => content.map((b) => (b.type === "text" ? b.text ?? "" : "")).join("");
+import { clientToolSet, itemKindOf, textOf, toolUseItem } from "./items.ts";
 
 /**
  * The turn id of each event: a turn spans session.status_running -> status_idle and is named after the
@@ -132,13 +145,33 @@ function turnIds(events: SessionEvent[]): string[] {
 export function toItems(session: SessionResource, events: SessionEvent[]) {
   const ids = turnIds(events);
   const items: Record<string, unknown>[] = [];
+  // a tool call and its result are one item in this dialect (mcp_call / command_execution), so pair them up first
+  const results = new Map<string, { content: { type: string; text?: string }[]; is_error?: boolean }>();
+  const selfContained = new Set<string>();
+  const clientTools = clientToolSet(session);
+  const kinds = new Map<string, ReturnType<typeof itemKindOf>>();
+  for (const e of events) {
+    const p = e.payload;
+    if (p.type === "agent.tool_result") results.set(p.tool_use_id, p as never);
+    else if (p.type === "agent.tool_use") {
+      const kind = itemKindOf(p.name, clientTools);
+      kinds.set(p.tool_use_id, kind);
+      if (kind !== "function_call") selfContained.add(p.tool_use_id);
+    }
+  }
   for (const [i, e] of events.entries()) {
     const p = e.payload;
     const turn_id = ids[i]!;
     if (p.type === "user.message") items.push({ id: `item_${e.seq}`, type: "message", role: "user", content: [{ type: "input_text", text: textOf(p.content) }], phase: null, status: "completed", turn_id });
     else if (p.type === "agent.message") items.push({ id: `item_${e.seq}`, type: "message", role: "assistant", content: [{ type: "output_text", text: textOf(p.content) }], phase: "final_answer", status: "completed", turn_id });
-    else if (p.type === "agent.tool_use") items.push({ id: `item_${e.seq}`, type: "function_call", call_id: p.tool_use_id, name: p.name, arguments: p.input, status: "completed", turn_id });
-    else if (p.type === "agent.tool_result") items.push({ id: `item_${e.seq}`, type: "function_call_output", call_id: p.tool_use_id, output: textOf(p.content), error: p.is_error ? textOf(p.content) : null, status: "completed", turn_id });
+    else if (p.type === "agent.tool_use") {
+      const kind = kinds.get(p.tool_use_id)!;
+      // a sandbox file tool has no item type in this dialect: it is left out rather than mislabelled
+      if (kind !== "none") items.push({ id: `item_${e.seq}`, ...toolUseItem(p, kind, results.get(p.tool_use_id)), turn_id });
+    } else if (p.type === "agent.tool_result") {
+      // an MCP or command call carries its own result; only a call the caller answers gets an output item
+      if (!selfContained.has(p.tool_use_id)) items.push({ id: `item_${e.seq}`, type: "function_call_output", call_id: p.tool_use_id, output: textOf(p.content), error: p.is_error ? textOf(p.content) : null, status: "completed", turn_id });
+    }
   }
   return items;
 }
@@ -153,7 +186,7 @@ export function toTurns(session: SessionResource, events: SessionEvent[]) {
     if (p.type === "session.status_running") {
       // a second run start while a turn is open: the previous run was lost (run_lost takeover); close it
       if (cur) { cur.status = "failed"; cur.completed_at = sec; }
-      cur = { id: `turn_${e.seq}`, object: "agent.session.turn", agent_id: session.agent.id, session_id: session.id, subagent_id: null, status: "in_progress", created_at: sec, started_at: sec, completed_at: null, error: null };
+      cur = { id: `turn_${e.seq}`, object: "agent.session.turn", agent_id: session.agent.id, session_id: session.id, subagent_id: null, status: "in_progress", created_at: sec, started_at: sec, completed_at: null, error: null, usage: null };
       turns.push(cur);
     } else if (p.type === "session.status_idle" && cur) {
       cur.status = p.stop_reason === "error" ? "failed" : p.stop_reason === "interrupted" ? "cancelled" : "completed";
@@ -174,7 +207,7 @@ const artifactPath = (id: string) => {
 const EXT_TYPES: Record<string, string> = { ".txt": "text/plain", ".md": "text/markdown", ".json": "application/json", ".js": "text/javascript", ".ts": "text/plain", ".html": "text/html", ".csv": "text/csv", ".png": "image/png", ".jpg": "image/jpeg", ".pdf": "application/pdf" };
 const contentType = (p: string) => EXT_TYPES[p.slice(p.lastIndexOf(".")).toLowerCase()] ?? "application/octet-stream";
 function toArtifact(session: SessionResource, e: { path: string; size: number; mtimeSec: number }) {
-  return { id: artifactId(e.path), object: "agent.session.artifact" as const, path: e.path, size: e.size, environment_id: session.environment_id, created_at: e.mtimeSec };
+  return { id: artifactId(e.path), object: "agent.session.artifact" as const, path: e.path, size_bytes: e.size, session_id: session.id, turn_id: null, environment_id: session.environment_id, created_at: e.mtimeSec };
 }
 
 /** Project a child (sub-agent) session into the SDK's Subagent object. */
@@ -186,7 +219,10 @@ export function toSubagent(child: SessionResource) {
     object: "agent.session.subagent" as const,
     name: child.agent.name ?? null,
     instructions: child.agent.system ? [{ type: "output_text", text: child.agent.system }] : null,
-    status: child.status === "terminated" ? "closed" : child.status === "running" ? "active" : "idle",
+    // the SDK's union is active | closed: an idle child is still open, only a terminated one is closed
+    status: child.status === "terminated" ? "closed" : "active",
+    session_id: child.parent_id ?? child.id,
+    parent_agent_id: child.agent.id,
     opened_at: opened,
     closed_at: closed,
   };
@@ -241,6 +277,32 @@ function createInputToUserEvents(input: unknown): UserEventInput[] {
     return inputEventsToUserEvents(input.map((m) => ({ type: "agent.session.input.message", input: [m] })));
   }
   throw invalid("input must be a string or an array of input messages");
+}
+
+/** A stored credential as the SDK's Credential object: `auth` says what it is, never what it holds. */
+function toOpenAiCredential(cr: VaultCredentialResource) {
+  const auth = cr.kind === "environment_variable"
+    ? { type: "environment_variable", secret_name: cr.name }
+    : { type: cr.kind, mcp_server_url: cr.mcp_server_url, ...(cr.kind === "mcp_oauth" ? { expires_at: cr.expires_at ?? null, refresh: cr.has_refresh ? {} : null } : {}) };
+  return { id: cr.id, object: "vault.credential" as const, vault_id: cr.vault_id, name: cr.name, auth, created_at: cr.created_at, updated_at: cr.created_at };
+}
+
+/** The credential named in the path, within a vault the caller owns. */
+async function loadCredential(c: Context): Promise<VaultCredentialResource> {
+  const v = await vaults.get(c.req.param("vaultId"), scope(c));
+  if (!v) throw notFound("vault", c.req.param("vaultId"));
+  const id = c.req.param("credentialId");
+  const cred = (await vaultCredentials.byId(id, [v.id])) ?? (await vaultCredentials.get(v.id, id));
+  if (!cred) throw notFound("credential", id);
+  return cred;
+}
+
+/** The named child of the session in the path, or 404. */
+async function loadSubagent(c: Context): Promise<SessionResource> {
+  const session = await loadSession(c);
+  const child = (await repos.sessions.childrenOf(session.id, scope(c))).find((k) => k.id === c.req.param("subId"));
+  if (!child) throw notFound("subagent", c.req.param("subId"));
+  return child;
 }
 
 async function loadSession(c: Context): Promise<SessionResource> {
@@ -381,12 +443,12 @@ export const openaiAgents = new Hono()
   /** List the session's items (messages, function calls + outputs), projected from the log. */
   .get("/agents/sessions/:id/items", async (c) => {
     const session = await loadSession(c);
-    return c.json({ object: "list", data: toItems(session, await listEventsForState(session.id, ITEM_EVENT_TYPES)), has_more: false });
+    return c.json(cursorPage(toItems(session, await listEventsForState(session.id, ITEM_EVENT_TYPES)), pageQuery(c)));
   })
   /** List the session's turns. */
   .get("/agents/sessions/:id/turns", async (c) => {
     const session = await loadSession(c);
-    return c.json({ object: "list", data: toTurns(session, await listEventsForState(session.id, TURN_EVENT_TYPES)), has_more: false });
+    return c.json(cursorPage(toTurns(session, await listEventsForState(session.id, TURN_EVENT_TYPES)), pageQuery(c)));
   })
   /** Retrieve one turn. */
   .get("/agents/sessions/:id/turns/:turnId", async (c) => {
@@ -400,8 +462,7 @@ export const openaiAgents = new Hono()
     const session = await loadSession(c);
     const ws = await repos.workspaces.get(session.workspace_id, scope(c));
     const entries = await listArtifacts(ws?.ref);
-    const data = entries.map((e) => toArtifact(session, e));
-    return c.json({ object: "list", data, has_more: false });
+    return c.json(cursorPage(entries.map((e) => toArtifact(session, e)), pageQuery(c)));
   })
   .get("/agents/sessions/:id/artifacts/:artifactId/content", async (c) => {
     const session = await loadSession(c);
@@ -436,7 +497,7 @@ export const openaiAgents = new Hono()
   .get("/agents/sessions/:id/subagents", async (c) => {
     const session = await loadSession(c);
     const kids = await repos.sessions.childrenOf(session.id, scope(c));
-    return c.json({ object: "list", data: kids.map(toSubagent), has_more: false });
+    return c.json(cursorPage(kids.map(toSubagent), pageQuery(c)));
   })
   .get("/agents/sessions/:id/subagents/:subId", async (c) => {
     const session = await loadSession(c);
@@ -448,13 +509,25 @@ export const openaiAgents = new Hono()
     const session = await loadSession(c);
     const child = (await repos.sessions.childrenOf(session.id, scope(c))).find((k) => k.id === c.req.param("subId"));
     if (!child) throw notFound("subagent", c.req.param("subId"));
-    return c.json({ object: "list", data: toItems(child, await listEventsForState(child.id, ITEM_EVENT_TYPES)), has_more: false });
+    return c.json(cursorPage(toItems(child, await listEventsForState(child.id, ITEM_EVENT_TYPES)), pageQuery(c)));
   })
   .get("/agents/sessions/:id/subagents/:subId/turns", async (c) => {
     const session = await loadSession(c);
     const child = (await repos.sessions.childrenOf(session.id, scope(c))).find((k) => k.id === c.req.param("subId"));
     if (!child) throw notFound("subagent", c.req.param("subId"));
-    return c.json({ object: "list", data: toTurns(child, await listEventsForState(child.id, TURN_EVENT_TYPES)), has_more: false });
+    return c.json(cursorPage(toTurns(child, await listEventsForState(child.id, TURN_EVENT_TYPES)), pageQuery(c)));
+  })
+  /** One turn of a subagent, and the items inside it. */
+  .get("/agents/sessions/:id/subagents/:subId/turns/:turnId", async (c) => {
+    const child = await loadSubagent(c);
+    const turn = toTurns(child, await listEventsForState(child.id, TURN_EVENT_TYPES)).find((t) => t.id === c.req.param("turnId"));
+    if (!turn) throw notFound("turn", c.req.param("turnId"));
+    return c.json(turn);
+  })
+  .get("/agents/sessions/:id/subagents/:subId/turns/:turnId/items", async (c) => {
+    const child = await loadSubagent(c);
+    const items = toItems(child, await listEventsForState(child.id, ITEM_EVENT_TYPES)).filter((i) => i.turn_id === c.req.param("turnId"));
+    return c.json(cursorPage(items, pageQuery(c)));
   })
   // ---- Reusable agents (client.beta.agents.*) ----
   .post("/agents", async (c) => {
@@ -531,16 +604,37 @@ export const openaiAgents = new Hono()
     const v = await vaults.get(c.req.param("vaultId"), scope(c));
     if (!v) throw notFound("vault", c.req.param("vaultId"));
     const cred = await vaultCredentials.put(v.id, credentialInput(await readJson<CredentialBody>(c)));
-    return c.json({ ...cred, object: "vault.credential" }, 201);
+    return c.json(toOpenAiCredential(cred), 201);
   })
   .get("/vaults/:vaultId/credentials", async (c) => {
     const v = await vaults.get(c.req.param("vaultId"), scope(c));
     if (!v) throw notFound("vault", c.req.param("vaultId"));
-    return c.json({ object: "list", data: (await vaultCredentials.list(v.id)).map((cr) => ({ ...cr, object: "vault.credential" })), has_more: false });
+    return c.json(cursorPage((await vaultCredentials.list(v.id)).map(toOpenAiCredential), pageQuery(c)));
   })
-  .delete("/vaults/:vaultId/credentials/:name", async (c) => {
+  .get("/vaults/:vaultId/credentials/:credentialId", async (c) => {
+    const cred = await loadCredential(c);
+    return c.json(toOpenAiCredential(cred));
+  })
+  /** Rotate the secret of a credential in place (its server URL and kind are fixed at creation). */
+  .post("/vaults/:vaultId/credentials/:credentialId", async (c) => {
+    if (!secretsConfigured()) throw invalid("PMA_SECRET_KEY is not set: cannot store vault secrets");
+    const cred = await loadCredential(c);
+    const body = await readJson<CredentialBody>(c);
+    const auth = body.auth ?? {};
+    const value = auth.token ?? auth.access_token ?? auth.secret_value ?? body.value;
+    if (typeof value !== "string" || !value) throw invalid("a new secret is required (auth.token, auth.access_token, auth.secret_value, or value)");
+    if (auth.type && auth.type !== cred.kind) throw invalid(`this credential is a ${cred.kind}; its type cannot change (archive it and create a new one)`);
+    if (auth.mcp_server_url && normalizeMcpUrl(auth.mcp_server_url) !== normalizeMcpUrl(cred.mcp_server_url ?? "")) throw invalid("mcp_server_url is fixed at creation; create a new credential instead");
+    const updated = await vaultCredentials.put(cred.vault_id, {
+      name: cred.name, value, kind: cred.kind, mcp_server_url: cred.mcp_server_url ?? null,
+      refresh: auth.refresh ?? null, expires_at: auth.expires_at ?? null, metadata: body.metadata,
+    });
+    return c.json(toOpenAiCredential(updated));
+  })
+  /** The SDK addresses a credential by id; a name is accepted too, since that is this store's key. */
+  .delete("/vaults/:vaultId/credentials/:credentialId", async (c) => {
     const v = await vaults.get(c.req.param("vaultId"), scope(c));
     if (!v) throw notFound("vault", c.req.param("vaultId"));
-    if (!(await vaultCredentials.delete(v.id, c.req.param("name")))) throw notFound("credential", c.req.param("name"));
-    return c.json({ id: c.req.param("name"), object: "vault.credential.deleted", deleted: true });
+    if (!(await vaultCredentials.delete(v.id, c.req.param("credentialId")))) throw notFound("credential", c.req.param("credentialId"));
+    return c.json({ id: c.req.param("credentialId"), object: "vault.credential.deleted", deleted: true });
   });
