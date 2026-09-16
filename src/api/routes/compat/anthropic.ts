@@ -13,7 +13,7 @@ import { sendUserEvents } from "../events.ts";
 import { initialRef } from "../sessions.ts";
 import { validateMounts } from "../memories.ts";
 import { credentialInput, validateMcpCredentialIds, validateVaultIds, type CredentialBody } from "../vaults.ts";
-import { cmaAgentToRethink, cmaContent, toCmaAgent, toCmaEvent, toCmaSession, type CmaAgentSpec } from "./anthropic-translate.ts";
+import { cmaAgentToRethink, cmaContent, toCmaAgent, toCmaEvents, toCmaSession, type CmaAgentSpec, type CmaCallKinds } from "./anthropic-translate.ts";
 
 /**
  * The Claude Managed Agents surface, mounted at /anthropic so `@anthropic-ai/sdk` works with
@@ -186,12 +186,14 @@ export const anthropicAgents = new Hono()
     if (!Array.isArray(body.events) || body.events.length === 0) throw invalid("events must be a non-empty array");
     const inputs = cmaEventsToUserEvents(body.events, session);
     const appended = await sendUserEvents(session, inputs);
-    return c.json({ data: appended.map((e) => toCmaEvent(e, session)).filter(Boolean) });
+    const calls: CmaCallKinds = new Map();
+    return c.json({ data: appended.flatMap((e) => toCmaEvents(e, session, calls)) });
   })
   .get("/v1/sessions/:id/events", async (c) => {
     const session = await loadSession(c);
     const types = c.req.queries("types") ?? [];
-    const all = (await allEvents(session.id)).map((e) => toCmaEvent(e, session)).filter(Boolean) as { id: string; type: string }[];
+    const calls: CmaCallKinds = new Map();
+    const all = (await allEvents(session.id)).flatMap((e) => toCmaEvents(e, session, calls)) as { id: string; type: string }[];
     const filtered = types.length ? all.filter((e) => types.includes(e.type)) : all;
     return c.json(pageCursor(asc(c) ? filtered : [...filtered].reverse(), c));
   })
@@ -206,7 +208,8 @@ export const anthropicAgents = new Hono()
   .get("/v1/sessions/:id/threads/:threadId", async (c) => c.json(toThread(await loadThread(c), await loadSession(c))))
   .get("/v1/sessions/:id/threads/:threadId/events", async (c) => {
     const thread = await loadThread(c);
-    const data = (await allEvents(thread.id)).map((e) => toCmaEvent(e, thread)).filter(Boolean) as { id: string }[];
+    const threadCalls: CmaCallKinds = new Map();
+    const data = (await allEvents(thread.id)).flatMap((e) => toCmaEvents(e, thread, threadCalls)) as { id: string }[];
     return c.json(pageCursor(data, c));
   })
   .get("/v1/sessions/:id/threads/:threadId/stream", async (c) => streamCmaEvents(c, await loadThread(c)))
@@ -424,8 +427,12 @@ export function cmaEventsToUserEvents(events: unknown[], session: SessionResourc
         const content = e.content === undefined ? [{ type: "text" as const, text: "" }] : cmaContent(e.content, String(e.type));
         return { type: "tool_result", tool_use_id: id.replace(/^sevt_/, ""), content, is_error: !!e.is_error };
       }
-      case "user.tool_confirmation":
-        throw invalid("tool confirmations are not supported yet: rethink runs every enabled tool (see DESIGN §21)");
+      case "user.tool_confirmation": {
+        const id = e.tool_use_id as string | undefined;
+        if (typeof id !== "string" || !id) throw invalid("user.tool_confirmation requires a tool_use_id");
+        if (e.result !== "allow" && e.result !== "deny") throw invalid("user.tool_confirmation.result must be 'allow' or 'deny'");
+        return { type: "user.tool_confirmation", tool_use_id: id.replace(/^sevt_/, ""), result: e.result as "allow" | "deny", ...(e.deny_message ? { deny_message: String(e.deny_message) } : {}) };
+      }
       case "user.define_outcome":
         throw invalid("user.define_outcome is not supported: rethink does not run outcome evaluations");
       case "system.message":
@@ -513,6 +520,7 @@ const toCmaMemoryStore = (m: { id: string; name: string; description: string; cr
  */
 function streamCmaEvents(c: Context, session: SessionResource) {
   return streamSSE(c, async (stream) => {
+    const calls: CmaCallKinds = new Map();
     let last = 0;
     let done = false;
     let wake = () => {};
@@ -525,10 +533,10 @@ function streamCmaEvents(c: Context, session: SessionResource) {
     const send = async (e: SessionEvent) => {
       if (e.seq <= last) return;
       last = e.seq;
-      const projected = toCmaEvent(e, session);
-      if (!projected) return;
-      await stream.writeSSE({ event: String(projected.type), data: JSON.stringify(projected) });
-      if (projected.type === "session.status_terminated") end();
+      for (const projected of toCmaEvents(e, session, calls)) {
+        await stream.writeSSE({ event: String(projected.type), data: JSON.stringify(projected) });
+        if (projected.type === "session.status_terminated") end();
+      }
     };
 
     unsub = await subscribe(session.id, (delta) => {

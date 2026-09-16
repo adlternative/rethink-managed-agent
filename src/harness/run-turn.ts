@@ -34,6 +34,7 @@ import type {
   MemoryMount,
   SkillRef,
 } from "../shared/types.ts";
+import { confirmationCallId } from "../shared/types.ts";
 import type { PackageManifest, PromptTemplate, Skill } from "../plugins/api.ts";
 import { PluginHost, type Capabilities } from "../plugins/client.ts";
 import type { HostBundle } from "../plugins/bundle.ts";
@@ -240,15 +241,28 @@ function clientTool(
   };
 }
 
-/** One tool from a remote MCP server, namespaced by server label. Runs server-side (runner). */
-function mcpTool(label: string, info: { name: string; description?: string; inputSchema: Record<string, unknown> }, client: McpHttpClient): AgentTool {
+/** How a held call is answered: `null` means nobody answered within the wait window. */
+export type ConfirmFn = (toolUseId: string, name: string, server: string, signal: AbortSignal) => Promise<{ allowed: boolean; message?: string } | null>;
+
+/**
+ * One tool from a remote MCP server, namespaced by server label. Runs server-side (runner).
+ * A tool whose policy is `always_ask` is held before it runs: the call is announced, the caller
+ * answers it, and only an allow actually reaches the server. A deny comes back as a tool error, so
+ * the loop keeps going with the model told why.
+ */
+function mcpTool(label: string, info: { name: string; description?: string; inputSchema: Record<string, unknown> }, client: McpHttpClient, gate?: { ask: boolean; confirm: ConfirmFn }): AgentTool {
   return {
     name: `${label}__${info.name}`,
     label: `${label}.${info.name}`,
     description: info.description ?? `MCP tool ${info.name} from ${label}`,
     parameters: info.inputSchema as TSchema,
     executionMode: "sequential",
-    execute: async (_id, params) => {
+    execute: async (_id, params, signal) => {
+      if (gate?.ask) {
+        const answer = await gate.confirm(_id, info.name, label, signal ?? new AbortController().signal);
+        if (!answer) throw new Error(`Permission to use ${info.name} was not confirmed within the wait window.`);
+        if (!answer.allowed) throw new Error(answer.message || `Permission to use ${info.name} has been denied.`);
+      }
       const r = await client.callTool(info.name, params);
       const t = textBlocks(r.content);
       if (r.isError) throw new Error(t.map((b) => b.text).join("") || JSON.stringify(r.content)); // the loop records a thrown tool as an error result
@@ -261,7 +275,7 @@ function mcpTool(label: string, info: { name: string; description?: string; inpu
  * Connect to each declared MCP server (fetch-allowlist gated, fails soft) and return its tools. Servers are
  * connected concurrently (a slow one no longer delays the rest); tools and notes keep the declaration order.
  */
-async function mcpTools(servers: McpServerDecl[], session: SessionResource, fetchAllow: string[], allowUrl: (u: string, a: string[]) => boolean, emit: (p: SessionEventPayload) => Promise<void>, credentials: RunDeps["mcpCredentials"]): Promise<AgentTool[]> {
+async function mcpTools(servers: McpServerDecl[], session: SessionResource, fetchAllow: string[], allowUrl: (u: string, a: string[]) => boolean, emit: (p: SessionEventPayload) => Promise<void>, credentials: RunDeps["mcpCredentials"], confirm: ConfirmFn): Promise<AgentTool[]> {
   const results = await Promise.all(servers.map(async (server): Promise<{ tools: AgentTool[]; note?: string }> => {
     if (!allowUrl(server.url, fetchAllow)) return { tools: [], note: `MCP server ${server.label} (${server.url}) blocked by the fetch allowlist` };
     let cred: McpCredentials | null;
@@ -273,7 +287,8 @@ async function mcpTools(servers: McpServerDecl[], session: SessionResource, fetc
       const allow = server.allowed_tools ? new Set(server.allowed_tools) : null;
       const deny = server.denied_tools ? new Set(server.denied_tools) : null;
       const exposed = (await client.listTools()).filter((t) => (!allow || allow.has(t.name)) && !deny?.has(t.name));
-      return { tools: exposed.map((t) => mcpTool(server.label, t, client)) };
+      const policy = (name: string) => server.permissions?.tools?.[name] ?? server.permissions?.default ?? "always_allow";
+      return { tools: exposed.map((t) => mcpTool(server.label, t, client, { ask: policy(t.name) === "always_ask", confirm })) };
     } catch (e) {
       return { tools: [], note: `MCP server ${server.label} unavailable: ${(e as Error)?.message ?? e}` };
     }
@@ -656,7 +671,16 @@ export async function runSession(sessionId: SessionId, deps: RunDeps): Promise<R
       addTool(clientTool(decl, (callId, sig) => deps.awaitToolResult(sessionId, callId, sig, env.CLIENT_TOOL_WAIT_MS)));
     }
     // Remote MCP servers: connect and register their tools (server-side; gated by the fetch allowlist).
-    if (session.agent.mcp_servers?.length) for (const t of await mcpTools(session.agent.mcp_servers, session, fetchAllow, isAllowedUrl, emit, deps.mcpCredentials?.bind(deps))) addTool(t);
+    if (session.agent.mcp_servers?.length) {
+      const confirm: ConfirmFn = async (toolUseId, name, server, sig) => {
+        await emit({ type: "agent.tool_confirmation_required", tool_use_id: toolUseId, name, mcp_server: server });
+        const r = await deps.awaitToolResult(sessionId, confirmationCallId(toolUseId), sig, env.CLIENT_TOOL_WAIT_MS);
+        if (!r) return null;
+        const answer = JSON.parse(textBlocks(r.content).map((b) => b.text).join("") || "{}") as { result?: string; deny_message?: string };
+        return { allowed: answer.result === "allow", message: answer.deny_message };
+      };
+      for (const t of await mcpTools(session.agent.mcp_servers, session, fetchAllow, isAllowedUrl, emit, deps.mcpCredentials?.bind(deps), confirm)) addTool(t);
+    }
     const allSkills = [...plugins.skills, ...dbSkills];
     const st = skillTool(allSkills, plugins.prompts);
     if (st) addTool(st);

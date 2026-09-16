@@ -62,6 +62,12 @@ export interface McpServerDecl {
   /** vault credential to authenticate this server with; otherwise a credential is matched by URL */
   credential_id?: string | null;
 }
+/**
+ * A held call and its answer travel on the same per-call channel a client tool's result uses, under a
+ * namespaced id — so one durable mechanism serves both, on every messaging backend.
+ */
+export const confirmationCallId = (toolUseId: string) => `confirm:${toolUseId}`;
+
 /** What happens when the agent calls a tool: run it, or hold it until the caller confirms. */
 export type ToolPermission = "always_allow" | "always_ask";
 
@@ -436,12 +442,20 @@ export type UserEventInput =
   | { type: "user.message"; content: ContentBlock[] }
   | { type: "user.interrupt" }
   /** result for a client/function tool the agent called (OpenAI Agents API tool_result); tool_use_id is the call id */
-  | { type: "tool_result"; tool_use_id: string; content: ContentBlock[]; is_error?: boolean };
+  | { type: "tool_result"; tool_use_id: string; content: ContentBlock[]; is_error?: boolean }
+  /** answer to an agent.tool_confirmation_required: let the held call run, or refuse it */
+  | { type: "user.tool_confirmation"; tool_use_id: string; result: "allow" | "deny"; deny_message?: string };
 
 /** Persisted event payloads. `seq` is per-session, monotonic. */
 export type SessionEventPayload =
   | { type: "user.message"; content: ContentBlock[] }
   | { type: "user.interrupt" }
+  /**
+   * The agent called a tool whose permission policy is always_ask: the call is held until the caller
+   * answers with user.tool_confirmation. The pair is what a dialect with an approval step projects.
+   */
+  | { type: "agent.tool_confirmation_required"; tool_use_id: string; name: string; mcp_server?: string }
+  | { type: "user.tool_confirmation"; tool_use_id: string; result: "allow" | "deny"; deny_message?: string }
   /** a plugin rewrote the text of the user.message at `target_seq` (slash command send / input hook); folds use this text */
   | { type: "user.message_rewritten"; target_seq: number; text: string }
   | { type: "agent.message"; content: ContentBlock[]; /** full pi message for lossless refold */ pi: AgentMessage; /** matches the deltas that previewed this message */ stream_id?: string; /** reasoning text, when the model produced any */ thinking?: string }

@@ -295,10 +295,45 @@ const stopReasonOf = (r: string | undefined) =>
   r === "interrupted" ? { type: "end_turn" } : r === "error" ? { type: "retries_exhausted" } : { type: "end_turn" };
 
 /**
+ * Which kind of call a tool_use_id was, so its result can be named the way this dialect names it. The
+ * caller keeps one of these across a log (or a stream) and passes it back in.
+ */
+export type CmaCallKinds = Map<string, "mcp" | "custom" | "builtin">;
+
+/**
  * One rethink event as the CMA event it corresponds to, or null when the dialect has no equivalent
  * (sandbox leases, workspace captures, plugin notes — rethink-only machinery).
  */
-export function toCmaEvent(e: SessionEvent, session: SessionResource): Record<string, unknown> | null {
+export function toCmaEvent(e: SessionEvent, session: SessionResource, calls: CmaCallKinds = new Map()): Record<string, unknown> | null {
+  const out = toCmaEvents(e, session, calls);
+  return out[out.length - 1] ?? null;
+}
+
+/**
+ * One rethink event as the CMA events it corresponds to. Usually zero or one, but a held tool call is
+ * two: this dialect announces the call and then idles the session with `requires_action`, which is what
+ * its clients wait for before confirming.
+ */
+export function toCmaEvents(e: SessionEvent, session: SessionResource, calls: CmaCallKinds = new Map()): Record<string, unknown>[] {
+  const single = projectOne(e, session, calls);
+  const p = e.payload;
+  if (p.type === "agent.tool_confirmation_required") {
+    return [
+      { id: `sevt_${e.seq}_ask`, processed_at: iso(e.created_at as unknown as string), type: p.mcp_server ? "agent.mcp_tool_use" : "agent.tool_use", name: p.name, ...(p.mcp_server ? { mcp_server_name: p.mcp_server } : {}), input: {}, evaluated_permission: "ask", evaluation: { type: "always_ask" } },
+      { id: `sevt_${e.seq}`, processed_at: iso(e.created_at as unknown as string), type: "session.status_idle", stop_reason: { type: "requires_action", event_ids: [`sevt_${p.tool_use_id}`] } },
+    ];
+  }
+  // answering a held call resumes the session, which this dialect reports as a status change
+  if (p.type === "user.tool_confirmation") {
+    return [
+      { id: `sevt_${e.seq}`, processed_at: iso(e.created_at as unknown as string), type: "user.tool_confirmation", tool_use_id: `sevt_${p.tool_use_id}`, result: p.result, ...(p.deny_message ? { deny_message: p.deny_message } : {}) },
+      { id: `sevt_${e.seq}_resume`, processed_at: iso(e.created_at as unknown as string), type: "session.status_running" },
+    ];
+  }
+  return single ? [single] : [];
+}
+
+function projectOne(e: SessionEvent, session: SessionResource, calls: CmaCallKinds): Record<string, unknown> | null {
   const p = e.payload;
   const base = { id: `sevt_${e.seq}`, processed_at: iso(e.created_at as unknown as string) };
   const clientTools = new Set((session.agent.client_tools ?? []).map((t) => t.name));
@@ -308,13 +343,24 @@ export function toCmaEvent(e: SessionEvent, session: SessionResource): Record<st
     case "agent.message": return { ...base, type: "agent.message", content: p.content };
     case "agent.tool_use": {
       const server = mcpServerOf(p.name);
-      if (server) return { ...base, type: "agent.mcp_tool_use", name: mcpToolOf(p.name), mcp_server_name: server, input: p.input, evaluated_permission: "allow" };
-      if (clientTools.has(p.name)) return { ...base, type: "agent.custom_tool_use", name: p.name, input: p.input };
+      if (server) {
+        calls.set(p.tool_use_id, "mcp");
+        return { ...base, type: "agent.mcp_tool_use", name: mcpToolOf(p.name), mcp_server_name: server, input: p.input, evaluated_permission: "allow" };
+      }
+      if (clientTools.has(p.name)) {
+        calls.set(p.tool_use_id, "custom");
+        return { ...base, type: "agent.custom_tool_use", name: p.name, input: p.input };
+      }
+      calls.set(p.tool_use_id, "builtin");
       return { ...base, type: "agent.tool_use", name: p.name, input: p.input, evaluated_permission: "allow" };
     }
     case "agent.tool_result": {
-      const call = `sevt_${p.tool_use_id}`;
-      return { ...base, type: "agent.tool_result", tool_use_id: call, content: p.content, is_error: p.is_error };
+      const id = `sevt_${p.tool_use_id}`;
+      const kind = calls.get(p.tool_use_id) ?? "builtin";
+      // each kind of call has its own result event here; a custom tool's result came from the caller
+      if (kind === "mcp") return { ...base, type: "agent.mcp_tool_result", mcp_tool_use_id: id, content: p.content, is_error: p.is_error };
+      if (kind === "custom") return { ...base, type: "user.custom_tool_result", custom_tool_use_id: id, content: p.content, is_error: p.is_error };
+      return { ...base, type: "agent.tool_result", tool_use_id: id, content: p.content, is_error: p.is_error };
     }
     case "session.status_running": return { ...base, type: "session.status_running" };
     case "session.status_idle": return { ...base, type: "session.status_idle", stop_reason: stopReasonOf(p.stop_reason) };

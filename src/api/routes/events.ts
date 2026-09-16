@@ -5,6 +5,7 @@ import { appendIn, listEvents, withSession } from "../../infra/events.ts";
 import { publish, publishInterrupt, publishToolResult, pushSteer, subscribe } from "../../infra/pubsub.ts";
 import { enqueueRun } from "../../infra/queue.ts";
 import type { SessionEvent, SessionId, SessionResource, UserEventInput } from "../../shared/types.ts";
+import { confirmationCallId } from "../../shared/types.ts";
 import { invalid, notFound, queryInt, readJson } from "../errors.ts";
 import { scope } from "../auth.ts";
 import type { Context } from "hono";
@@ -13,6 +14,12 @@ export function validateUserEvents(events: unknown): UserEventInput[] {
   if (!Array.isArray(events) || events.length === 0) throw invalid("events must be a non-empty array");
   for (const e of events) {
     if (e?.type === "user.interrupt") continue;
+    if (e?.type === "user.tool_confirmation") {
+      if (typeof e.tool_use_id !== "string" || !e.tool_use_id) throw invalid("user.tool_confirmation requires a tool_use_id (the held call id)");
+      if (e.result !== "allow" && e.result !== "deny") throw invalid("user.tool_confirmation.result must be 'allow' or 'deny'");
+      if (e.deny_message !== undefined && (typeof e.deny_message !== "string" || e.result !== "deny")) throw invalid("deny_message is a string, and only goes with result 'deny'");
+      continue;
+    }
     if (e?.type === "tool_result") {
       if (typeof e.tool_use_id !== "string" || !e.tool_use_id) throw invalid("tool_result requires a tool_use_id (the call id)");
       if (!Array.isArray(e.content) || e.content.length === 0) throw invalid("tool_result requires a non-empty content array");
@@ -30,7 +37,7 @@ export function validateUserEvents(events: unknown): UserEventInput[] {
       });
       continue;
     }
-    throw invalid("each event must be {type:'user.message', content:[...]} or {type:'user.interrupt'}");
+    throw invalid("each event must be {type:'user.message', content:[...]}, {type:'user.interrupt'}, {type:'tool_result', ...} or {type:'user.tool_confirmation', ...}");
   }
   return events as UserEventInput[];
 }
@@ -44,6 +51,8 @@ export async function sendUserEvents(session: SessionResource, inputs: UserEvent
   // tool_result is a control signal for an in-flight client tool, not a persisted user event: deliver
   // it on the per-call channel; the running loop records the real agent.tool_result when the tool returns.
   const toolResults = inputs.filter((i): i is Extract<UserEventInput, { type: "tool_result" }> => i.type === "tool_result");
+  // a confirmation is both a control signal (it releases the held call) and a fact worth keeping in the log
+  const confirmations = inputs.filter((i): i is Extract<UserEventInput, { type: "user.tool_confirmation" }> => i.type === "user.tool_confirmation");
   const rest = inputs.filter((i) => i.type !== "tool_result");
   const { appended, status } = await withSession(session.id, async (c, s) => {
     // a terminated session never runs again: appending would silently drop the message
@@ -52,6 +61,9 @@ export async function sendUserEvents(session: SessionResource, inputs: UserEvent
   });
   for (const event of appended) await publish({ type: "event", event });
   for (const tr of toolResults) await publishToolResult(session.id, tr.tool_use_id, { content: tr.content, isError: !!tr.is_error });
+  for (const cf of confirmations) {
+    await publishToolResult(session.id, confirmationCallId(cf.tool_use_id), { content: [{ type: "text", text: JSON.stringify({ result: cf.result, deny_message: cf.deny_message }) }], isError: false });
+  }
   const messages = appended.filter((e) => e.payload.type === "user.message");
   if (status === "running") {
     // The runner drains these between turns; anything it never pops is caught by finishRun (seq > consumed).

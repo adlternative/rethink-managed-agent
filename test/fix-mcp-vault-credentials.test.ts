@@ -120,3 +120,63 @@ describe("the OpenAI agent echo never carries a credential", () => {
     expect(openMcpCredentials(sealed!).authorization).toBe("Bearer ECHO-SECRET");
   });
 });
+
+describe("a tool whose policy is always_ask is held until the caller answers", () => {
+  function mcpServer(onCall: (method: string) => void) {
+    vi.stubGlobal("fetch", async (_url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      onCall(body.method);
+      const result = body.method === "tools/list"
+        ? { tools: [{ name: "search", inputSchema: { type: "object", properties: {} } }, { name: "delete_repo", inputSchema: { type: "object", properties: {} } }] }
+        : { content: [{ type: "text", text: "done" }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+  }
+
+  const gated = (answer: { result: string; deny_message?: string } | null) => {
+    const server = { label: "docs", url: "https://docs.example.com/mcp", permissions: { default: "always_allow" as const, tools: { delete_repo: "always_ask" as const } } };
+    const f = fakeDeps({
+      session: sessionFixture({}, { mcp_servers: [server] }),
+      events: [userMsg("clean up")],
+      replies: [{ role: "assistant", content: [{ type: "toolCall", id: "call_1", name: "docs__delete_repo", arguments: {} }] } as never, text("ok")],
+    });
+    f.deps.principalFetchAllow = async () => "*";
+    f.deps.mcpCredentials = () => null;
+    f.deps.awaitToolResult = async (_sid: string, callId: string) =>
+      callId.startsWith("confirm:") && answer ? { content: [{ type: "text", text: JSON.stringify(answer) }], isError: false } : null;
+    return f;
+  };
+
+  it("announces the call, runs it once allowed, and records the result", async () => {
+    const calls: string[] = [];
+    mcpServer((m) => calls.push(m));
+    const f = gated({ result: "allow" });
+    await runSession("sess_1", f.deps);
+    expect(f.payloads("agent.tool_confirmation_required")).toEqual([
+      expect.objectContaining({ tool_use_id: "call_1", name: "delete_repo", mcp_server: "docs" }),
+    ]);
+    expect(calls).toContain("tools/call");
+    expect(f.payloads("agent.tool_result").map((p: any) => p.is_error)).toEqual([false]);
+  });
+
+  it("a denial never reaches the server and comes back as a tool error the model can read", async () => {
+    const calls: string[] = [];
+    mcpServer((m) => calls.push(m));
+    const f = gated({ result: "deny", deny_message: "not that repo" });
+    await runSession("sess_1", f.deps);
+    expect(calls).not.toContain("tools/call");
+    const result = f.payloads("agent.tool_result")[0] as any;
+    expect(result.is_error).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("not that repo");
+  });
+
+  it("no answer within the wait window fails the call instead of hanging the run", async () => {
+    const calls: string[] = [];
+    mcpServer((m) => calls.push(m));
+    const f = gated(null);
+    await runSession("sess_1", f.deps);
+    expect(calls).not.toContain("tools/call");
+    expect((f.payloads("agent.tool_result")[0] as any).is_error).toBe(true);
+    expect(f.payloads("session.status_idle").length).toBe(1); // the run still finished
+  });
+});

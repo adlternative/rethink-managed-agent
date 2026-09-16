@@ -327,6 +327,21 @@ describe("session events", () => {
     expect((await json("GET", `/v1/sessions/${session.id}/events?types=agent.message`)).data.map((e: any) => e.type)).toEqual(["agent.message"]);
   });
 
+  it("a held tool call is announced, idles the session with requires_action, and resumes when answered", async () => {
+    const session = await seed();
+    log(session.id, [
+      { type: "session.status_running" },
+      { type: "agent.tool_confirmation_required", tool_use_id: "t9", name: "delete_repo", mcp_server: "github" },
+      { type: "user.tool_confirmation", tool_use_id: "t9", result: "allow" },
+    ]);
+    const held = (await json("GET", `/v1/sessions/${session.id}/events`)).data;
+    expect(held.map((e: any) => e.type)).toEqual([
+      "session.status_running", "agent.mcp_tool_use", "session.status_idle", "user.tool_confirmation", "session.status_running",
+    ]);
+    expect(held[1]).toMatchObject({ evaluated_permission: "ask", mcp_server_name: "github", name: "delete_repo" });
+    expect(held[2].stop_reason).toEqual({ type: "requires_action", event_ids: ["sevt_t9"] });
+  });
+
   it("accepts the client-postable events and refuses the ones with no equivalent", async () => {
     const session = await seed();
     await call("POST", `/v1/sessions/${session.id}/events`, {
@@ -337,8 +352,12 @@ describe("session events", () => {
       { type: "tool_result", tool_use_id: "t3", content: [{ type: "text", text: "42" }], is_error: false },
     ]);
 
+    // a confirmation releases the held call, keyed by the id the ask event carried
+    await call("POST", `/v1/sessions/${session.id}/events`, { events: [{ type: "user.tool_confirmation", tool_use_id: "sevt_t9", result: "deny", deny_message: "not that one" }] });
+    expect(st.sent.at(-1)!.inputs).toEqual([{ type: "user.tool_confirmation", tool_use_id: "t9", result: "deny", deny_message: "not that one" }]);
+
     const refused: [any, RegExp][] = [
-      [{ type: "user.tool_confirmation", tool_use_id: "x", result: "allow" }, /confirmation/],
+      [{ type: "user.tool_confirmation", tool_use_id: "x", result: "maybe" }, /allow/],
       [{ type: "system.message", content: [{ type: "text", text: "x" }] }, /system prompt/],
       [{ type: "user.define_outcome", description: "x" }, /outcome/],
       [{ type: "user.message", content: [{ type: "image", source: { type: "url", url: "https://x/y.png" } }] }, /file_id/],
