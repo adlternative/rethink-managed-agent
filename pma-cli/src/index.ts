@@ -36,6 +36,8 @@ subcommands:
   session    events <id> | send <id> <text> [--wait] [--file path]... | stream <id> | interrupt <id> | export <id>
   sandboxes  list [--all] | get <id> | pause <id> | delete <id>
   plugins    list [query]        what this deployment ships, and the source to attach
+  vaults     list | get <id> | create [name] | delete <id> | credentials list|put|delete <vault> [name]
+  me         the principal this client acts as
   files      upload <path> | list | get <id> | delete <id>
   skills     list | get <id> | create --file SKILL.md | version <id> --file SKILL.md | delete <id>
   memory-stores  list | get <id> | create <name> [--description D] | delete <id>
@@ -46,7 +48,7 @@ env: PMA_HOST, PMA_TOKEN, PMA_HEADERS (JSON), PMA_CONFIG (config path; default ~
 process.on("unhandledRejection", (e: any) => die(`Error: ${e?.message ?? e}`));
 
 const argv = process.argv.slice(2);
-const SUBCOMMANDS = new Set(["files", "skills", "memory-stores", "worker", "providers", "config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "plugins", "help"]);
+const SUBCOMMANDS = new Set(["files", "skills", "memory-stores", "worker", "providers", "config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "plugins", "vaults", "me", "help"]);
 
 if (argv[0] && SUBCOMMANDS.has(argv[0])) {
   const sub = argv.slice(1);
@@ -67,6 +69,8 @@ if (argv[0] && SUBCOMMANDS.has(argv[0])) {
       case "session": await (await import("./cli/session.ts")).cmdSession(sub); break;
       case "sandboxes": await (await import("./cli/sandboxes.ts")).cmdSandboxes(sub); break;
       case "plugins": await (await import("./cli/plugins.ts")).cmdPlugins(sub); break;
+      case "vaults": await (await import("./cli/vaults.ts")).cmdVaults(sub); break;
+      case "me": console.log(JSON.stringify(await (await import("./lib/client.ts")).apiGet("/me"), null, 2)); break;
       default: console.log(HELP);
     }
   } catch (e: any) {

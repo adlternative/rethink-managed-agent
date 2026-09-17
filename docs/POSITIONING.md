@@ -61,3 +61,29 @@ exact same agent app runs on OpenAI, Kimi, or GLM by changing one string — on 
 > Kimi and GLM just proved every model vendor will ship a managed agent. rethink is the runtime that
 > runs all of them — on your cloud, with your model, behind your tenancy — and speaks the OpenAI
 > Agents API so you never rewrite the app.
+
+## Prior art, and where we differ
+
+*(moved here from the README)*
+
+We genuinely admire the architecture of OpenAI's Agents API and Anthropic's Managed Agents. They got the
+decomposition right: a **brain–hands split** where the model does the thinking and a managed sandbox does
+the doing, with a durable session on top. Independently, this project arrived at nearly the same object
+model (agent / session / environment / events), which is the strongest evidence that split is correct. If
+you want the fastest path to a hosted agent with zero ops, use them — they are excellent.
+
+Two things about those designs we think are not good enough, and set out to fix:
+
+- **They bind you to one cloud vendor.** The model is the vendor's, the sandbox runs on the vendor's infra,
+  and your event log lives there too. You cannot bring your own model, run it in your own VPC, or take the
+  agent air-gapped. rethink makes the model a provider row (BYOK, any OpenAI/Anthropic-compatible endpoint),
+  the sandbox a pluggable provider (local/docker/e2b/BYOC), and the whole stack self-hostable.
+- **The architecture is not elegant enough.** The sandbox is welded 1:1 to the session, so state is split
+  between an opaque platform store and a live container: suspend/resume means freezing a box, a session
+  can't span or swap sandboxes, and the loop's truth is hidden inside the vendor. rethink keeps the same
+  brain–hands split but makes the **event log the only source of truth** and the **sandbox a disposable
+  lease** — session, workspace, and sandbox become three independent lifecycles that compose freely (N:N,
+  rebuildable, shareable). Everything above core — sub-agents, approval, plan mode — is a plugin, not
+  platform.
+
+It is the same good idea, decoupled and made portable. See `docs/POSITIONING.md` for the full comparison.

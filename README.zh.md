@@ -1,26 +1,32 @@
 # rethink-managed-agent(中文)
 
-> English: [README.md](README.md)。设计细节见 [DESIGN.md](DESIGN.md),定位见 [docs/POSITIONING.md](docs/POSITIONING.md)。
-> 代码与其余文档均为英文;本文件是 README 的中文版。
+> English: [README.md](README.md)。设计理由见 [DESIGN.md](DESIGN.md),定位见 [docs/POSITIONING.md](docs/POSITIONING.md),
+> 运行细节见 [docs/GUIDE.md](docs/GUIDE.md)。代码与其余文档均为英文;本文件是 README 的中文版。
 
-一个小巧、可自托管的编码 agent 服务,精神上对标 Claude Managed Agents,建立在三个想法上:
+一个小巧、可自托管的编码 agent 服务,对标 Claude Managed Agents 和 OpenAI Agents API——同样的"大脑—手"
+分离,但解耦到你可以自己跑:
 
-- **薄 harness。** agent 循环用 [pi](https://github.com/badlogic/pi-mono) 的 `runAgentLoop`(`@earendil-works/pi-agent-core`);我们只加四个工具(`bash`、`read`、`write`、`edit`)和一份 append-only 事件日志。**会话状态就是该日志的折叠结果——没有 messages 表。**
-- **可插拔沙箱。** 计算是一次短生命周期的**租约**,永远不属于会话。会话只持有一个 workspace 引用(git base+diff、目录、或空);首次工具调用时才懒获取沙箱,turn 结束即释放。现有 provider:`local`、`docker`、`e2b`、`byoc`。
-- **Managed-Agent 式 API。** agent/environment/session/events 都是 REST 资源;实时输出走 SSE;turn 进行中发来的用户消息会被 steer 进正在跑的循环。
+- **事件日志是唯一真相。** 会话状态就是这份 append-only 日志的折叠结果。没有 messages 表,也没有藏在容器里的东西。
+- **沙箱是租约。** 会话只持有 workspace 的**引用**(git base+diff、目录、或空);首次工具调用才获取计算资源,
+  turn 结束即释放。会话、workspace、沙箱是三条独立生命周期,可自由组合(`local`、`docker`、`e2b`、或你自己跑的 worker)。
+- **模型是一行数据。** 任何讲 `openai-completions`、`openai-responses`、`anthropic-messages` 的端点都能接——
+  你的网关、你的 vLLM、你的 key。
+- **循环之上的一切都是插件。** 子 agent、审批、outcome、校验、记忆:都是钩子和工具,不是平台。
 
-## 先行者,以及我们的不同
+循环本身是 [pi](https://github.com/badlogic/pi-mono) 的 `runAgentLoop`,加四个工具(`bash`、`read`、`write`、`edit`)。
 
-我们真心欣赏 OpenAI Agents API 和 Anthropic Managed Agents 的架构。它们把分解做对了:**"大脑—手"分离**——模型负责思考,受管沙箱负责执行,上面盖一层持久会话。我们独立设计后落到了几乎一样的对象模型(agent / session / environment / events),这本身就是"这种分离是对的"的最强证据。想要**零运维、最快跑起来**的托管 agent,就用它们,它们很出色。
+## 对象模型
 
-但那些设计里有两点我们认为**不够好**,并且要修:
+| | |
+|---|---|
+| **Agent** | 可复用的定义:模型、system prompt、工具、插件、MCP server |
+| **Environment** | 计算发生的地方:沙箱 provider + 默认 workspace 规格 |
+| **Session** | 一次对话。创建时快照 agent,所以改 agent 不会影响在跑的会话 |
+| **Workspace** | 持久的文件状态,以引用形式存在(git base+diff、捕获的目录、blob) |
+| **Sandbox** | 临时计算,按 turn 租用,可回收,会话从不引用它 |
+| **Event** | 日志。其余一切都是它的投影 |
 
-- **它们把你绑死在一家云厂商。** 模型是厂商的,沙箱跑在厂商的基础设施上,事件日志也在那儿。你没法换自己的模型、跑在自己的 VPC、或做成气隙。rethink 把模型做成 provider 行(BYOK,任意 OpenAI/Anthropic 兼容端点),沙箱做成可插拔 provider(local/docker/e2b/BYOC),整条栈可自托管。
-- **架构不够优雅。** 沙箱与会话 1:1 焊死,状态被劈成"不透明的平台存储"和"活着的容器"两半:挂起/恢复要冻结一个盒子,一个会话不能跨沙箱、也不能换沙箱,循环的真相藏在厂商内部。rethink 保留同样的"大脑—手"分离,但让**事件日志成为唯一真相**、**沙箱成为可弃的租约**——会话、workspace、沙箱变成三条独立生命周期,可自由组合(N:N、可重建、可共享)。core 之上的一切(子 agent、审批、计划模式)都是插件,而非平台。
-
-同一个好想法,解耦并可移植。
-
-## 快速开始(docker compose)
+## 快速开始
 
 1. 在宿主机起模型代理(默认是 Qoder 的 OpenAI 兼容代理,监听 4141):
    ```sh
