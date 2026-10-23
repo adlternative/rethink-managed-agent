@@ -58,7 +58,7 @@ describe("pg bus publish", () => {
   // Regression: the size guard counts UTF-16 units, but NOTIFY's limit is 8000 bytes; a multi-byte delta under
   // 7500 chars is sent and pg rejects it, so publish() throws instead of dropping the preview.
   it("a multi-byte delta over the byte limit is dropped, not rejected", async () => {
-    await expect(bus.publish(delta("s1", "中".repeat(3000)))).resolves.toBeUndefined();
+    await expect(bus.publish(delta("s1", "ü".repeat(4500)))).resolves.toBeUndefined();
   });
 });
 

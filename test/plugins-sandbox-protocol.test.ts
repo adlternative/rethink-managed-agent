@@ -20,7 +20,7 @@ describe("Rpc.feed framing", () => {
 
   it("any chunking of a frame stream (splits on and around newlines, multi-byte text, a large frame) yields the same frames", async () => {
     const stream = [
-      encode({ id: 1, method: "big", params: { s: "é中".repeat(50_000) } }),
+      encode({ id: 1, method: "big", params: { s: "éx".repeat(50_000) } }),
       "noise line\n", "\n", "  \n",
       encode({ id: 2, method: "small", params: null }),
       encode({ id: 3, method: "tail", params: [1, 2, 3] }),

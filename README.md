@@ -24,7 +24,6 @@ The loop itself is [pi](https://github.com/badlogic/pi-mono)'s `runAgentLoop`, p
 | Module contract | [ARCHITECTURE.md](ARCHITECTURE.md) · `src/shared/types.ts` |
 | Plugins | [docs/PLUGINS.md](docs/PLUGINS.md) · [docs/WORKFLOWS.md](docs/WORKFLOWS.md) |
 | Terminal client | [pma-cli/README.md](pma-cli/README.md) |
-| 中文 | [README.zh.md](README.zh.md) |
 
 ## Quickstart
 
@@ -36,6 +35,19 @@ make install                          # `pma` into ~/.local/bin  (make install-d
 pma envs create local --provider local
 pma agents create coder qoder/auto --tools bash,read,write,edit
 pma                                   # chat; first message starts a session
+```
+
+The same CLI is scriptable (`npm run cli -- <command>` also works; `PMA_API` defaults to
+`http://localhost:8080`; when `AUTH_REQUIRED=true`, pass a bearer key as `PMA_API_KEY`):
+
+```sh
+pma agents create dev qoder/ultimate                             # the older agent create --name … --provider … --model … still works
+pma envs create local --provider local
+pma sessions create --agent agent_xxx --env env_xxx
+pma send sess_xxx "list the current files and add a README" --wait
+pma events sess_xxx
+pma vaults create ci && pma vaults credentials put vlt_xxx GITHUB_TOKEN --value-env GITHUB_TOKEN
+pma --help                                                       # every command; <command> --help for its flags
 ```
 
 A model provider is seeded on first start so a fresh clone runs with no key: a local OpenAI-compatible

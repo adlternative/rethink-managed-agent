@@ -14,7 +14,7 @@ describe.each([["hex", HEX], ["base64", B64]])("seal/open with a %s key", (_n, k
   it("round-trips empty, ASCII and multi-byte unicode", () => {
     env.PMA_SECRET_KEY = key;
     expect(secretsConfigured()).toBe(true);
-    for (const s of ["", "sk-ant-123", "密钥 🔑 ключ"]) {
+    for (const s of ["", "sk-ant-123", "secret 🔑 ключ"]) {
       const sealed = seal(s);
       expect(sealed).toMatchObject({ type: "encrypted", v: 1 });
       expect(Buffer.from(sealed.iv, "base64")).toHaveLength(12);

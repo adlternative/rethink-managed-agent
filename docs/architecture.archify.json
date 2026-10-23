@@ -2,13 +2,13 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "rethink-managed-agent 架构",
-    "locale": "zh-CN",
+    "title": "rethink-managed-agent architecture",
+    "locale": "en",
     "quality_profile": "showcase",
     "views": [
       {
         "id": "main-path",
-        "label": "主路径：请求到执行",
+        "label": "Main path: request to execution",
         "focus": [
           "client",
           "api",
@@ -16,28 +16,28 @@
           "runner",
           "docker"
         ],
-        "note": "用户消息经 API 入队，runner 领取后用 pi loop 执行，工具在租来的 sandbox 里跑。"
+        "note": "A user message is enqueued by the API; a runner claims it and executes the pi loop, with tools running in a leased sandbox."
       },
       {
         "id": "state",
-        "label": "状态：事件与工作区",
+        "label": "State: events and workspaces",
         "focus": [
           "api",
           "postgres",
           "runner",
           "workspaces"
         ],
-        "note": "events 表是唯一真相；workspace 卷持久化文件状态，sandbox 随时可丢。"
+        "note": "The events table is the only truth; the workspace volume persists file state, and the sandbox can be dropped at any time."
       },
       {
         "id": "realtime",
-        "label": "实时：流式与控制",
+        "label": "Realtime: streaming and control",
         "focus": [
           "api",
           "redis",
           "runner"
         ],
-        "note": "SSE 增量、steer 队列、interrupt 信号和心跳都走 Redis。"
+        "note": "SSE deltas, the steer queue, interrupt signals and heartbeats all go through Redis."
       }
     ]
   },
@@ -45,7 +45,7 @@
     {
       "id": "client",
       "type": "external",
-      "label": "客户端",
+      "label": "Client",
       "sublabel": "CLI / SDK",
       "pos": [
         40,
@@ -69,7 +69,7 @@
         140,
         60
       ],
-      "tag": "Managed-Agent 形态"
+      "tag": "Managed-Agent shape"
     },
     {
       "id": "postgres",
@@ -103,7 +103,7 @@
       "id": "runs",
       "type": "messagebus",
       "label": "Redis Streams",
-      "sublabel": "runs 队列 · consumer group",
+      "sublabel": "runs queue · consumer group",
       "pos": [
         450,
         300
@@ -117,7 +117,7 @@
       "id": "runner",
       "type": "backend",
       "label": "Runner",
-      "sublabel": "pi loop + 插件 host",
+      "sublabel": "pi loop + plugin host",
       "pos": [
         670,
         300
@@ -126,12 +126,12 @@
         150,
         60
       ],
-      "tag": "薄 harness"
+      "tag": "Thin harness"
     },
     {
       "id": "model",
       "type": "external",
-      "label": "模型代理",
+      "label": "Model proxy",
       "sublabel": "Qoder :4141 / Anthropic",
       "pos": [
         670,
@@ -146,7 +146,7 @@
       "id": "docker",
       "type": "cloud",
       "label": "Docker Sandbox",
-      "sublabel": "docker exec · 兄弟容器",
+      "sublabel": "docker exec · sibling",
       "pos": [
         900,
         300
@@ -160,7 +160,7 @@
       "id": "local",
       "type": "cloud",
       "label": "Local Sandbox",
-      "sublabel": "仅开发用",
+      "sublabel": "dev only",
       "pos": [
         900,
         480
@@ -173,8 +173,8 @@
     {
       "id": "workspaces",
       "type": "database",
-      "label": "Workspace 卷",
-      "sublabel": "git ref / dir 快照",
+      "label": "Workspace volume",
+      "sublabel": "git ref / dir snapshot",
       "pos": [
         1120,
         390
@@ -188,7 +188,7 @@
       "id": "e2b",
       "type": "cloud",
       "label": "e2b Sandbox",
-      "sublabel": "云端 · SDK 直连",
+      "sublabel": "cloud · direct SDK",
       "pos": [
         900,
         600
@@ -217,7 +217,7 @@
     },
     {
       "kind": "security-group",
-      "label": "可插拔 Sandbox 层",
+      "label": "Pluggable sandbox layer",
       "wraps": [
         "docker",
         "local",
@@ -237,7 +237,7 @@
       "id": "api-events",
       "from": "api",
       "to": "postgres",
-      "label": "追加事件",
+      "label": "append event",
       "fromSide": "top",
       "toSide": "bottom"
     },
@@ -254,21 +254,21 @@
       "id": "api-enqueue",
       "from": "api",
       "to": "runs",
-      "label": "入队 RunJob",
+      "label": "enqueue RunJob",
       "variant": "emphasis"
     },
     {
       "id": "runs-runner",
       "from": "runs",
       "to": "runner",
-      "label": "领取",
+      "label": "claim",
       "variant": "emphasis"
     },
     {
       "id": "runner-events",
       "from": "runner",
       "to": "postgres",
-      "label": "折叠 / 追加事件",
+      "label": "fold / append events",
       "fromSide": "top",
       "toSide": "right"
     },
@@ -276,7 +276,7 @@
       "id": "runner-redis",
       "from": "runner",
       "to": "redis",
-      "label": "增量 / 心跳",
+      "label": "deltas / heartbeat",
       "fromSide": "bottom",
       "toSide": "right"
     },
@@ -291,7 +291,7 @@
       "id": "runner-docker",
       "from": "runner",
       "to": "docker",
-      "label": "租约: exec / read / write",
+      "label": "lease: exec / read / write",
       "variant": "emphasis",
       "labelDy": 54
     },
@@ -299,7 +299,7 @@
       "id": "runner-local",
       "from": "runner",
       "to": "local",
-      "label": "租约 (dev)",
+      "label": "lease (dev)",
       "variant": "dashed",
       "fromSide": "bottom",
       "toSide": "left"
@@ -321,7 +321,7 @@
       "id": "runner-e2b",
       "from": "runner",
       "to": "e2b",
-      "label": "租约 (cloud)",
+      "label": "lease (cloud)",
       "variant": "dashed",
       "fromSide": "bottom",
       "toSide": "left"
@@ -336,29 +336,29 @@
   "cards": [
     {
       "dot": "cyan",
-      "title": "API 层",
+      "title": "API layer",
       "items": [
-        "对齐 Claude Managed Agents：agents / environments / sessions / events",
-        "SSE 先回放 DB 再订阅 Redis，按 seq 去重"
+        "Aligned with Claude Managed Agents: agents / environments / sessions / events",
+        "SSE replays the DB first, then subscribes to Redis, deduped by seq"
       ]
     },
     {
       "dot": "emerald",
-      "title": "薄 Harness",
+      "title": "Thin harness",
       "items": [
-        "pi-agent-core 的 loop 加插件 hook，插件跑在受限 host 进程里",
-        "events 表是唯一真相，session 状态由折叠事件得到",
-        "多 runner 副本靠 consumer group 和行锁分担"
+        "pi-agent-core's loop plus plugin hooks; plugins run in a restricted host process",
+        "The events table is the only truth; session state is the fold of events",
+        "Multiple runner replicas share load via a consumer group and row locks"
       ]
     },
     {
       "dot": "violet",
-      "title": "Sandbox 解耦",
+      "title": "Sandbox decoupling",
       "items": [
-        "session 不持有 sandbox，只在工具调用时懒租",
-        "同一 workspace 的多个 session 通过 affinity 复用容器",
-        "turn 结束 capture 到 Workspace 卷，sandbox 可随时销毁",
-        "provider 可插拔：local / docker / e2b 同一接口"
+        "A session does not hold a sandbox; it leases one lazily on the first tool call",
+        "Sessions on the same workspace reuse a container via affinity",
+        "At the end of a turn state is captured to the workspace volume; the sandbox can be destroyed at any time",
+        "Pluggable providers: local / docker / e2b behind one interface"
       ]
     }
   ]

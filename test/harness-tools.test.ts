@@ -132,8 +132,8 @@ describe("read", () => {
 describe("write and edit", () => {
   it("write counts UTF-8 bytes for multibyte content", async () => {
     const t = setup();
-    expect(await t.run("write", { path: "u.txt", content: "héllo 世界" })).toBe("Wrote 13 bytes to u.txt");
-    expect(Buffer.from(t.sb.files.get("/work/u.txt")!).toString("utf8")).toBe("héllo 世界");
+    expect(await t.run("write", { path: "u.txt", content: "héllo wörld" })).toBe("Wrote 13 bytes to u.txt");
+    expect(Buffer.from(t.sb.files.get("/work/u.txt")!).toString("utf8")).toBe("héllo wörld");
   });
 
   it("edit replaces exactly one occurrence and inserts replacement patterns literally", async () => {

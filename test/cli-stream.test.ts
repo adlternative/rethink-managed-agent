@@ -25,14 +25,14 @@ describe("SSE parser", () => {
   it("handles chunks split mid-UTF-8 and mid-boundary, CRLF endings, comments, multi-line data and a final unterminated block", async () => {
     const s = await serve(async (_r, res) => {
       openSse(res);
-      const wire = Buffer.from(`: heartbeat\r\n\r\nevent: a\r\ndata: {"t":"héllo 世界"}\r\n\r\nevent: b\ndata: {"x":\ndata: 1}\n\nevent: c\ndata: {"end":true}`);
+      const wire = Buffer.from(`: heartbeat\r\n\r\nevent: a\r\ndata: {"t":"héllo wörld"}\r\n\r\nevent: b\ndata: {"x":\ndata: 1}\n\nevent: c\ndata: {"end":true}`);
       for (let i = 0; i < wire.length; i += 3) { res.write(wire.subarray(i, i + 3)); if (i % 12 === 0) await tick(); }
       res.end();
     });
     const got: [string, unknown][] = [];
     const ended = await new Client({ base: s.url }).sse("/x", (t, d) => { got.push([t, d]); });
     expect(ended).toBe(false);
-    expect(got).toEqual([["a", { t: "héllo 世界" }], ["b", { x: 1 }], ["c", { end: true }]]);
+    expect(got).toEqual([["a", { t: "héllo wörld" }], ["b", { x: 1 }], ["c", { end: true }]]);
   });
 });
 
