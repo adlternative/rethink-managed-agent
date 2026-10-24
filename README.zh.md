@@ -49,7 +49,7 @@ npm run cli -- events sess_xxx
 npm run cli -- vaults create ci && npm run cli -- vaults credentials put vlt_xxx GITHUB_TOKEN --value-env GITHUB_TOKEN
 npm run cli -- --help                                    # 全部命令;<命令> --help 看单个命令的参数
 ```
-资源命令(agents/envs/sessions/vaults/memory-stores/files/skills/providers/sandboxes/models)与 `pma` 客户端一致,另有 `send`/`stream`/`events`/`interrupt` 和 BYOC 的 `worker --env <id> --key <worker_key>`。列表默认打表格,`--json` 输出原始 JSON;退出码 0 成功、1 API/网络/运行失败或超时、2 用法错误。
+资源命令(agents/envs/sessions/vaults/schedules/memory-stores/files/skills/providers/sandboxes/models)与 `pma` 客户端一致,另有 `send`/`stream`/`events`/`interrupt` 和 BYOC 的 `worker --env <id> --key <worker_key>`。`schedules` 是平台托管的 cron(创建或向已有 session 发消息)。列表默认打表格,`--json` 输出原始 JSON;退出码 0 成功、1 API/网络/运行失败或超时、2 用法错误。
 
 ## 身份与归属(多租户)
 

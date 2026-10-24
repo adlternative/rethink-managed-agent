@@ -210,9 +210,10 @@ extensions running unsandboxed in the runner) is kept behind `EXPERIMENTAL_PI_PA
 
 Outcomes and webhooks are plugins (above): they only need hooks, `ctx.model`, `ctx.agent.run`, `ctx.fetch`
 and `ctx.session.send`. Scheduled runs are not: plugins only live inside a run, so a cron trigger needs a
-process that exists between runs. Today that is any external scheduler calling
-`pma sessions create --agent … --env … --message …` (or the HTTP API); a `/v1/schedules` table plus a
-runner tick is the ~100-line core addition if platform-managed schedules are ever wanted.
+process that exists between runs. That process is the runner's schedule tick over `/v1/schedules`
+(`pma schedules create --cron … --action create|message …`): due rows are claim-leased, fire
+`session.create` or `session.message`, and advance `next_run_at`. Plugins still must not own timers;
+see GUIDE.md § Schedules.
 
 ## Multi-agent model
 

@@ -438,6 +438,41 @@ export interface MemoryStoreResource {
 }
 export interface MemoryMount { memory_store_id: string; mount_path: string }
 
+// ---------- Schedules (platform-managed cron triggers) ----------
+/** Create a new session and append an initial user message. */
+export interface ScheduleActionSessionCreate {
+  type: "session.create";
+  agent_id: string;
+  environment_id: string;
+  message: string;
+  /** optional vaults attached to the new session */
+  vault_ids?: string[];
+}
+/** Append a user message to an existing session (and enqueue a run). */
+export interface ScheduleActionSessionMessage {
+  type: "session.message";
+  session_id: string;
+  message: string;
+}
+export type ScheduleAction = ScheduleActionSessionCreate | ScheduleActionSessionMessage;
+
+export interface ScheduleResource {
+  id: string; // "sched_xxx"
+  owner_id: string;
+  name: string | null;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  action: ScheduleAction;
+  next_run_at: string;
+  last_run_at: string | null;
+  last_run_status: "ok" | "error" | null;
+  last_run_error: string | null;
+  last_run_session_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type UserEventInput =
   | { type: "user.message"; content: ContentBlock[] }
   | { type: "user.interrupt" }

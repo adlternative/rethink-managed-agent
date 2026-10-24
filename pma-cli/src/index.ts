@@ -41,6 +41,7 @@ subcommands:
   files      upload <path> | list | get <id> | delete <id>
   skills     list | get <id> | create --file SKILL.md | version <id> --file SKILL.md | delete <id>
   memory-stores  list | get <id> | create <name> [--description D] | delete <id>
+  schedules  list | get <id> | create --cron EXPR --action create|message [...] | update <id> | enable|disable <id> | delete <id>
   worker     --env <id> --key <worker_key> [--workdir DIR]     run a BYOC sandbox worker on this machine
 
 env: PMA_HOST, PMA_TOKEN, PMA_HEADERS (JSON), PMA_CONFIG (config path; default ~/.pma/config.json)`;
@@ -48,7 +49,7 @@ env: PMA_HOST, PMA_TOKEN, PMA_HEADERS (JSON), PMA_CONFIG (config path; default ~
 process.on("unhandledRejection", (e: any) => die(`Error: ${e?.message ?? e}`));
 
 const argv = process.argv.slice(2);
-const SUBCOMMANDS = new Set(["files", "skills", "memory-stores", "worker", "providers", "config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "plugins", "vaults", "me", "help"]);
+const SUBCOMMANDS = new Set(["files", "skills", "memory-stores", "worker", "providers", "config", "login", "logout", "models", "agents", "envs", "environments", "sessions", "session", "sandboxes", "plugins", "vaults", "schedules", "me", "help"]);
 
 if (argv[0] && SUBCOMMANDS.has(argv[0])) {
   const sub = argv.slice(1);
@@ -70,6 +71,7 @@ if (argv[0] && SUBCOMMANDS.has(argv[0])) {
       case "sandboxes": await (await import("./cli/sandboxes.ts")).cmdSandboxes(sub); break;
       case "plugins": await (await import("./cli/plugins.ts")).cmdPlugins(sub); break;
       case "vaults": await (await import("./cli/vaults.ts")).cmdVaults(sub); break;
+      case "schedules": await (await import("./cli/schedules.ts")).cmdSchedules(sub); break;
       case "me": console.log(JSON.stringify(await (await import("./lib/client.ts")).apiGet("/me"), null, 2)); break;
       default: console.log(HELP);
     }

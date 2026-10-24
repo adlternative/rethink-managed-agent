@@ -200,6 +200,7 @@ Bundled CLI commands (`npm run cli -- --help`, and `<command> --help` for the fl
 | `send` | `send <session> <text...> [--file a.png,b.pdf] [--wait [--timeout SEC]]` |
 | `stream` / `events` / `interrupt` | `stream <session> [--since SEQ]`, `events <session> [--since SEQ] [--limit N]` (follows every page), `interrupt <session>` |
 | `vaults` | `list`, `get`, `create [name]`, `delete`, `credentials list <vault>`, `credentials put <vault> <name> --value-env VAR \| --value-stdin \| --value V [--mcp-url URL]`, `credentials delete <vault> <name>` |
+| `schedules` | `list`, `get`, `create --cron EXPR [--timezone TZ] --action create\|message […]`, `update`, `enable` / `disable`, `delete` — platform cron that creates or messages sessions (see GUIDE.md § Schedules) |
 | `plugins` | `list [query]` — what this deployment ships, the source to attach, and where each may run |
 | `memory-stores`, `files`, `skills`, `providers`, `sandboxes`, `models`, `me` | `list` / `get` / `create` / `delete` where the API has them; `files upload <path>` and `download <id> [--out F]`, `skills version`, `providers update`, `sandboxes pause` |
 | `worker` | `worker --env <id> --key <worker_key> [--workdir DIR]`: the BYOC worker loop (see [BYOC](#byoc-self-hosted-sandboxes)) |

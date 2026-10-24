@@ -19,10 +19,16 @@ DREAMER_REVIEW=1 npx tsx examples/dreamer/dreamer.ts   # propose only, for a hum
 
 ## Schedule (cron)
 
-The scheduler lives outside the agent loop (control-plane), not in core. Any cron works, e.g. nightly:
+Prefer platform schedules when the stack is running (`/v1/schedules`, `pma schedules create …`): create a
+session each night that runs this distill step, or message an existing dreamer session. External cron
+still works for a one-off host job:
 
 ```
 0 3 * * *  cd /path/to/rethink-managed-agent && npx tsx examples/dreamer/dreamer.ts >> /var/log/dreamer.log 2>&1
+```
+
+```bash
+pma schedules create --cron "0 3 * * *" --name dreamer --action create --agent "$AGENT" --env "$ENV" --message "Run the dreamer distill for recent sessions"
 ```
 
 Env: `DREAMER_API` (default `http://localhost:8080/v1`), `DREAMER_MODEL` (default `qoder/ultimate`),

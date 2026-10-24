@@ -87,6 +87,10 @@ export const env = {
   LOG_FORMAT: process.env.LOG_FORMAT ?? "json",
   /** the runner serves Prometheus metrics on this port (0 disables) */
   RUNNER_METRICS_PORT: Number(process.env.RUNNER_METRICS_PORT ?? 9090),
+  /** how often the runner claims due /v1/schedules rows (0 disables the tick) */
+  SCHEDULE_TICK_MS: Number(process.env.SCHEDULE_TICK_MS ?? 15_000),
+  /** claim lease for a schedule fire; another runner will not re-claim until it expires */
+  SCHEDULE_CLAIM_MS: Number(process.env.SCHEDULE_CLAIM_MS ?? 60_000),
   /** max JSON request body (bytes) on the API; the multipart /v1/files route has its own larger cap */
   API_MAX_BODY_BYTES: Number(process.env.API_MAX_BODY_BYTES ?? 4_000_000),
   /** after a rejected or partly-read request body, read and drop at most this much of the rest (keeps the keep-alive connection usable); beyond it the connection is closed */

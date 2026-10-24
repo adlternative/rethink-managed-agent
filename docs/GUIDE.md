@@ -173,6 +173,28 @@ Providers accept `auth: {type: "key", key: "sk-…"}`: the API seals the key wit
 building the model registry. `pma providers create my-openai --api openai-responses --base-url https://api.openai.com/v1 --key sk-… --models gpt-5:400000`.
 Operator-owned keys keep using `{type:"env", name}`. Without `PMA_SECRET_KEY`, storing keys is refused.
 
+## Schedules
+
+Platform-managed cron triggers live at `/v1/schedules` (owner-scoped like other `/v1` resources). Plugins
+cannot own timers — they only run inside a session turn — so recurring jobs are control-plane rows the
+runner claims on a tick (`SCHEDULE_TICK_MS`, default 15s).
+
+| | |
+|---|---|
+| **Create** | `POST /v1/schedules {cron, timezone?, name?, enabled?, action}` |
+| **Actions** | `session.create` — `{agent_id, environment_id, message, vault_ids?}` opens a session and appends the message; `session.message` — `{session_id, message}` appends to an existing session |
+| **Cadence** | 5-field cron (`min hour dom month dow`) plus an IANA `timezone` (default `UTC`) |
+| **Safety** | due rows are claim-leased (`SCHEDULE_CLAIM_MS`) so overlapping ticks do not double-fire; `enabled: false` or `DELETE` stops further fires; missed ticks are skipped (one fire, then `next_run_at` advances) |
+| **CLI** | `pma schedules create --cron "0 9 * * *" --timezone America/New_York --action create --agent A --env E --message "…"`; `enable` / `disable` / `delete` |
+
+```bash
+pma schedules create --cron "0 9 * * 1-5" --timezone UTC --name "weekday digest" --action create --agent "$AGENT" --env "$ENV" --message "Write today's digest"
+pma schedules list
+pma schedules disable sched_xxx
+```
+
+External cron calling `pma sessions create …` still works; prefer `/v1/schedules` when the platform should own the cadence. Channel-post actions (Slack/Discord) are deferred until a channel integration lands.
+
 ## Identity & ownership
 
 Every top-level resource belongs to a **principal** — the polymorphic owner (a user today; `kind` extends to `org`/`service`). A request's principal is resolved from `Authorization: Bearer <token>` against `api_keys`; reads and writes are scoped to it, so one principal never sees or edits another's agents, sessions, files, and so on. Sub-sessions and forked workspaces inherit the parent's owner. See DESIGN §15.

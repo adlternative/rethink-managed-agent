@@ -27,6 +27,7 @@ export const store = {
   memoryStores: new Map<string, Row>(),
   vaults: new Map<string, Row>(),
   creds: new Map<string, Row>(),
+  schedules: new Map<string, Row>(),
   sandboxes: new Map<string, Row>(),
   toolOutputs: new Map<string, Row>(),
   ops: [] as string[],
@@ -65,6 +66,15 @@ export const seed = {
   memoryStore: (owner: string, name: string) => { const m = { id: newId("mem"), owner_id: owner, type: "memory_store", name, description: "", ref: { kind: "empty" }, created_at: now(), updated_at: now() }; store.memoryStores.set(m.id, m); return m; },
   provider: (owner: string, id: string, extra: Row = {}) => { const p = { id, owner_id: owner, name: id, api: "openai-completions", base_url: "http://x", headers: {}, auth: { type: "none" }, models: [{ id: "m1", context_window: 1000 }], enabled: true, created_at: now(), updated_at: now(), ...extra }; store.providers.set(id, p); return p; },
   vault: (owner: string) => { const v = { id: newId("vault"), owner_id: owner, name: "v", metadata: {}, created_at: now() }; store.vaults.set(v.id, v); return v; },
+  schedule: (owner: string, extra: Row = {}) => {
+    const s = {
+      id: newId("sched"), owner_id: owner, name: "s", cron: "0 * * * *", timezone: "UTC", enabled: true,
+      action: { type: "session.create", agent_id: "agent_x", environment_id: "env_x", message: "hi" },
+      next_run_at: now(), last_run_at: null, last_run_status: null, last_run_error: null, last_run_session_id: null,
+      created_at: now(), updated_at: now(), ...extra,
+    };
+    store.schedules.set(s.id, s); return s;
+  },
   sandbox: (owner: string, status: string, extra: Row = {}) => { const s = { id: newId("sbx"), owner_id: owner, provider: "local", status, created_at: now(), ...extra }; store.sandboxes.set(s.id, s); return s; },
 };
 
@@ -221,6 +231,45 @@ export const vaults = {
   async get(id: string, sc?: Scope) { return get(store.vaults, id, sc); },
   async list(sc?: Scope) { return list(store.vaults, sc); },
   async delete(id: string, sc?: Scope) { if (!vis(store.vaults.get(id), sc)) return false; return store.vaults.delete(id); },
+};
+
+export const schedules = {
+  async create(input: Row) {
+    const s = {
+      id: newId("sched"), owner_id: input.owner_id, name: input.name ?? null, cron: input.cron, timezone: input.timezone,
+      enabled: input.enabled ?? true, action: clone(input.action),
+      next_run_at: input.next_run_at instanceof Date ? input.next_run_at.toISOString() : String(input.next_run_at),
+      last_run_at: null, last_run_status: null, last_run_error: null, last_run_session_id: null,
+      created_at: now(), updated_at: now(),
+    };
+    store.schedules.set(s.id, s); store.ops.push(`schedules.create:${s.id}`); return clone(s);
+  },
+  async get(id: string, sc?: Scope) { return get(store.schedules, id, sc); },
+  async list(sc?: Scope) { return list(store.schedules, sc); },
+  async update(id: string, patch: Row, sc?: Scope) {
+    const s = store.schedules.get(id); if (!vis(s, sc)) return null;
+    const next = { ...s!, ...clone(patch), updated_at: now() };
+    if (patch.next_run_at instanceof Date) next.next_run_at = patch.next_run_at.toISOString();
+    if (patch.action) next.action = clone(patch.action);
+    store.schedules.set(id, next); store.ops.push(`schedules.update:${id}`); return clone(next);
+  },
+  async delete(id: string, sc?: Scope) { if (!vis(store.schedules.get(id), sc)) return false; store.ops.push(`schedules.delete:${id}`); return store.schedules.delete(id); },
+  async claimDue(claimedBy: string, _claimMs: number, limit = 16) {
+    const nowIso = new Date().toISOString();
+    const due = [...store.schedules.values()]
+      .filter((s) => s.enabled && s.next_run_at <= nowIso && (!s.claim_until || s.claim_until < nowIso))
+      .sort((a, b) => (a.next_run_at < b.next_run_at ? -1 : 1))
+      .slice(0, limit);
+    for (const s of due) { s.claim_until = new Date(Date.now() + 60_000).toISOString(); s.claimed_by = claimedBy; store.ops.push(`schedules.claim:${s.id}`); }
+    return due.map(clone);
+  },
+  async complete(id: string, result: Row) {
+    const s = store.schedules.get(id); if (!s) return;
+    s.next_run_at = result.next_run_at instanceof Date ? result.next_run_at.toISOString() : String(result.next_run_at);
+    s.last_run_at = now(); s.last_run_status = result.status; s.last_run_error = result.error ?? null;
+    s.last_run_session_id = result.session_id ?? null; s.claim_until = null; s.claimed_by = null; s.updated_at = now();
+    store.ops.push(`schedules.complete:${id}:${result.status}`);
+  },
 };
 
 export const vaultCredentials = {
