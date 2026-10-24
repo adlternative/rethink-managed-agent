@@ -16,7 +16,8 @@ src/harness/    pi-session.ts (EXPERIMENTAL: pi-coding-agent AgentSession, see d
                 tools.ts (bash/read/write/edit AgentTools over ctx.sandbox()), compaction.ts (pi summarizer + our cut point;
                 persisted as agent.thread_context_compacted), fold.ts (events -> pi AgentMessage[], compaction-aware), run-turn.ts (one session run: fold, pi-agent-core loop + plugin hooks, persist events,
                 steering/interrupt, capture+release), models.ts (pi-ai registry built from the providers table; runner reloads on providers:changed)
-src/api/        main.ts (hono server), routes/*.ts (providers, agents, environments, sessions, events, stream, sandboxes, models)
+src/api/        main.ts (hono server), routes/*.ts (providers, agents, environments, sessions, events, stream, sandboxes, models, integrations)
+src/channels/   Slack (v1) channel adapter: signature verify, inbound mention→session, outbound bridge, thread mapping
 src/runner/     main.ts (consume queue -> run-turn; reaper loop)
 src/cli/        main.ts (thin client: create agent/env/session, send, stream)
 ```
@@ -40,5 +41,5 @@ src/cli/        main.ts (thin client: create agent/env/session, send, stream)
 - session ↔ environment is 1:N (`session_environments`, key "main" is primary); each environment leases its own sandbox; child sessions (`parent_id`) run on forked workspaces. DESIGN.md §11.
 - Tools never import a provider; they use `ToolContext.sandbox()`. The harness only sees `SandboxService` (acquire/capture) from `SandboxManager.bind(name)`.
 - Providers never touch the sandboxes table; only SandboxManager writes leases.
-- Secrets never enter events.
+- Secrets never enter events (channel bot tokens / signing secrets live in vaults; integrations store only vault ids).
 - Keep core small: harness/ + sandbox/ interfaces should stay < 1500 LOC total.

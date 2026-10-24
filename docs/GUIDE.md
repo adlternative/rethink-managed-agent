@@ -50,6 +50,16 @@ pma sessions create --agent "$AGENT" --environments "main=$LOCAL_ENV,dk=$DOCKER_
 pma sessions attach sess_x browser=$E2B_ENV:fork                         # later, on a fork of main's workspace
 ```
 
+## Slack channel (mention → session)
+
+See [`CHANNELS.md`](./CHANNELS.md) for the full setup. Short version: store `SLACK_BOT_TOKEN` and
+`SLACK_SIGNING_SECRET` in a vault, create an integration with `pma integrations create --kind slack …`,
+and point Slack’s Event Subscriptions / Interactivity Request URLs at
+`/v1/integrations/<id>/events` and `/v1/integrations/<id>/interactions`. Mentions start or resume a
+session; the durable `channel_threads` row survives API restarts. Tool confirmations (`always_ask`)
+get Allow/Deny buttons; client tools are answered with `/answer <call_id> …` in the thread. Secrets
+never enter the event log.
+
 ## Adding a sandbox provider
 
 1. Implement `SandboxProvider` from `src/shared/types.ts`:
@@ -197,6 +207,7 @@ src/infra/     db.ts, events.ts, pubsub.ts, queue.ts, migrate.ts
 src/sandbox/   provider.ts, local.ts, docker.ts, workspace.ts, exec.ts, lease-store.ts
 src/harness/   models.ts, tools.ts, fold.ts, run-turn.ts
 src/api/       main.ts, routes/{agents,environments,sessions,events}.ts
+src/channels/  slack adapter (events → sessions, thread mapping, outbound bridge)
 src/runner/    main.ts
 src/cli/       main.ts
 sql/schema.sql, scripts/e2e.sh, test/

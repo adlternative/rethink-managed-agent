@@ -19,6 +19,7 @@ import { openaiAgents } from "./routes/compat/openai-agents.ts";
 import { anthropicAgents } from "./routes/compat/anthropic.ts";
 import { plugins } from "./routes/plugins.ts";
 import { vaultsRoute } from "./routes/vaults.ts";
+import { integrations } from "./routes/integrations.ts";
 import { ui } from "./routes/ui.ts";
 import { auth } from "./auth.ts";
 import { ensureBucket } from "../infra/blobs.ts";
@@ -70,6 +71,7 @@ export const app = new Hono<{ Variables: { requestId: string } }>()
   .route("/v1/skills", skillsRoute)
   .route("/v1/memory_stores", memoryStoresRoute)
   .route("/v1/vaults", vaultsRoute)
+  .route("/v1/integrations", integrations)
   .route("/v1/plugins", plugins);
 
 await migrate();
