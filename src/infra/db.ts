@@ -19,6 +19,8 @@ import type {
   EnvironmentResource,
   SessionResource,
   SessionStatus,
+  ScheduleAction,
+  ScheduleResource,
   WorkspaceRef,
   WorkspaceResource,
   WorkspaceSpec,
@@ -59,7 +61,7 @@ async function many<T>(q: Queryable, sql: string, params: unknown[] = []): Promi
 function iso<T>(row: T | null): T | null {
   if (!row) return null;
   const r = row as Record<string, unknown>;
-  for (const k of ["created_at", "updated_at", "last_used_at"]) {
+  for (const k of ["created_at", "updated_at", "last_used_at", "next_run_at", "last_run_at", "claim_until"]) {
     if (r[k] instanceof Date) r[k] = (r[k] as Date).toISOString();
   }
   return row;
@@ -576,6 +578,93 @@ export const vaultCredentials = {
   },
   async delete(vaultId: string, nameOrId: string): Promise<boolean> {
     return ((await pool.query(`DELETE FROM vault_credentials WHERE vault_id=$1 AND (name=$2 OR id=$2)`, [vaultId, nameOrId])).rowCount ?? 0) > 0;
+  },
+};
+
+const SCHEDULE_COLS = `id, owner_id, name, cron, timezone, enabled, action, next_run_at, last_run_at, last_run_status, last_run_error, last_run_session_id, created_at, updated_at`;
+
+/** Platform-managed cron schedules. Claim/complete are used by the runner tick. */
+export const schedules = {
+  async create(input: {
+    owner_id: string;
+    name?: string | null;
+    cron: string;
+    timezone: string;
+    enabled?: boolean;
+    action: ScheduleAction;
+    next_run_at: Date | string;
+  }): Promise<ScheduleResource> {
+    const row = await one<ScheduleResource>(pool,
+      `INSERT INTO schedules (id, owner_id, name, cron, timezone, enabled, action, next_run_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${SCHEDULE_COLS}`,
+      [newId("sched"), input.owner_id, input.name ?? null, input.cron, input.timezone, input.enabled ?? true, JSON.stringify(input.action), input.next_run_at]);
+    return iso(row)!;
+  },
+  async get(id: string, scope?: Scope): Promise<ScheduleResource | null> {
+    return iso(await one<ScheduleResource>(pool, `SELECT ${SCHEDULE_COLS} FROM schedules WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id]));
+  },
+  async list(scope?: Scope): Promise<ScheduleResource[]> {
+    return (await many<ScheduleResource>(pool, `SELECT ${SCHEDULE_COLS} FROM schedules${scope ? " WHERE owner_id=$1" : ""} ORDER BY created_at DESC, id DESC`, scope ? [scope.owner] : [])).map((r) => iso(r)!);
+  },
+  async update(id: string, patch: {
+    name?: string | null;
+    cron?: string;
+    timezone?: string;
+    enabled?: boolean;
+    action?: ScheduleAction;
+    next_run_at?: Date | string;
+  }, scope?: Scope): Promise<ScheduleResource | null> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    const add = (col: string, v: unknown) => { params.push(v); sets.push(`${col}=$${params.length}`); };
+    if (patch.name !== undefined) add("name", patch.name);
+    if (patch.cron !== undefined) add("cron", patch.cron);
+    if (patch.timezone !== undefined) add("timezone", patch.timezone);
+    if (patch.enabled !== undefined) add("enabled", patch.enabled);
+    if (patch.action !== undefined) add("action", JSON.stringify(patch.action));
+    if (patch.next_run_at !== undefined) add("next_run_at", patch.next_run_at);
+    if (!sets.length) return schedules.get(id, scope);
+    sets.push("updated_at=now()");
+    params.push(id);
+    let sql = `UPDATE schedules SET ${sets.join(", ")} WHERE id=$${params.length}`;
+    if (scope) { params.push(scope.owner); sql += ` AND owner_id=$${params.length}`; }
+    return iso(await one<ScheduleResource>(pool, `${sql} RETURNING ${SCHEDULE_COLS}`, params));
+  },
+  async delete(id: string, scope?: Scope): Promise<boolean> {
+    return ((await pool.query(`DELETE FROM schedules WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id])).rowCount ?? 0) > 0;
+  },
+  /**
+   * Atomically claim up to `limit` due schedules for this runner. A row is due when enabled,
+   * next_run_at <= now, and its claim lease has expired (or was never set).
+   */
+  async claimDue(claimedBy: string, claimMs: number, limit = 16): Promise<ScheduleResource[]> {
+    return tx(async (c) => {
+      const rows = await many<ScheduleResource>(c,
+        `UPDATE schedules SET claim_until = now() + ($1::int * interval '1 millisecond'), claimed_by = $2, updated_at = now()
+         WHERE id IN (
+           SELECT id FROM schedules
+           WHERE enabled AND next_run_at <= now() AND (claim_until IS NULL OR claim_until < now())
+           ORDER BY next_run_at ASC
+           FOR UPDATE SKIP LOCKED
+           LIMIT $3
+         )
+         RETURNING ${SCHEDULE_COLS}`,
+        [claimMs, claimedBy, limit]);
+      return rows.map((r) => iso(r)!);
+    });
+  },
+  /** Record fire outcome, advance next_run_at, and release the claim. */
+  async complete(id: string, result: {
+    next_run_at: Date | string;
+    status: "ok" | "error";
+    error?: string | null;
+    session_id?: string | null;
+  }): Promise<void> {
+    await pool.query(
+      `UPDATE schedules SET next_run_at=$2, last_run_at=now(), last_run_status=$3, last_run_error=$4,
+         last_run_session_id=$5, claim_until=NULL, claimed_by=NULL, updated_at=now() WHERE id=$1`,
+      [id, result.next_run_at, result.status, result.error ?? null, result.session_id ?? null],
+    );
   },
 };
 

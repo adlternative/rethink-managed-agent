@@ -36,6 +36,7 @@ resources:
   providers      list | get <id> | create <id> --api A --base-url U [...] | update <id> [...] | delete <id>
   models         list
   sandboxes      list [--all] | get <id> | pause <id> | delete <id>
+  schedules      list | get <id> | create --cron EXPR [--timezone TZ] --action create|message [...] | update <id> [...] | enable|disable <id> | delete <id>
   me             the principal this key acts as
 
 conversation:
@@ -117,6 +118,16 @@ providers delete <id>`,
 sandboxes get <id>
 sandboxes pause <id>
 sandboxes delete <id>`,
+  schedules: `schedules list
+schedules get <id>
+schedules create --cron "min hour dom month dow" [--timezone TZ] [--name N] [--enabled true|false]
+       --action create --agent A --env E --message TEXT [--vaults vault_a,vault_b]
+       --action message --session S --message TEXT
+schedules update <id> [--cron EXPR] [--timezone TZ] [--name N] [--enabled true|false] [--message TEXT]
+       (with --action create|message, also pass the action flags above)
+schedules enable <id>   /   schedules disable <id>
+schedules delete <id>
+(the runner claims due schedules every SCHEDULE_TICK_MS; disabled/deleted schedules stop firing)`,
   me: "me",
   send: `send <session> <text...> [--file a.png,b.pdf] [--wait] [--timeout SEC]
   --wait streams the reply and exits once the run that answers this message is over:
@@ -132,7 +143,7 @@ sandboxes delete <id>`,
 export const ALIASES: Record<string, string> = {
   agent: "agents", env: "envs", environment: "envs", environments: "envs", session: "sessions", vault: "vaults",
   "memory-store": "memory-stores", memory_stores: "memory-stores", memories: "memory-stores", file: "files", skill: "skills",
-  provider: "providers", model: "models", sandbox: "sandboxes", whoami: "me",
+  provider: "providers", model: "models", sandbox: "sandboxes", schedule: "schedules", whoami: "me",
 };
 
 function usage(group: string): never { throw new UsageError(`usage:\n${USAGE[group] ?? HELP}`); }
@@ -458,6 +469,68 @@ async function sandboxes(c: Ctx, [sub = "list", a]: string[]): Promise<void> {
   }
 }
 
+function scheduleAction(flags: Flags): Record<string, unknown> | undefined {
+  const kind = str(flags, "action");
+  if (!kind) return undefined;
+  const message = need(flags, "message", USAGE.schedules);
+  if (kind === "create") {
+    const body: Record<string, unknown> = {
+      type: "session.create",
+      agent_id: need(flags, "agent", USAGE.schedules),
+      environment_id: need(flags, "env", USAGE.schedules),
+      message,
+    };
+    if (str(flags, "vaults")) body.vault_ids = list(str(flags, "vaults"));
+    return body;
+  }
+  if (kind === "message") {
+    return { type: "session.message", session_id: need(flags, "session", USAGE.schedules), message };
+  }
+  throw new UsageError(`--action must be create or message (got ${JSON.stringify(kind)})`);
+}
+
+async function schedulesCmd(c: Ctx, [sub = "list", a]: string[]): Promise<void> {
+  const { api, flags } = c;
+  switch (sub) {
+    case "list": case "ls":
+      return listOut(c, await api.json("GET", "/v1/schedules"), ["ID", "NAME", "CRON", "TZ", "ENABLED", "NEXT", "LAST"], (s) => [s.id, s.name, s.cron, s.timezone, s.enabled, s.next_run_at, s.last_run_status ?? "-"]);
+    case "get": if (!a) usage("schedules"); return c.print(await api.json("GET", `/v1/schedules/${seg(a)}`));
+    case "create": {
+      const action = scheduleAction(flags);
+      if (!action) usage("schedules");
+      const body: Record<string, unknown> = {
+        cron: need(flags, "cron", USAGE.schedules),
+        action,
+        timezone: str(flags, "timezone") ?? "UTC",
+        name: str(flags, "name"),
+      };
+      if (str(flags, "enabled")) body.enabled = str(flags, "enabled") === "true";
+      return c.print(await api.json("POST", "/v1/schedules", body));
+    }
+    case "update": {
+      if (!a) usage("schedules");
+      const body: Record<string, unknown> = {};
+      if (str(flags, "cron")) body.cron = str(flags, "cron");
+      if (str(flags, "timezone")) body.timezone = str(flags, "timezone");
+      if (str(flags, "name") !== undefined) body.name = str(flags, "name");
+      if (str(flags, "enabled")) body.enabled = str(flags, "enabled") === "true";
+      const action = scheduleAction(flags);
+      if (action) body.action = action;
+      else if (str(flags, "message")) {
+        // Convenience: rewrite only the message on the existing action shape via get+patch is overkill;
+        // require --action when changing the payload. Message-only is not enough without knowing the type.
+        throw new UsageError("schedules update: pass --action create|message with --message to change the action");
+      }
+      if (!Object.keys(body).length) throw new UsageError("schedules update: nothing to change");
+      return c.print(await api.json("PATCH", `/v1/schedules/${seg(a)}`, body));
+    }
+    case "enable": if (!a) usage("schedules"); return c.print(await api.json("PATCH", `/v1/schedules/${seg(a)}`, { enabled: true }));
+    case "disable": if (!a) usage("schedules"); return c.print(await api.json("PATCH", `/v1/schedules/${seg(a)}`, { enabled: false }));
+    case "delete": case "rm": if (!a) usage("schedules"); return c.print(await api.json("DELETE", `/v1/schedules/${seg(a)}`));
+    default: usage("schedules");
+  }
+}
+
 async function send(c: Ctx, [session, ...words]: string[]): Promise<void> {
   const { api, flags } = c;
   const text = words.join(" ");
@@ -540,7 +613,7 @@ async function worker(c: Ctx): Promise<void> {
 }
 
 const GROUPS: Record<string, (c: Ctx, args: string[]) => Promise<void>> = {
-  agents, envs, sessions, vaults, "memory-stores": memoryStores, files, skills, providers, sandboxes,
+  agents, envs, sessions, vaults, "memory-stores": memoryStores, files, skills, providers, sandboxes, schedules: schedulesCmd,
   plugins: async (c, [sub = "list", q]) => {
     if (sub !== "list" && sub !== "ls" && sub !== "search") { q = sub; sub = "list"; } // `plugins <query>` is a search
     const r = await c.api.json("GET", `/v1/plugins${q ? `?q=${seg(q)}` : ""}`);

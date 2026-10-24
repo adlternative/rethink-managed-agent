@@ -5,6 +5,7 @@ import { closeBus, onInterrupt, onProvidersChanged, popSteer, publish, pushSteer
 import { anyWorkerAlive } from "../infra/byoc.ts";
 import { resolveMcpCredentials } from "../infra/mcp-credentials.ts";
 import { consumeRuns, enqueueRun, queueDepth } from "../infra/queue.ts";
+import { tickSchedules } from "../infra/schedules.ts";
 import { disallowedFor } from "../plugins/allow.ts";
 import { createServer } from "node:http";
 import { counter, gauge, histogram, onScrape, render as renderMetrics } from "../infra/metrics.ts";
@@ -23,6 +24,7 @@ import { env } from "../shared/env.ts";
 import type { RunJob, SandboxProviderName } from "../shared/types.ts";
 
 const REAP_INTERVAL_MS = 60_000;
+const scheduleTickMs = env.SCHEDULE_TICK_MS;
 
 await migrate();
 
@@ -221,14 +223,26 @@ async function reconcile(): Promise<void> {
   }
 }
 
+async function schedulesTick(): Promise<void> {
+  try {
+    const n = await tickSchedules();
+    if (n) log.info("schedules.tick", { claimed: n });
+  } catch (e) {
+    console.error("[schedules] tick failed", e);
+  }
+}
+
 const stopping = new AbortController();
 const reaper = setInterval(() => { void reap(); void reconcile(); }, REAP_INTERVAL_MS);
 void reconcile();
+const scheduleTimer = scheduleTickMs > 0 ? setInterval(() => { void schedulesTick(); }, scheduleTickMs) : null;
+if (scheduleTickMs > 0) void schedulesTick();
 
 const shutdown = (sig: string) => {
   if (stopping.signal.aborted) return;
   console.log(`[runner] ${sig}: finishing in-flight run, then exiting`);
   clearInterval(reaper);
+  if (scheduleTimer) clearInterval(scheduleTimer);
   stopping.abort();
 };
 process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -252,6 +266,7 @@ try {
   await consumeRuns(handleJob, { signal: stopping.signal, concurrency: env.RUNNER_CONCURRENCY });
 } finally {
   clearInterval(reaper);
+  if (scheduleTimer) clearInterval(scheduleTimer);
   metricsServer?.close();
   await stopProvidersWatch();
   await Promise.allSettled([pool.end(), closeBus()]);

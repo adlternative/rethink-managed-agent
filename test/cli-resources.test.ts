@@ -45,7 +45,7 @@ describe("cli config and errors", () => {
   it("help is printed per command with exit 0", async () => {
     const top = await cli("http://127.0.0.1:1", ["--help"]);
     expect(top.code).toBe(0);
-    for (const cmd of ["agents", "envs", "sessions", "vaults", "memory-stores", "files", "skills", "providers", "models", "sandboxes", "send", "stream", "events", "interrupt", "worker"]) expect(top.stdout).toContain(`  ${cmd} `);
+    for (const cmd of ["agents", "envs", "sessions", "vaults", "schedules", "memory-stores", "files", "skills", "providers", "models", "sandboxes", "send", "stream", "events", "interrupt", "worker"]) expect(top.stdout).toContain(`  ${cmd} `);
     const vault = await cli("http://127.0.0.1:1", ["vault", "--help"]);
     expect(vault.code).toBe(0);
     expect(vault.stdout).toContain("vaults credentials put <vault> <name>");
@@ -100,6 +100,22 @@ describe("cli resource commands", () => {
     expect((await cli(s.url, ["session", "create", "--agent", "agent_a", "--environments", "main=env_l,dk=env_d:fork"])).code).toBe(0);
     expect(s.requests[1]!.json).toEqual({ agent: "agent_a", environments: [{ key: "main", environment_id: "env_l" }, { key: "dk", environment_id: "env_d", fork_from: "main" }] });
     expect((await cli(s.url, ["sessions", "create", "--agent", "agent_a"])).code).toBe(2);
+  });
+
+  it("schedules create/enable/disable map to /v1/schedules", async () => {
+    const s = await serve(echo);
+    expect((await cli(s.url, ["schedules", "create", "--cron", "0 9 * * *", "--timezone", "UTC", "--name", "digest", "--action", "create", "--agent", "agent_a", "--env", "env_e", "--message", "hi"])).code).toBe(0);
+    expect(s.requests[0]).toMatchObject({
+      method: "POST", path: "/v1/schedules",
+      json: { cron: "0 9 * * *", timezone: "UTC", name: "digest", action: { type: "session.create", agent_id: "agent_a", environment_id: "env_e", message: "hi" } },
+    });
+    expect((await cli(s.url, ["schedule", "disable", "sched_1"])).code).toBe(0);
+    expect((await cli(s.url, ["schedules", "enable", "sched_1"])).code).toBe(0);
+    expect(s.requests.slice(1).map((r) => [r.method, r.path, r.json])).toEqual([
+      ["PATCH", "/v1/schedules/sched_1", { enabled: false }],
+      ["PATCH", "/v1/schedules/sched_1", { enabled: true }],
+    ]);
+    expect((await cli(s.url, ["schedules", "create", "--cron", "0 * * * *"])).code).toBe(2);
   });
 
   it("plugins list shows the catalogue and passes a search query", async () => {

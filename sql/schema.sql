@@ -298,3 +298,28 @@ CREATE INDEX IF NOT EXISTS events_session_type_seq ON events(session_id, type, s
 -- snapshot and the runner still reads the environment): hidden from owner-scoped reads, unusable for new sessions.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+-- ============================================================================
+-- Platform-managed schedules (/v1/schedules): cron triggers owned by a principal.
+-- The runner ticks due rows (claim lease), creates or messages a session, then advances next_run_at.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES principals(id),
+  name TEXT,
+  cron TEXT NOT NULL,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  action JSONB NOT NULL,
+  next_run_at TIMESTAMPTZ NOT NULL,
+  last_run_at TIMESTAMPTZ,
+  last_run_status TEXT,              -- 'ok' | 'error'
+  last_run_error TEXT,
+  last_run_session_id TEXT,
+  claim_until TIMESTAMPTZ,          -- lease so overlapping ticks do not double-fire
+  claimed_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS schedules_owner ON schedules(owner_id, id);
+CREATE INDEX IF NOT EXISTS schedules_due ON schedules(next_run_at) WHERE enabled;

@@ -383,6 +383,48 @@ describe("memory stores and validateMounts", () => {
   });
 });
 
+describe("schedules", () => {
+  it("creates, lists, patches, and deletes owner-scoped schedules", async () => {
+    const agent = seed.agent(A);
+    const envRow = seed.environment(A);
+    const body = {
+      name: "hourly",
+      cron: "0 * * * *",
+      timezone: "UTC",
+      action: { type: "session.create", agent_id: agent.id, environment_id: envRow.id, message: "tick" },
+    };
+    const created = await call("POST", "/v1/schedules", body);
+    expect(created.status).toBe(201);
+    const row = await created.json() as any;
+    expect(row).toMatchObject({ owner_id: A, name: "hourly", cron: "0 * * * *", enabled: true, action: body.action });
+    expect(row.next_run_at).toBeTruthy();
+    expect(row.id).toMatch(/^sched_/);
+
+    expect((await (await call("GET", "/v1/schedules")).json() as any).data.map((s: any) => s.id)).toEqual([row.id]);
+    expect((await call("GET", `/v1/schedules/${row.id}`, undefined, B)).status).toBe(404);
+
+    const patched = await (await call("PATCH", `/v1/schedules/${row.id}`, { enabled: false, name: "paused" })).json() as any;
+    expect(patched).toMatchObject({ enabled: false, name: "paused" });
+
+    expect((await call("DELETE", `/v1/schedules/${row.id}`, undefined, B)).status).toBe(404);
+    expect(await (await call("DELETE", `/v1/schedules/${row.id}`)).json()).toEqual({ id: row.id, type: "schedule_deleted" });
+    expect(store.schedules.has(row.id)).toBe(false);
+  });
+
+  it("rejects bad cron / action / foreign agent and accepts session.message", async () => {
+    const agent = seed.agent(A);
+    const envRow = seed.environment(A);
+    const session = seed.session(A);
+    expect((await call("POST", "/v1/schedules", { cron: "not-a-cron", action: { type: "session.create", agent_id: agent.id, environment_id: envRow.id, message: "x" } })).status).toBe(400);
+    expect((await call("POST", "/v1/schedules", { cron: "0 * * * *", action: { type: "session.create", agent_id: agent.id, environment_id: envRow.id } })).status).toBe(400);
+    const foreign = seed.agent(B);
+    expect((await call("POST", "/v1/schedules", { cron: "0 * * * *", action: { type: "session.create", agent_id: foreign.id, environment_id: envRow.id, message: "x" } })).status).toBe(404);
+    const ok = await call("POST", "/v1/schedules", { cron: "*/5 * * * *", action: { type: "session.message", session_id: session.id, message: "ping" } });
+    expect(ok.status).toBe(201);
+    expect(await ok.json()).toMatchObject({ action: { type: "session.message", session_id: session.id, message: "ping" } });
+  });
+});
+
 describe("vaults", () => {
   it("POST /:id/credentials without PMA_SECRET_KEY -> 400 before any DB write", async () => {
     env.PMA_SECRET_KEY = "";
