@@ -210,6 +210,15 @@ The diagram source is `docs/architecture.archify.json`. The rendered HTML is a b
 bash scripts/diagram.sh --open   # renders docs/architecture.html and opens it
 ```
 
+## Operator console (`/`)
+
+The API serves a small dependency-free console at `/` (same origin as `/v1`). From a fresh
+`docker compose up` you can create an agent and environment, start a session, send a user message,
+watch the SSE event tail, and resolve pending `user.tool_confirmation` / client `tool_result`
+prompts without installing `pma`. Bearer auth: click **API key** (kept in `localStorage`); with
+`AUTH_REQUIRED=false` requests act as `prc_local`. Layout stacks the session list above the timeline
+on narrow viewports.
+
 ## Local development without docker
 
 Requires Node 22+, a Postgres, and a Redis (for example `brew services start postgresql@16 redis`, then `createdb pi`).
