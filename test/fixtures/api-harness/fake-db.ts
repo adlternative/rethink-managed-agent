@@ -27,6 +27,9 @@ export const store = {
   memoryStores: new Map<string, Row>(),
   vaults: new Map<string, Row>(),
   creds: new Map<string, Row>(),
+  channelIntegrations: new Map<string, Row>(),
+  channelThreads: new Map<string, Row>(),
+  channelEventIds: new Set<string>(),
   sandboxes: new Map<string, Row>(),
   toolOutputs: new Map<string, Row>(),
   ops: [] as string[],
@@ -47,6 +50,7 @@ const list = (m: Map<string, Row>, sc: Scope) => [...m.values()].filter((r) => v
 export function reset(): void {
   for (const v of Object.values(store)) if (v instanceof Map || v instanceof Set) v.clear();
   store.ops.length = 0; store.pollCalls.length = 0; store.results.length = 0; store.hooks = {};
+  store.channelEventIds.clear();
 }
 
 /** Seed helpers (bypass the op log). */
@@ -134,7 +138,7 @@ export const repos = {
   sessions: {
     async create(input: Row) {
       const envs = input.environments?.length ? input.environments : [{ key: "main", environment_id: input.environment_id, workspace_id: input.workspace_id }];
-      const s = { id: newId("sess"), owner_id: input.owner_id, agent_id: input.agent_id, environment_id: input.environment_id, workspace_id: input.workspace_id, agent: clone(input.agent), parent_id: input.parent_id ?? null, memory_stores: clone(input.memory_stores ?? []), vault_ids: input.vault_ids ?? [], container_group: null, status: "idle", usage: {}, context: null, environments: clone(envs), created_at: now(), updated_at: now() };
+      const s = { id: newId("sess"), owner_id: input.owner_id, agent_id: input.agent_id, environment_id: input.environment_id, workspace_id: input.workspace_id, agent: clone(input.agent), parent_id: input.parent_id ?? null, memory_stores: clone(input.memory_stores ?? []), vault_ids: input.vault_ids ?? [], metadata: clone(input.metadata ?? {}), container_group: null, status: "idle", usage: {}, context: null, environments: clone(envs), created_at: now(), updated_at: now() };
       store.sessions.set(s.id, s); store.events.set(s.id, []); store.ops.push(`sessions.create:${s.id}`);
       return clone(s);
     },
@@ -239,4 +243,58 @@ export const vaultCredentials = {
     return false;
   },
 };
-export async function vaultSecrets() { return {}; }
+export async function vaultSecrets(ownerId: string, vaultIds: string[]): Promise<Record<string, string>> {
+  const { open } = await import("../../../src/infra/secrets.ts");
+  const out: Record<string, string> = {};
+  for (const vaultId of vaultIds) {
+    const v = store.vaults.get(vaultId);
+    if (!v || v.owner_id !== ownerId) continue;
+    for (const c of store.creds.values()) {
+      if (c.vault_id !== vaultId || c.kind !== "environment_variable") continue;
+      try { out[c.name] = open(c.secret); } catch { /* skip */ }
+    }
+  }
+  return out;
+}
+
+export const channelIntegrations = {
+  async create(input: Row) {
+    const r = { id: newId("cint"), created_at: now(), updated_at: now(), enabled: true, config: {}, name: "", ...clone(input) };
+    store.channelIntegrations.set(r.id, r); store.ops.push(`channelIntegrations.create:${r.id}`); return clone(r);
+  },
+  async get(id: string, sc?: Scope) { return get(store.channelIntegrations, id, sc); },
+  async list(sc?: Scope) { return list(store.channelIntegrations, sc); },
+  async update(id: string, patch: Row, sc?: Scope) {
+    const r = store.channelIntegrations.get(id); if (!vis(r, sc)) return null;
+    Object.assign(r!, clone(patch), { updated_at: now() }); return clone(r!);
+  },
+  async delete(id: string, sc?: Scope) {
+    if (!vis(store.channelIntegrations.get(id), sc)) return false;
+    store.channelIntegrations.delete(id); return true;
+  },
+};
+
+export const channelThreads = {
+  async get(integrationId: string, teamId: string, channelId: string, threadTs: string) {
+    const r = [...store.channelThreads.values()].find((t) => t.integration_id === integrationId && t.team_id === teamId && t.channel_id === channelId && t.thread_ts === threadTs);
+    return r ? clone(r) : null;
+  },
+  async bySession(sessionId: string) {
+    const r = [...store.channelThreads.values()].find((t) => t.session_id === sessionId);
+    return r ? clone(r) : null;
+  },
+  async upsert(input: Row) {
+    const key = `${input.integration_id}|${input.team_id}|${input.channel_id}|${input.thread_ts}`;
+    const existing = [...store.channelThreads.entries()].find(([, t]) => `${t.integration_id}|${t.team_id}|${t.channel_id}|${t.thread_ts}` === key);
+    if (existing) return clone(existing[1]);
+    const r = { id: newId("cthr"), created_at: now(), ...clone(input) };
+    store.channelThreads.set(r.id, r); store.ops.push(`channelThreads.upsert:${r.id}`); return clone(r);
+  },
+};
+
+export async function claimChannelEventId(integrationId: string, eventId: string): Promise<boolean> {
+  const key = `${integrationId}|${eventId}`;
+  if (store.channelEventIds.has(key)) return false;
+  store.channelEventIds.add(key);
+  return true;
+}

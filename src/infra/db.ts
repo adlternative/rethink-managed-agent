@@ -22,6 +22,10 @@ import type {
   WorkspaceRef,
   WorkspaceResource,
   WorkspaceSpec,
+  ChannelIntegrationResource,
+  ChannelThreadResource,
+  ChannelKind,
+  SlackIntegrationConfig,
 } from "../shared/types.ts";
 
 /** Ownership scope passed to reads: when present, rows are filtered to this principal. Runner/system calls omit it. */
@@ -615,4 +619,94 @@ export async function mcpVaultCredentials(ownerId: string, vaultIds: string[]): 
      WHERE c.vault_id = ANY($1::text[]) AND v.owner_id = $2 AND c.mcp_server_url IS NOT NULL
      ORDER BY array_position($1::text[], c.vault_id), c.name`,
     [vaultIds, ownerId])).map((r) => iso(r)!);
+}
+
+/** Channel integrations (Slack …): owner-scoped config; secrets stay in the linked vault. */
+export const channelIntegrations = {
+  async create(input: {
+    owner_id: string;
+    kind: ChannelKind;
+    name: string;
+    agent_id: string;
+    environment_id: string;
+    vault_id: string;
+    config?: SlackIntegrationConfig;
+    enabled?: boolean;
+  }): Promise<ChannelIntegrationResource> {
+    const row = await one<ChannelIntegrationResource>(
+      pool,
+      `INSERT INTO channel_integrations (id, owner_id, kind, name, agent_id, environment_id, vault_id, config, enabled)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [newId("cint"), input.owner_id, input.kind, input.name, input.agent_id, input.environment_id, input.vault_id,
+        JSON.stringify(input.config ?? {}), input.enabled !== false],
+    );
+    return iso(row)!;
+  },
+  async get(id: string, scope?: Scope): Promise<ChannelIntegrationResource | null> {
+    return iso(await one<ChannelIntegrationResource>(pool, `SELECT * FROM channel_integrations WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id]));
+  },
+  async list(scope?: Scope): Promise<ChannelIntegrationResource[]> {
+    return isoAll(await many<ChannelIntegrationResource>(pool, `SELECT * FROM channel_integrations${scope ? " WHERE owner_id=$1" : ""} ORDER BY created_at DESC`, scope ? [scope.owner] : []));
+  },
+  async update(id: string, patch: Partial<Pick<ChannelIntegrationResource, "name" | "agent_id" | "environment_id" | "vault_id" | "config" | "enabled">>, scope?: Scope): Promise<ChannelIntegrationResource | null> {
+    const row = await one<ChannelIntegrationResource>(
+      pool,
+      `UPDATE channel_integrations SET
+         name=COALESCE($2,name), agent_id=COALESCE($3,agent_id), environment_id=COALESCE($4,environment_id),
+         vault_id=COALESCE($5,vault_id), config=COALESCE($6::jsonb,config),
+         enabled=CASE WHEN $7::boolean IS NULL THEN enabled ELSE $7 END, updated_at=now()
+       WHERE id=$1${scope ? " AND owner_id=$8" : ""} RETURNING *`,
+      [id, patch.name ?? null, patch.agent_id ?? null, patch.environment_id ?? null, patch.vault_id ?? null,
+        patch.config !== undefined ? JSON.stringify(patch.config) : null,
+        patch.enabled === undefined ? null : patch.enabled, scope ? scope.owner : null],
+    );
+    return iso(row);
+  },
+  async delete(id: string, scope?: Scope): Promise<boolean> {
+    return ((await pool.query(`DELETE FROM channel_integrations WHERE id=$1${scope ? " AND owner_id=$2" : ""}`, scope ? [id, scope.owner] : [id])).rowCount ?? 0) > 0;
+  },
+};
+
+/** Durable channel thread ↔ session mapping. */
+export const channelThreads = {
+  async get(integrationId: string, teamId: string, channelId: string, threadTs: string): Promise<ChannelThreadResource | null> {
+    return iso(await one<ChannelThreadResource>(pool,
+      `SELECT * FROM channel_threads WHERE integration_id=$1 AND team_id=$2 AND channel_id=$3 AND thread_ts=$4`,
+      [integrationId, teamId, channelId, threadTs]));
+  },
+  async bySession(sessionId: string): Promise<ChannelThreadResource | null> {
+    return iso(await one<ChannelThreadResource>(pool, `SELECT * FROM channel_threads WHERE session_id=$1 ORDER BY created_at LIMIT 1`, [sessionId]));
+  },
+  /** Insert or return the existing mapping (unique on integration+team+channel+thread). */
+  async upsert(input: {
+    owner_id: string;
+    integration_id: string;
+    kind: ChannelKind;
+    team_id: string;
+    channel_id: string;
+    thread_ts: string;
+    session_id: string;
+  }): Promise<ChannelThreadResource> {
+    const row = await one<ChannelThreadResource>(
+      pool,
+      `INSERT INTO channel_threads (id, owner_id, integration_id, kind, team_id, channel_id, thread_ts, session_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (integration_id, team_id, channel_id, thread_ts) DO UPDATE SET session_id = channel_threads.session_id
+       RETURNING *`,
+      [newId("cthr"), input.owner_id, input.integration_id, input.kind, input.team_id, input.channel_id, input.thread_ts, input.session_id],
+    );
+    return iso(row)!;
+  },
+};
+
+/**
+ * Claim a provider event id for idempotent intake. Returns true when this is the first time we see
+ * it (caller should process); false when a duplicate retry should be ignored.
+ */
+export async function claimChannelEventId(integrationId: string, eventId: string): Promise<boolean> {
+  const r = await pool.query(
+    `INSERT INTO channel_event_ids (integration_id, event_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+    [integrationId, eventId],
+  );
+  return (r.rowCount ?? 0) > 0;
 }

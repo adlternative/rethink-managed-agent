@@ -522,3 +522,44 @@ export interface RunJob {
   /** owning principal — lets a tenant-scoped brain runner (RUNNER_OWNERS) route only its own sessions */
   owner_id?: string;
 }
+
+// ---------- Channel integrations (Slack first) ----------
+export type ChannelKind = "slack";
+
+/** Non-secret per-integration knobs. Secrets (bot token, signing secret) live in `vault_id`. */
+export interface SlackIntegrationConfig {
+  /** When set, only these Slack channel ids are accepted. Empty/omitted = any channel. */
+  channel_ids?: string[];
+  /** Extra vaults attached to sessions this integration creates (in addition to the secrets vault). */
+  session_vault_ids?: string[];
+  /** Optional bot user id; when set, messages from this user are ignored (also detected via bot_id). */
+  bot_user_id?: string;
+}
+
+export interface ChannelIntegrationResource {
+  id: string;
+  owner_id: string;
+  kind: ChannelKind;
+  name: string;
+  agent_id: AgentId;
+  environment_id: EnvironmentId;
+  /** Vault holding SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET (and never returned as plaintext). */
+  vault_id: string;
+  config: SlackIntegrationConfig;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Durable Slack (etc.) thread ↔ rethink session mapping. */
+export interface ChannelThreadResource {
+  id: string;
+  owner_id: string;
+  integration_id: string;
+  kind: ChannelKind;
+  team_id: string;
+  channel_id: string;
+  thread_ts: string;
+  session_id: SessionId;
+  created_at: string;
+}

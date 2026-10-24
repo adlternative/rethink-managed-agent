@@ -30,6 +30,7 @@ resources:
                  set-system <id> | attach <id> <key>=<env> | mount|unmount <id> <mem> | skill <id> add|remove <skill>
   plugins        list [query]   plugins this deployment ships, with the source to attach
   vaults         list | get <id> | create [name] | delete <id> | credentials list|put|delete <vault> [name]
+  integrations   list | get <id> | create --kind slack --agent A --env E --vault V [...] | delete <id>
   memory-stores  list | get <id> | create <name> [--description D] | delete <id>
   files          list | get <id> | upload <path> | download <id> [--out F] | delete <id>
   skills         list | get <id> | create --file SKILL.md | version <id> --file SKILL.md | delete <id>
@@ -92,6 +93,12 @@ vaults credentials put <vault> <name> (--value-env VAR | --value-stdin | --value
                                       (--mcp-url stores an MCP bearer token: the runner sends it to that server)
 vaults credentials delete <vault> <name>
 (secret values are write-only: the API never returns them; prefer --value-env or --value-stdin over --value, which lands in shell history)`,
+  integrations: `integrations list
+integrations get <id>
+integrations create --kind slack --agent A --env E --vault V [--name N] [--channel-ids C1,C2] [--bot-user-id U]
+       (vault must hold SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET; Request URL = {API}/v1/integrations/{id}/events)
+integrations update <id> [--name N] [--agent A] [--env E] [--vault V] [--enabled true|false] [--channel-ids ...]
+integrations delete <id>`,
   "memory-stores": `memory-stores list
 memory-stores get <id>
 memory-stores create <name> [--description D]
@@ -131,6 +138,7 @@ sandboxes delete <id>`,
 
 export const ALIASES: Record<string, string> = {
   agent: "agents", env: "envs", environment: "envs", environments: "envs", session: "sessions", vault: "vaults",
+  integration: "integrations", channel: "integrations",
   "memory-store": "memory-stores", memory_stores: "memory-stores", memories: "memory-stores", file: "files", skill: "skills",
   provider: "providers", model: "models", sandbox: "sandboxes", whoami: "me",
 };
@@ -358,6 +366,51 @@ async function vaults(c: Ctx, [sub = "list", a, b, d]: string[]): Promise<void> 
   }
 }
 
+async function integrations(c: Ctx, [sub = "list", a]: string[]): Promise<void> {
+  const { api, flags } = c;
+  switch (sub) {
+    case "list": case "ls":
+      return listOut(c, await api.json("GET", "/v1/integrations"), ["ID", "KIND", "NAME", "AGENT", "ENV", "ENABLED"],
+        (r) => [r.id, r.kind, r.name ?? "", r.agent_id, r.environment_id, String(r.enabled)]);
+    case "get": if (!a) usage("integrations"); return c.print(await api.json("GET", `/v1/integrations/${seg(a)}`));
+    case "create": {
+      const kind = str(flags, "kind") ?? "slack";
+      const agent = str(flags, "agent");
+      const envId = str(flags, "env") ?? str(flags, "environment");
+      const vault = str(flags, "vault");
+      if (!agent || !envId || !vault) usage("integrations");
+      const channelIds = list(str(flags, "channel-ids"));
+      const body: Record<string, unknown> = {
+        kind, agent_id: agent, environment_id: envId, vault_id: vault,
+        name: str(flags, "name") ?? "",
+        config: {
+          ...(channelIds?.length ? { channel_ids: channelIds } : {}),
+          ...(str(flags, "bot-user-id") ? { bot_user_id: str(flags, "bot-user-id") } : {}),
+        },
+      };
+      return c.print(await api.json("POST", "/v1/integrations", body));
+    }
+    case "update": {
+      if (!a) usage("integrations");
+      const body: Record<string, unknown> = {};
+      if (str(flags, "name") !== undefined) body.name = str(flags, "name");
+      if (str(flags, "agent")) body.agent_id = str(flags, "agent");
+      if (str(flags, "env") ?? str(flags, "environment")) body.environment_id = str(flags, "env") ?? str(flags, "environment");
+      if (str(flags, "vault")) body.vault_id = str(flags, "vault");
+      if (str(flags, "enabled") !== undefined) body.enabled = str(flags, "enabled") === "true";
+      if (str(flags, "channel-ids") !== undefined || str(flags, "bot-user-id") !== undefined) {
+        body.config = {
+          ...(str(flags, "channel-ids") !== undefined ? { channel_ids: list(str(flags, "channel-ids")) ?? [] } : {}),
+          ...(str(flags, "bot-user-id") !== undefined ? { bot_user_id: str(flags, "bot-user-id") } : {}),
+        };
+      }
+      return c.print(await api.json("PATCH", `/v1/integrations/${seg(a)}`, body));
+    }
+    case "delete": case "rm": if (!a) usage("integrations"); return c.print(await api.json("DELETE", `/v1/integrations/${seg(a)}`));
+    default: usage("integrations");
+  }
+}
+
 async function memoryStores(c: Ctx, [sub = "list", a]: string[]): Promise<void> {
   const { api, flags } = c;
   switch (sub) {
@@ -540,7 +593,7 @@ async function worker(c: Ctx): Promise<void> {
 }
 
 const GROUPS: Record<string, (c: Ctx, args: string[]) => Promise<void>> = {
-  agents, envs, sessions, vaults, "memory-stores": memoryStores, files, skills, providers, sandboxes,
+  agents, envs, sessions, vaults, integrations, "memory-stores": memoryStores, files, skills, providers, sandboxes,
   plugins: async (c, [sub = "list", q]) => {
     if (sub !== "list" && sub !== "ls" && sub !== "search") { q = sub; sub = "list"; } // `plugins <query>` is a search
     const r = await c.api.json("GET", `/v1/plugins${q ? `?q=${seg(q)}` : ""}`);

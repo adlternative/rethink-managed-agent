@@ -11,6 +11,7 @@ Bring the stack up (`make up`) with a model provider, then run one with `npx tsx
 | [`doc-review/`](doc-review/) | Bulk invoice/contract review | **multi-agent** — `multi_agent` maps to the team plugin; the lead agent spawns parallel subagents (real child sessions) and aggregates |
 | [`docs-qa/`](docs-qa/) | Quickstart docs Q&A | **real MCP over HTTP** — a `{type:'mcp'}` tool connects (server-side) to the public OpenAI docs MCP server; the agent calls its tools and cites a doc |
 | [`dreamer/`](dreamer/) | Managed Agents "Dreaming" | **scheduled cross-session learning** — reads recent sessions' event logs, distills learnings, and writes them into tenant memory (`plugins/memory`) for future sessions |
+| [`slack-coding-agent/`](slack-coding-agent/) | (Omnara Slack coding agent parity) | **Slack thread channel** — mention → session, in-thread replies, Allow/Deny for `always_ask` (see `docs/CHANNELS.md`) |
 
 All three were run end-to-end against the live stack with the local Qoder model. Watch any run at
 **http://localhost:8080/** (the dashboard) or via `GET /v1/sessions/:id/events`.

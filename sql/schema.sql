@@ -298,3 +298,47 @@ CREATE INDEX IF NOT EXISTS events_session_type_seq ON events(session_id, type, s
 -- snapshot and the runner still reads the environment): hidden from owner-scoped reads, unusable for new sessions.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+-- ============================================================================
+-- Channel integrations (Slack first; Discord/GitHub share the same mapping tables later)
+-- Bot token + signing secret live in a vault as SLACK_BOT_TOKEN / SLACK_SIGNING_SECRET — never in
+-- config JSONB and never in the event log.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS channel_integrations (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES principals(id),
+  kind TEXT NOT NULL,                       -- 'slack' (v1)
+  name TEXT NOT NULL DEFAULT '',
+  agent_id TEXT NOT NULL,
+  environment_id TEXT NOT NULL,
+  vault_id TEXT NOT NULL,                   -- vault holding channel secrets
+  config JSONB NOT NULL DEFAULT '{}',       -- non-secret: channel allowlist, session_vault_ids, …
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS channel_integrations_owner ON channel_integrations(owner_id);
+CREATE INDEX IF NOT EXISTS channel_integrations_kind ON channel_integrations(kind) WHERE enabled;
+
+-- Durable thread ↔ session mapping (survives API/runner restarts).
+CREATE TABLE IF NOT EXISTS channel_threads (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES principals(id),
+  integration_id TEXT NOT NULL REFERENCES channel_integrations(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  team_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  thread_ts TEXT NOT NULL,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (integration_id, team_id, channel_id, thread_ts)
+);
+CREATE INDEX IF NOT EXISTS channel_threads_session ON channel_threads(session_id);
+
+-- Idempotent intake of provider event ids (Slack retries with the same event_id).
+CREATE TABLE IF NOT EXISTS channel_event_ids (
+  integration_id TEXT NOT NULL REFERENCES channel_integrations(id) ON DELETE CASCADE,
+  event_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (integration_id, event_id)
+);
