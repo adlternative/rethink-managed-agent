@@ -13,7 +13,7 @@ Bring the stack up (`make up`) with a model provider, then run one with `npx tsx
 | [`dreamer/`](dreamer/) | Managed Agents "Dreaming" | **scheduled cross-session learning** — reads recent sessions' event logs, distills learnings, and writes them into tenant memory (`plugins/memory`) for future sessions |
 
 All three were run end-to-end against the live stack with the local Qoder model. Watch any run at
-**http://localhost:8080/** (the dashboard) or via `GET /v1/sessions/:id/events`.
+**http://localhost:8080/** (the operator console) or via `GET /v1/sessions/:id/events`.
 
 `doc-review` needs the team plugin wired on the API: `COMPAT_TEAM_PACKAGE=/app/plugins/team` (already set
 in `docker-compose.yml`). `web_search` maps to the existing `plugins/web-search` pi plugin (`COMPAT_WEBSEARCH_PACKAGE`), which needs `plugin_host=sandbox` + `network=bridge` on the environment to run. Still accepted-and-ignored unless wired: `programmatic_tool_calling`.

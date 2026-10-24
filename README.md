@@ -37,6 +37,11 @@ pma agents create coder qoder/auto --tools bash,read,write,edit
 pma                                   # chat; first message starts a session
 ```
 
+Or skip the CLI: open **http://localhost:8080/** for the operator console — create an agent and
+environment, start a session, send a message, live-tail the event log, and approve pending tool
+confirmations / client-tool results. With `AUTH_REQUIRED=false` (default) no key is needed; otherwise
+use **API key** (stored in `localStorage`).
+
 The same CLI is scriptable (`npm run cli -- <command>` also works; `PMA_API` defaults to
 `http://localhost:8080`; when `AUTH_REQUIRED=true`, pass a bearer key as `PMA_API_KEY`):
 

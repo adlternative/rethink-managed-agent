@@ -37,7 +37,7 @@
    cp .env.example .env
    docker compose up --build
    ```
-3. 浏览器打开 **http://localhost:8080/** 看只读看板:会话列表、每个会话的事件时间线(消息、工具调用与结果、状态)、以及 SSE 实时 tail。
+3. 浏览器打开 **http://localhost:8080/** 用操作台:创建 agent/environment、开 session、发消息、SSE 实时尾随事件日志,并处理待确认的工具调用 / client-tool 结果。`AUTH_REQUIRED=false`(默认)无需密钥;否则点 **API key** 写入 `localStorage`。
 
 用自带 CLI 手动操作(`npm run cli -- <命令>`;`PMA_API` 默认 `http://localhost:8080`,旧的 `PI_API` 仍可用;开启 `AUTH_REQUIRED=true` 时用 `PMA_API_KEY` 传 Bearer key):
 ```sh
