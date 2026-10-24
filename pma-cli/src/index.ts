@@ -25,7 +25,7 @@ usage:
   pma --workspace-id <id>               reuse an existing workspace (shares its sandbox)
 
 subcommands:
-  login [--host URL] [--token T]        configure the API host (default http://localhost:8080)
+  login [--host URL] [--token T]        device-login (browser) or paste --token; writes ~/.pma/config.json
   config [--host U] [--agent ID] [--env ID] [--header k:v]   set / show defaults
   logout
   models
@@ -55,7 +55,7 @@ if (argv[0] && SUBCOMMANDS.has(argv[0])) {
   try {
     switch (argv[0]) {
       case "config": (await import("./cli/config.ts")).cmdConfig(sub); break;
-      case "login": (await import("./cli/login.ts")).cmdLogin(sub); break;
+      case "login": await (await import("./cli/login.ts")).cmdLogin(sub); break;
       case "logout": (await import("./cli/login.ts")).cmdLogout(); break;
       case "files": await (await import("./cli/files.ts")).cmdFiles(sub); break;
       case "skills": await (await import("./cli/skills.ts")).cmdSkills(sub); break;

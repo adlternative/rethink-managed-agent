@@ -1,4 +1,4 @@
-.PHONY: help up up-min down logs e2e test typecheck cli-build install install-dev uninstall diagram demo
+.PHONY: help up up-min down logs e2e test typecheck openapi-check cli-build sdk-build install install-dev uninstall diagram demo
 
 help:
 	@echo "make up          start the full stack (postgres/redis/minio/api/runner)"
@@ -6,7 +6,9 @@ help:
 	@echo "make down        stop the stack"
 	@echo "make logs        tail api + runner logs"
 	@echo "make e2e         run scripts/e2e.sh against the running stack"
-	@echo "make test        typecheck + vitest (server) and typecheck (cli)"
+	@echo "make test        typecheck + openapi-check + vitest (server) and typecheck (cli + sdk)"
+	@echo "make openapi-check  fail if openapi/v1.yaml drifts from openapi/route-inventory.ts"
+	@echo "make sdk-build   compile packages/sdk (pma-sdk)"
 	@echo "make install     build pma-cli and install 'pma' into ~/.local/bin (a copy: rerun after changes)"
 	@echo "make install-dev install 'pma' as a live wrapper over this working copy (no rebuild after edits)"
 	@echo "make uninstall   remove ~/.local/bin/pma"
@@ -28,8 +30,15 @@ e2e:
 typecheck:
 	npx tsc --noEmit -p tsconfig.json
 	cd pma-cli && npx tsc --noEmit -p tsconfig.json
+	npx tsc --noEmit -p packages/sdk/tsconfig.json
 
-test: typecheck
+openapi-check:
+	npx tsx scripts/openapi-check.ts
+
+sdk-build:
+	cd packages/sdk && npm install --include=dev && npm run build
+
+test: typecheck openapi-check
 	npx vitest run
 
 cli-build:

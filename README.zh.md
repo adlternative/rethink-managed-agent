@@ -39,8 +39,9 @@
    ```
 3. 浏览器打开 **http://localhost:8080/** 看只读看板:会话列表、每个会话的事件时间线(消息、工具调用与结果、状态)、以及 SSE 实时 tail。
 
-用自带 CLI 手动操作(`npm run cli -- <命令>`;`PMA_API` 默认 `http://localhost:8080`,旧的 `PI_API` 仍可用;开启 `AUTH_REQUIRED=true` 时用 `PMA_API_KEY` 传 Bearer key):
+用自带 CLI 手动操作(`npm run cli -- <命令>`;`PMA_API` 默认 `http://localhost:8080`,旧的 `PI_API` 仍可用;开启 `AUTH_REQUIRED=true` 时用 `pma login` 设备授权或 `PMA_API_KEY`):
 ```sh
+pma login --host http://localhost:8080                   # 浏览器设备授权,写入 ~/.pma/config.json
 npm run cli -- agents create dev qoder/ultimate          # 旧写法 agent create --name dev --provider qoder --model ultimate 仍可用
 npm run cli -- envs create local --provider local
 npm run cli -- sessions create --agent agent_xxx --env env_xxx
@@ -51,9 +52,11 @@ npm run cli -- --help                                    # 全部命令;<命令>
 ```
 资源命令(agents/envs/sessions/vaults/memory-stores/files/skills/providers/sandboxes/models)与 `pma` 客户端一致,另有 `send`/`stream`/`events`/`interrupt` 和 BYOC 的 `worker --env <id> --key <worker_key>`。列表默认打表格,`--json` 输出原始 JSON;退出码 0 成功、1 API/网络/运行失败或超时、2 用法错误。
 
+原生 `/v1` 的 OpenAPI 见 [`openapi/v1.yaml`](openapi/v1.yaml)(服务端 `GET /openapi/v1.yaml`),TypeScript 客户端包为 [`packages/sdk`](packages/sdk)(`npm install pma-sdk`)。
+
 ## 身份与归属(多租户)
 
-每个顶层资源都归属一个 **principal**(多态主体:用户/组织/服务账号)。请求的主体从 `Authorization: Bearer <token>` 经 `api_keys` 解析,读写都按它 scope,一个主体看不到也改不了另一个主体的资源。`AUTH_REQUIRED=false`(默认)时无 token 回落到 `prc_local`,单机零改动。**身份来源是可插拔的**:把 `PRINCIPAL_RESOLVER` 指向一个模块即可接入自己的 JWT/OIDC、可信网关头、mTLS、每租户 key——平台只守隔离边界,"用户/组织"的语义交给业务侧。详见 DESIGN 第 15 节。
+每个顶层资源都归属一个 **principal**(多态主体:用户/组织/服务账号)。请求的主体从 `Authorization: Bearer <token>` 经 `api_keys` 解析,读写都按它 scope,一个主体看不到也改不了另一个主体的资源。`AUTH_REQUIRED=false`(默认)时无 token 回落到 `prc_local`,单机零改动。生产环境用 `pma login` 走设备授权,无需手写 HTTP 造 key。**身份来源是可插拔的**:把 `PRINCIPAL_RESOLVER` 指向一个模块即可接入自己的 JWT/OIDC、可信网关头、mTLS、每租户 key——平台只守隔离边界,"用户/组织"的语义交给业务侧。详见 DESIGN 第 15 节。
 
 ## 模型来自 provider 行,跟本仓库无关
 

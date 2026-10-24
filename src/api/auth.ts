@@ -16,6 +16,8 @@ export function auth(): MiddlewareHandler {
   return async (c, next) => {
     // BYOC worker endpoints authenticate machine-to-machine with x-worker-key, not a principal.
     if (/^\/v1\/environments\/[^/]+\/worker(\/|$)/.test(c.req.path)) return next();
+    // Device-authorization endpoints are public (CLI polls; browser approves with optional pasted key).
+    if (/^\/v1\/auth\/device(\/|$)/.test(c.req.path)) return next();
 
     const resolver = await loadResolver();
     const identity = await resolver.resolve({ header: (n) => c.req.header(n), method: c.req.method, path: c.req.path });

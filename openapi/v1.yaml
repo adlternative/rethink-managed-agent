@@ -1,0 +1,1073 @@
+openapi: 3.1.0
+info:
+  title: rethink-managed-agent native API
+  version: 0.1.0
+  description: |
+    Native `/v1` HTTP API for rethink-managed-agent.
+
+    Compatibility dialects (`/openai/v1`, `/anthropic`, `/agents-api/v1`) are **out of scope** for this
+    document — they share auth but have separate shapes. See README "Compatibility surfaces".
+
+    Auth: `Authorization: Bearer <pma_…>` when `AUTH_REQUIRED=true`. Device login:
+    `POST /v1/auth/device/code` → browser `/login/device` → poll `POST /v1/auth/device/token`.
+servers:
+  - url: http://localhost:8080
+    description: Local compose default
+tags:
+  - name: auth
+  - name: identity
+  - name: agents
+  - name: environments
+  - name: sessions
+  - name: events
+  - name: vaults
+  - name: providers
+  - name: models
+  - name: sandboxes
+  - name: files
+  - name: skills
+  - name: memory_stores
+  - name: plugins
+paths:
+  /v1/auth/device/code:
+    post:
+      tags: [auth]
+      summary: Start a device-authorization flow for CLI login
+      operationId: createDeviceCode
+      responses:
+        "200":
+          description: Device and user codes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceCodeResponse"
+    get:
+      tags: [auth]
+      summary: Inspect a user code (browser preflight)
+      operationId: getDeviceUserCode
+      parameters:
+        - name: user_code
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Pending / approved / expired status
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/auth/device/approve:
+    post:
+      tags: [auth]
+      summary: Approve a device code from the browser
+      operationId: approveDeviceCode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_code]
+              properties:
+                user_code: { type: string }
+                display_name: { type: string }
+                api_key: { type: string, description: Optional existing bearer to authorize as that principal }
+      responses:
+        "200":
+          description: Approved; CLI poll will receive a token
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+  /v1/auth/device/token:
+    post:
+      tags: [auth]
+      summary: Poll for the access token after browser approval
+      operationId: exchangeDeviceToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_code]
+              properties:
+                device_code: { type: string }
+                grant_type:
+                  type: string
+                  enum: [urn:ietf:params:oauth:grant-type:device_code]
+      responses:
+        "200":
+          description: Token issued once
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceTokenResponse"
+        "400":
+          description: authorization_pending | expired_token | access_denied | invalid_request
+  /v1/me:
+    get:
+      tags: [identity]
+      summary: Calling principal
+      operationId: getMe
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Principal"
+  /v1/principals:
+    get:
+      tags: [identity]
+      summary: List principals
+      operationId: listPrincipals
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Principal" }
+    post:
+      tags: [identity]
+      summary: Create a principal
+      operationId: createPrincipal
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind: { type: string, enum: [user, org, service] }
+                handle: { type: string, nullable: true }
+                display_name: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Principal"
+  /v1/principals/{id}:
+    get:
+      tags: [identity]
+      summary: Get a principal
+      operationId: getPrincipal
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Principal"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/api_keys:
+    post:
+      tags: [identity]
+      summary: Mint a bearer API key (plaintext returned once)
+      operationId: createApiKey
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                principal_id: { type: string }
+                name: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyCreated"
+  /v1/agents:
+    get:
+      tags: [agents]
+      summary: List agents
+      operationId: listAgents
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Agent" }
+    post:
+      tags: [agents]
+      summary: Create an agent
+      operationId: createAgent
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+  /v1/agents/{id}:
+    get:
+      tags: [agents]
+      operationId: getAgent
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [agents]
+      operationId: updateAgent
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCreate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+    delete:
+      tags: [agents]
+      operationId: deleteAgent
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Deleted or archived
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/environments:
+    get:
+      tags: [environments]
+      operationId: listEnvironments
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Environment" }
+    post:
+      tags: [environments]
+      operationId: createEnvironment
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnvironmentCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Environment" }
+  /v1/environments/{id}:
+    get:
+      tags: [environments]
+      operationId: getEnvironment
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Environment" }
+    delete:
+      tags: [environments]
+      operationId: deleteEnvironment
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Deleted or archived
+  /v1/environments/{id}/worker/poll:
+    post:
+      tags: [environments]
+      summary: BYOC worker long-poll (x-worker-key; no principal auth)
+      operationId: workerPoll
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Work item or wait
+  /v1/environments/{id}/worker/result:
+    post:
+      tags: [environments]
+      summary: BYOC worker result push
+      operationId: workerResult
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Accepted
+  /v1/sessions:
+    get:
+      tags: [sessions]
+      operationId: listSessions
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [idle, running, terminated] }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Session" }
+                  has_more: { type: boolean }
+                  next_cursor: { type: string, nullable: true }
+    post:
+      tags: [sessions]
+      operationId: createSession
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+  /v1/sessions/{id}:
+    get:
+      tags: [sessions]
+      operationId: getSession
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+    patch:
+      tags: [sessions]
+      operationId: patchSession
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                system: { type: string, nullable: true }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+    delete:
+      tags: [sessions]
+      operationId: deleteSession
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204":
+          description: Deleted
+  /v1/sessions/{id}/archive:
+    post:
+      tags: [sessions]
+      operationId: archiveSession
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Terminated
+  /v1/sessions/{id}/system_prompt:
+    get:
+      tags: [sessions]
+      operationId: getSystemPrompt
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Rendered system prompt
+  /v1/sessions/{id}/environments:
+    post:
+      tags: [sessions]
+      operationId: attachSessionEnvironment
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Attached
+  /v1/sessions/{id}/memory_stores:
+    post:
+      tags: [sessions]
+      operationId: mountMemoryStore
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Mounted
+  /v1/sessions/{id}/memory_stores/{storeId}:
+    delete:
+      tags: [sessions]
+      operationId: unmountMemoryStore
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: storeId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Unmounted
+  /v1/sessions/{id}/packages:
+    post:
+      tags: [sessions]
+      operationId: addSessionPackage
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Added
+  /v1/sessions/{id}/packages/{source}:
+    delete:
+      tags: [sessions]
+      operationId: removeSessionPackage
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: source
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Removed
+  /v1/sessions/{id}/skills:
+    post:
+      tags: [sessions]
+      operationId: addSessionSkill
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Added
+  /v1/sessions/{id}/skills/{skillId}:
+    delete:
+      tags: [sessions]
+      operationId: removeSessionSkill
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: skillId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Removed
+  /v1/sessions/{id}/tool-outputs/{toolUseId}:
+    get:
+      tags: [sessions]
+      operationId: getToolOutput
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: toolUseId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Truncated tool output text
+  /v1/sessions/{id}/events:
+    get:
+      tags: [events]
+      summary: Replay persisted events
+      operationId: listEvents
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: since
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/SessionEvent" }
+                  has_more: { type: boolean }
+    post:
+      tags: [events]
+      summary: Append user events (message / interrupt / tool_result / confirmation)
+      operationId: appendEvents
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  items: { $ref: "#/components/schemas/UserEvent" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/SessionEvent" }
+  /v1/sessions/{id}/events/stream:
+    get:
+      tags: [events]
+      summary: SSE event stream (replay then live)
+      operationId: streamEvents
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: since
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: |
+            `text/event-stream`. Each frame has `event:` = type and `data:` = JSON
+            (persisted `SessionEvent` or live delta such as `agent.message_delta`).
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /v1/sandboxes:
+    get:
+      tags: [sandboxes]
+      operationId: listSandboxes
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Lease registry
+  /v1/sandboxes/{id}:
+    get:
+      tags: [sandboxes]
+      operationId: getSandbox
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Sandbox lease
+    delete:
+      tags: [sandboxes]
+      operationId: deleteSandbox
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "202":
+          description: Marked for destroy
+  /v1/sandboxes/{id}/pause:
+    post:
+      tags: [sandboxes]
+      operationId: pauseSandbox
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Pause requested
+  /v1/models:
+    get:
+      tags: [models]
+      operationId: listModels
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Flat model list across enabled providers
+  /v1/providers:
+    get:
+      tags: [providers]
+      operationId: listProviders
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Provider list
+    post:
+      tags: [providers]
+      operationId: createProvider
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Created
+  /v1/providers/{id}:
+    get:
+      tags: [providers]
+      operationId: getProvider
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Provider
+    patch:
+      tags: [providers]
+      operationId: updateProvider
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Updated
+    delete:
+      tags: [providers]
+      operationId: deleteProvider
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Deleted
+  /v1/files:
+    get:
+      tags: [files]
+      operationId: listFiles
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: File list
+    post:
+      tags: [files]
+      operationId: uploadFile
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Uploaded
+  /v1/files/{id}:
+    get:
+      tags: [files]
+      operationId: getFile
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: File metadata
+    delete:
+      tags: [files]
+      operationId: deleteFile
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Deleted
+  /v1/files/{id}/content:
+    get:
+      tags: [files]
+      operationId: getFileContent
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Raw file bytes
+  /v1/skills:
+    get:
+      tags: [skills]
+      operationId: listSkills
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Skill list
+    post:
+      tags: [skills]
+      operationId: createSkill
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Created
+  /v1/skills/{id}:
+    get:
+      tags: [skills]
+      operationId: getSkill
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Skill
+    delete:
+      tags: [skills]
+      operationId: deleteSkill
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Deleted
+  /v1/skills/{id}/versions:
+    post:
+      tags: [skills]
+      operationId: versionSkill
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "201":
+          description: New version
+  /v1/memory_stores:
+    get:
+      tags: [memory_stores]
+      operationId: listMemoryStores
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Store list
+    post:
+      tags: [memory_stores]
+      operationId: createMemoryStore
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Created
+  /v1/memory_stores/{id}:
+    get:
+      tags: [memory_stores]
+      operationId: getMemoryStore
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Store
+    delete:
+      tags: [memory_stores]
+      operationId: deleteMemoryStore
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Deleted
+  /v1/vaults:
+    get:
+      tags: [vaults]
+      operationId: listVaults
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Vault" }
+    post:
+      tags: [vaults]
+      operationId: createVault
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                metadata:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Vault" }
+  /v1/vaults/{id}:
+    get:
+      tags: [vaults]
+      operationId: getVault
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Vault" }
+    delete:
+      tags: [vaults]
+      operationId: deleteVault
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Deleted
+  /v1/vaults/{id}/credentials:
+    get:
+      tags: [vaults]
+      operationId: listVaultCredentials
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Credential metadata (values never returned)
+    post:
+      tags: [vaults]
+      operationId: putVaultCredential
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "201":
+          description: Stored (write-only value)
+  /v1/vaults/{id}/credentials/{name}:
+    delete:
+      tags: [vaults]
+      operationId: deleteVaultCredential
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted
+  /v1/plugins:
+    get:
+      tags: [plugins]
+      operationId: listPlugins
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Bundled plugin catalogue
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: pma
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      properties:
+        type: { type: string, enum: [error] }
+        error:
+          type: object
+          properties:
+            type: { type: string }
+            message: { type: string }
+    Principal:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [user, org, service] }
+        handle: { type: string, nullable: true }
+        display_name: { type: string }
+        created_at: { type: string, format: date-time }
+    ApiKeyCreated:
+      type: object
+      properties:
+        id: { type: string }
+        principal_id: { type: string }
+        token: { type: string }
+        note: { type: string }
+    DeviceCodeResponse:
+      type: object
+      properties:
+        device_code: { type: string }
+        user_code: { type: string }
+        verification_uri: { type: string }
+        verification_uri_complete: { type: string }
+        expires_in: { type: integer }
+        interval: { type: integer }
+    DeviceTokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [bearer] }
+        principal_id: { type: string }
+    ModelRef:
+      type: object
+      required: [provider, id]
+      properties:
+        provider: { type: string }
+        id: { type: string }
+    Agent:
+      type: object
+      properties:
+        id: { type: string }
+        owner_id: { type: string }
+        name: { type: string }
+        model: { $ref: "#/components/schemas/ModelRef" }
+        system: { type: string, nullable: true }
+        tools:
+          type: array
+          items: { type: string, enum: [bash, read, write, edit] }
+        packages:
+          type: array
+          items: { type: string }
+        skills: { type: array, items: { type: object } }
+        created_at: { type: string, format: date-time }
+    AgentCreate:
+      type: object
+      required: [name, model]
+      properties:
+        name: { type: string }
+        model: { $ref: "#/components/schemas/ModelRef" }
+        system: { type: string }
+        tools:
+          type: array
+          items: { type: string }
+        packages:
+          type: array
+          items: { type: string }
+        skills: { type: array }
+        mcp_servers: { type: array }
+    Environment:
+      type: object
+      properties:
+        id: { type: string }
+        owner_id: { type: string }
+        name: { type: string }
+        provider: { type: string, enum: [local, docker, e2b, byoc] }
+        image: { type: string, nullable: true }
+        network: { type: string, enum: [none, bridge] }
+        plugin_host: { type: string, enum: [runner, sandbox] }
+        workspace: { type: object }
+        worker_key: { type: string, nullable: true }
+        worker_key_set: { type: boolean }
+        created_at: { type: string, format: date-time }
+    EnvironmentCreate:
+      type: object
+      required: [name, provider]
+      properties:
+        name: { type: string }
+        provider: { type: string, enum: [local, docker, e2b, byoc] }
+        image: { type: string }
+        network: { type: string, enum: [none, bridge] }
+        plugin_host: { type: string, enum: [runner, sandbox] }
+        workspace: { type: object }
+    Session:
+      type: object
+      properties:
+        id: { type: string }
+        owner_id: { type: string }
+        agent_id: { type: string }
+        environment_id: { type: string }
+        workspace_id: { type: string }
+        status: { type: string, enum: [idle, running, terminated] }
+        agent: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SessionCreate:
+      type: object
+      required: [agent]
+      properties:
+        agent:
+          oneOf:
+            - type: string
+            - type: object
+        environment_id: { type: string }
+        workspace: { type: object }
+        workspace_id: { type: string }
+        environments: { type: array, items: { type: object } }
+        memory_stores: { type: array }
+        vault_ids: { type: array, items: { type: string } }
+        initial_events:
+          type: array
+          items: { $ref: "#/components/schemas/UserEvent" }
+    SessionEvent:
+      type: object
+      properties:
+        id: { type: string }
+        session_id: { type: string }
+        seq: { type: integer }
+        type: { type: string }
+        payload: { type: object }
+        created_at: { type: string, format: date-time }
+    UserEvent:
+      oneOf:
+        - type: object
+          required: [type, content]
+          properties:
+            type: { const: user.message }
+            content:
+              type: array
+              items: { type: object }
+        - type: object
+          required: [type]
+          properties:
+            type: { const: user.interrupt }
+        - type: object
+          required: [type, tool_use_id, content]
+          properties:
+            type: { const: tool_result }
+            tool_use_id: { type: string }
+            content: { type: array, items: { type: object } }
+            is_error: { type: boolean }
+        - type: object
+          required: [type, tool_use_id, result]
+          properties:
+            type: { const: user.tool_confirmation }
+            tool_use_id: { type: string }
+            result: { type: string, enum: [allow, deny] }
+            deny_message: { type: string }
+    Vault:
+      type: object
+      properties:
+        id: { type: string }
+        owner_id: { type: string }
+        name: { type: string }
+        metadata: { type: object }
+        created_at: { type: string, format: date-time }
