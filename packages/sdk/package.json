@@ -1,0 +1,27 @@
+{
+  "name": "pma-sdk",
+  "version": "0.1.0",
+  "description": "Thin TypeScript client for the rethink-managed-agent native /v1 API (sessions, events SSE, agents, environments, vaults).",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist/", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["rethink", "managed-agent", "pma", "sse"],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "22.15.32",
+    "typescript": "5.8.3"
+  }
+}

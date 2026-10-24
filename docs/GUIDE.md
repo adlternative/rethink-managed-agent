@@ -177,15 +177,23 @@ Operator-owned keys keep using `{type:"env", name}`. Without `PMA_SECRET_KEY`, s
 
 Every top-level resource belongs to a **principal** — the polymorphic owner (a user today; `kind` extends to `org`/`service`). A request's principal is resolved from `Authorization: Bearer <token>` against `api_keys`; reads and writes are scoped to it, so one principal never sees or edits another's agents, sessions, files, and so on. Sub-sessions and forked workspaces inherit the parent's owner. See DESIGN §15.
 
-Auth is off by default for local use: with `AUTH_REQUIRED=false` an unauthenticated request acts as `PMA_DEFAULT_PRINCIPAL` (the seeded `prc_local`), so nothing needs a token. Set `AUTH_REQUIRED=true` to require a valid key. Mint identities and keys with:
+Auth is off by default for local use: with `AUTH_REQUIRED=false` an unauthenticated request acts as `PMA_DEFAULT_PRINCIPAL` (the seeded `prc_local`), so nothing needs a token. Set `AUTH_REQUIRED=true` to require a valid key.
+
+**CLI login (preferred).** `pma login --host https://your-api` starts a device-authorization flow: the CLI opens `/login/device`, you approve in the browser, and a bearer token is stored in `~/.pma/config.json`. No manual `curl` to mint keys. With `AUTH_REQUIRED=true`, approving without an existing key creates a new principal when `DEVICE_LOGIN_SIGNUP=true` (default); otherwise paste an existing key on the page or use `pma login --token pma_…`.
+
+Mint identities and keys over HTTP when you need to:
 
 ```
+POST /v1/auth/device/code                                 -> device_code + user_code (public)
+POST /v1/auth/device/approve  {user_code, api_key?}       -> bind principal (public; optional pasted key)
+POST /v1/auth/device/token    {device_code}                -> {access_token} once approved
 POST /v1/principals   {kind?, handle?, display_name?}     -> a principal (prc_...)
 POST /v1/api_keys     {principal_id?, name?}              -> {token}  (shown once)
 GET  /v1/me                                               -> the calling principal
+GET  /openapi/v1.yaml                                     -> native /v1 OpenAPI
 ```
 
-Then call the API with `Authorization: Bearer pma_...`. The BYOC worker endpoints authenticate with `x-worker-key` instead and bypass principal auth.
+Then call the API with `Authorization: Bearer pma_...`, or use `npm install pma-sdk` (`packages/sdk`). The BYOC worker endpoints authenticate with `x-worker-key` instead and bypass principal auth. Device-auth routes are also public (auth middleware skips them).
 
 **Bring your own identity.** rethink owns the *isolation* boundary (every resource carries `owner_id`, enforced in the repos) but not what a "user"/"org" means. *How* a credential becomes a principal is a pluggable resolver: point `PRINCIPAL_RESOLVER` at a module that default-exports a `PrincipalResolver` (`src/api/principal-resolver.ts`) and the consuming business plugs in its own auth — a verified JWT/OIDC, a trusted gateway header, mTLS, a per-tenant key. The resolver returns `{actor, owner?}`; everything downstream sees only `owner`, and returning an `owner` different from `actor` is where org scoping slots in later. The built-in default is Bearer→`api_keys`; `src/api/resolvers/trusted-header.ts` is a ready example (trusts an upstream gateway's `x-principal-id`, with `x-org-id` selecting the owner). So run many tenants in one deployment with principal isolation, or give a tenant that needs physical separation its own stack.
 

@@ -20,11 +20,14 @@ import { anthropicAgents } from "./routes/compat/anthropic.ts";
 import { plugins } from "./routes/plugins.ts";
 import { vaultsRoute } from "./routes/vaults.ts";
 import { ui } from "./routes/ui.ts";
+import { deviceAuthRoute, deviceLoginUi } from "./routes/device-auth.ts";
 import { auth } from "./auth.ts";
 import { ensureBucket } from "../infra/blobs.ts";
 import { counter, histogram, render as renderMetrics } from "../infra/metrics.ts";
 import { log } from "../infra/log.ts";
 import { newId } from "../shared/ids.ts";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 const httpReqs = counter("http_requests_total", "HTTP requests by method, route and status");
 const httpDur = histogram("http_request_duration_seconds", "HTTP request duration");
@@ -51,7 +54,12 @@ export const app = new Hono<{ Variables: { requestId: string } }>()
   .use("*", bodyLimit((path) => (path.startsWith("/v1/files") ? MAX_FILE_BYTES + 64 * 1024 : env.API_MAX_BODY_BYTES)))
   .get("/healthz", (c) => c.json({ ok: true }))
   .get("/metrics", async (c) => c.text(await renderMetrics(), 200, { "content-type": "text/plain; version=0.0.4" }))
+  .get("/openapi/v1.yaml", async (c) => {
+    const path = fileURLToPath(new URL("../../openapi/v1.yaml", import.meta.url));
+    return c.body(await readFile(path), 200, { "content-type": "application/yaml; charset=utf-8" });
+  })
   .route("/", ui)
+  .route("/", deviceLoginUi)
   .use("/v1/*", auth())
   .use("/agents-api/v1/*", auth())
   .use("/openai/v1/*", auth())
@@ -59,6 +67,7 @@ export const app = new Hono<{ Variables: { requestId: string } }>()
   .route("/agents-api/v1", agentsApi)
   .route("/openai/v1", openaiAgents)
   .route("/anthropic", anthropicAgents)
+  .route("/v1/auth", deviceAuthRoute)
   .route("/v1", principalsRoute)
   .route("/v1/agents", agents)
   .route("/v1/environments", environments)

@@ -13,7 +13,7 @@ make install-dev                                # or: a wrapper that runs this w
                                                 # so edits need no rebuild and no reinstall
 alias pma="node $PWD/bundle/pma.js"
 
-pma login --host http://localhost:8080           # ~/.pma/config.json
+pma login --host http://localhost:8080           # device flow → ~/.pma/config.json (or --token pma_…)
 pma agents create coder qoder/ultimate --system "You are a careful engineer"
 pma envs create dev --provider docker --image node:22-alpine
 pma config --agent <agent_id> --env <env_id>     # defaults used by the TUI and `sessions create`
@@ -28,7 +28,7 @@ pma -r sess_xxx                                  # resume a specific one
 
 | Command | Notes |
 |---|---|
-| `login [--host U] [--token T]` / `logout` | host + optional bearer token |
+| `login [--host U] [--token T] [--no-browser]` / `logout` | device-authorization browser flow, or paste `--token` |
 | `config [--host U] [--agent ID] [--env ID] [--header k:v]` | set / show defaults |
 | `models` | models the runner can resolve (`GET /v1/models`) |
 | `agents list \| get <id> \| create <name> <provider/model> [--system S] [--tools t,t]` | |

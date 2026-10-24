@@ -24,6 +24,7 @@ The loop itself is [pi](https://github.com/badlogic/pi-mono)'s `runAgentLoop`, p
 | Module contract | [ARCHITECTURE.md](ARCHITECTURE.md) · `src/shared/types.ts` |
 | Plugins | [docs/PLUGINS.md](docs/PLUGINS.md) · [docs/WORKFLOWS.md](docs/WORKFLOWS.md) |
 | Terminal client | [pma-cli/README.md](pma-cli/README.md) |
+| OpenAPI + TS client | [openapi/v1.yaml](openapi/v1.yaml) · [packages/sdk](packages/sdk) (`pma-sdk`) |
 
 ## Quickstart
 
@@ -32,13 +33,14 @@ cp .env.example .env
 docker compose up --build -d          # postgres, redis, api, runner
 make install                          # `pma` into ~/.local/bin  (make install-dev for a live wrapper)
 
+pma login --host http://localhost:8080   # optional locally; required happy path when AUTH_REQUIRED=true (browser device flow)
 pma envs create local --provider local
 pma agents create coder qoder/auto --tools bash,read,write,edit
 pma                                   # chat; first message starts a session
 ```
 
 The same CLI is scriptable (`npm run cli -- <command>` also works; `PMA_API` defaults to
-`http://localhost:8080`; when `AUTH_REQUIRED=true`, pass a bearer key as `PMA_API_KEY`):
+`http://localhost:8080`; when `AUTH_REQUIRED=true`, use `pma login` or pass `PMA_API_KEY`):
 
 ```sh
 pma agents create dev qoder/ultimate                             # the older agent create --name … --provider … --model … still works
@@ -49,6 +51,9 @@ pma events sess_xxx
 pma vaults create ci && pma vaults credentials put vlt_xxx GITHUB_TOKEN --value-env GITHUB_TOKEN
 pma --help                                                       # every command; <command> --help for its flags
 ```
+
+**TypeScript client (native `/v1`):** `npm install pma-sdk` (see [`packages/sdk`](packages/sdk)), OpenAPI at
+[`openapi/v1.yaml`](openapi/v1.yaml) / `GET /openapi/v1.yaml`. Compat dialects stay under `/openai/v1` and `/anthropic`.
 
 A model provider is seeded on first start so a fresh clone runs with no key: a local OpenAI-compatible
 proxy at `QODER_BASE_URL`. Point it anywhere, or make your own row — see **Models** below.
@@ -73,6 +78,9 @@ All bodies and responses are JSON. Errors are `{type:"error", error:{type, messa
 | Method | Path | Body / query | Notes |
 |---|---|---|---|
 | GET | `/healthz` | | `{ok:true}` |
+| GET | `/openapi/v1.yaml` | | checked-in OpenAPI for native `/v1` |
+| POST | `/v1/auth/device/code` | | start CLI device login; browser at `/login/device` |
+| POST | `/v1/auth/device/approve` / `/token` | | approve in browser; CLI polls for `access_token` |
 | GET | `/v1/me` | | the authenticated principal |
 | POST | `/v1/principals`, `/v1/api_keys` | | mint a principal / a bearer token (token shown once) |
 | POST | `/v1/agents` | `{name, model:{provider,id}, system?, tools?}` | `tools` defaults to all four builtins |
@@ -213,7 +221,7 @@ reconnects from the last seen seq when the stream drops, and exits once the run 
 idle. Exit codes: `0` ok, `1` API / network error, a run that ended in error, a terminated session or a
 `--timeout`, `2` usage error. Secret values given to `vaults credentials put` are only sent to the API, never printed.
 
-Other targets: `make up` / `make down` / `make logs` (compose), `make e2e`, `make test`, `make diagram`.
+Other targets: `make up` / `make down` / `make logs` (compose), `make e2e`, `make test`, `make openapi-check`, `make sdk-build`, `make diagram`.
 
 ## Configuration
 
@@ -222,6 +230,8 @@ Other targets: `make up` / `make down` / `make logs` (compose), `make e2e`, `mak
 | `DATABASE_URL` | `postgres://pi:pi@localhost:5432/pi` | Postgres (PolarDB-PG is wire compatible) |
 | `AUTH_REQUIRED` | `false` | Require a valid `Authorization: Bearer` key on `/v1/*`; when false, unauthenticated requests act as `PMA_DEFAULT_PRINCIPAL` |
 | `PMA_DEFAULT_PRINCIPAL` | `prc_local` | Principal that unauthenticated (dev) requests act as; seeded by the schema |
+| `DEVICE_LOGIN_SIGNUP` | `true` | When `AUTH_REQUIRED=true`, allow `/login/device` to create a new principal without an existing key |
+| `PMA_PUBLIC_URL` | | Public base URL for device-login links (empty = derive from the request) |
 | `PRINCIPAL_RESOLVER` | | Module that default-exports a `PrincipalResolver` (credential → principal); empty uses the built-in Bearer/`api_keys` resolver |
 | `TRUSTED_PRINCIPAL_HEADER` | `x-principal-id` | Header the `trusted-header` example resolver reads (only safe behind a trusted gateway) |
 | `REDIS_URL` | `redis://localhost:6379` | Queue, pub/sub, steering lists |

@@ -55,6 +55,13 @@ export const env = {
   AUTH_REQUIRED: (process.env.AUTH_REQUIRED ?? "false") === "true",
   /** The principal unauthenticated (dev) requests act as. Seeded by the schema. */
   PMA_DEFAULT_PRINCIPAL: process.env.PMA_DEFAULT_PRINCIPAL ?? "prc_local",
+  /**
+   * When AUTH_REQUIRED=true, allow the device-login browser page to create a new principal without an
+   * existing API key (CLI bootstrap). Set false to require pasting a key (or `pma login --token`).
+   */
+  DEVICE_LOGIN_SIGNUP: (process.env.DEVICE_LOGIN_SIGNUP ?? "true") === "true",
+  /** Public base URL for device-login verification links (e.g. https://pma.example.com). Empty = derive from the request. */
+  PMA_PUBLIC_URL: process.env.PMA_PUBLIC_URL ?? "",
   /** Module (default-exporting a PrincipalResolver) that maps a credential to a principal. Empty = built-in Bearer/api_keys. This is the seam for bringing your own identity (JWT/OIDC, a trusted gateway header, per-tenant key). */
   PRINCIPAL_RESOLVER: process.env.PRINCIPAL_RESOLVER ?? "",
   /** trusted-header resolver only: the header an upstream (already-authenticated) gateway sets to the principal id. */
